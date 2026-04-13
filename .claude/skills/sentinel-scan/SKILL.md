@@ -1,4 +1,5 @@
 # Sentinel Scan
+<!-- Installed copy. Canonical source: templates/.claude/skills/sentinel-scan/SKILL.md -->
 
 Assess the current project state through Sentinel's analytical lenses.
 

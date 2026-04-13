@@ -8,10 +8,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from sentinel.roles.coder import Coder, ExecutionResult
+from sentinel.roles.monitor import Monitor, ScanResult, load_lenses
 from sentinel.roles.planner import Plan, Planner
 from sentinel.roles.researcher import ResearchBrief, Researcher
 from sentinel.roles.reviewer import Reviewer, ReviewResult
-from sentinel.state import ProjectState, gather_state
+from sentinel.state import gather_state
 
 if TYPE_CHECKING:
 
@@ -22,7 +23,7 @@ if TYPE_CHECKING:
 @dataclass
 class CycleResult:
     timestamp: str = ""
-    assessment: ProjectState = field(default_factory=ProjectState)
+    assessment: ScanResult | None = None
     research_briefs: list[ResearchBrief] = field(default_factory=list)
     plan: Plan | None = None
     executions: list[ExecutionResult] = field(default_factory=list)
@@ -35,6 +36,7 @@ class Loop:
     def __init__(self, config: SentinelConfig, router: Router) -> None:
         self.config = config
         self.router = router
+        self.monitor = Monitor(router)
         self.researcher = Researcher(router)
         self.planner = Planner(router)
         self.coder = Coder(router)
@@ -45,8 +47,10 @@ class Loop:
         start = time.time()
         project_path = Path(self.config.project.path)
 
-        # Step 1: ASSESS — gather project state (shared module)
-        assessment = gather_state(project_path)
+        # Step 1: ASSESS — gather state + scan through lenses
+        state = gather_state(project_path)
+        lenses = load_lenses(project_path, self.config.lenses.enabled)
+        assessment = await self.monitor.assess(state, lenses)
 
         # Step 2: RESEARCH — investigate issues found
         research_briefs = await self._research_phase(assessment)
@@ -69,7 +73,7 @@ class Loop:
         )
 
     async def _research_phase(
-        self, assessment: ProjectState,
+        self, assessment: ScanResult,
     ) -> list[ResearchBrief]:
         # TODO(cycle): implement research phase — identify what needs
         # investigating based on assessment, call self.researcher

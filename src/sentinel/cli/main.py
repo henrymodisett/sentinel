@@ -27,11 +27,12 @@ def init() -> None:
 
 
 @main.command()
-def scan() -> None:
+@click.option("--quick", "-q", is_flag=True, help="Quick mode — state summary only, no LLM call")
+def scan(quick: bool) -> None:
     """Assess current project state through lenses."""
     from sentinel.cli.scan_cmd import run_scan
 
-    asyncio.run(run_scan())
+    asyncio.run(run_scan(quick=quick))
 
 
 @main.command()

@@ -1,4 +1,5 @@
 # Sentinel Research
+<!-- Installed copy. Canonical source: templates/.claude/skills/sentinel-research/SKILL.md -->
 
 Deep research on a topic to guide the next engineering decision.
 

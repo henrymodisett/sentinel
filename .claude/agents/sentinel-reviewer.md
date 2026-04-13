@@ -1,4 +1,5 @@
 ---
+<!-- Installed copy. Canonical source: templates/.claude/agents/sentinel-reviewer.md -->
 name: sentinel-reviewer
 description: Reviews completed work against acceptance criteria and project lenses. Independent verification.
 model: sonnet

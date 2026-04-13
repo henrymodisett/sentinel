@@ -1,4 +1,5 @@
 ---
+<!-- Installed copy. Canonical source: templates/.claude/agents/sentinel-monitor.md -->
 name: sentinel-monitor
 description: Scans codebase through multiple lenses to assess project health. Use after code changes or on a schedule.
 model: haiku

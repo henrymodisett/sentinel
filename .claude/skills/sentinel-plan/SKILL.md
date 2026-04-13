@@ -1,4 +1,5 @@
 # Sentinel Plan
+<!-- Installed copy. Canonical source: templates/.claude/skills/sentinel-plan/SKILL.md -->
 
 Generate a prioritized backlog of work items from the current project state.
 

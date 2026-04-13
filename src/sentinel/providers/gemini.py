@@ -26,7 +26,7 @@ class GeminiProvider(Provider):
     cli_command = "gemini"
     capabilities = ProviderCapabilities(
         chat=True,
-        web_search=True,  # native Google Search grounding
+        web_search=True,
         agentic_code=False,
         long_context=True,
         thinking=True,
@@ -35,15 +35,31 @@ class GeminiProvider(Provider):
     def __init__(self, model: str = "gemini-2.5-pro") -> None:
         self.model = model
 
-    async def chat(self, prompt: str, system_prompt: str | None = None) -> ChatResponse:
-        args = ["gemini", "-p", prompt, "-o", "json", "-m", self.model]
-        result = run_cli(args)
+    async def chat(
+        self, prompt: str, system_prompt: str | None = None,
+    ) -> ChatResponse:
+        # Gemini CLI doesn't have a --system-prompt flag, so prepend it
+        full_prompt = prompt
+        if system_prompt:
+            full_prompt = f"{system_prompt}\n\n{prompt}"
+
+        args = ["gemini", "-p", full_prompt, "-o", "json"]
+        # Only pass -m if not the default auto model
+        if self.model and self.model != "auto":
+            args.extend(["-m", self.model])
+
+        result = run_cli(args, timeout=180)
         if result.returncode != 0:
-            return ChatResponse(content=f"Error: {result.stderr}", provider=self.name)
+            return ChatResponse(
+                content=f"Error: {result.stderr.strip()}", provider=self.name,
+            )
 
         data = parse_json_safe(result.stdout)
         if not data:
-            return ChatResponse(content=result.stdout.strip(), provider=self.name)
+            # Gemini CLI sometimes outputs plain text
+            return ChatResponse(
+                content=result.stdout.strip(), provider=self.name, model=self.model,
+            )
 
         # Extract token counts from stats
         stats = data.get("stats", {})
@@ -65,8 +81,6 @@ class GeminiProvider(Provider):
 
     async def research(self, prompt: str) -> ChatResponse:
         """Gemini with Google Search grounding — activates automatically."""
-        # Gemini CLI's built-in extensions include Google Search.
-        # The model decides when to search based on the query.
         return await self.chat(prompt)
 
     def detect(self) -> ProviderStatus:
@@ -77,9 +91,13 @@ class GeminiProvider(Provider):
                 install_hint="npm install -g @google/gemini-cli",
                 auth_hint="gemini (authenticates via browser on first run)",
             )
+        # Check version to confirm it runs
+        result = run_cli(["gemini", "--version"], timeout=10)
+        installed = result.returncode == 0
+
         return ProviderStatus(
-            installed=True,
-            authenticated=True,  # OAuth happens on first use
+            installed=installed,
+            authenticated=installed,
             models=["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"],
             install_hint="npm install -g @google/gemini-cli",
             auth_hint="gemini (authenticates via browser on first run)",
