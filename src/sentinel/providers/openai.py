@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
 
 from sentinel.providers.interface import (
     ChatResponse,
@@ -59,7 +60,12 @@ class OpenAIProvider(Provider):
         self, prompt: str, system_prompt: str | None = None,
     ) -> ChatResponse:
         args = ["codex", "exec", prompt, "--json", "--ephemeral"]
-        result = run_cli(args, timeout=180)
+        try:
+            result = run_cli(args, timeout=300)
+        except subprocess.TimeoutExpired:
+            return ChatResponse(
+                content="Error: Codex CLI timed out after 300s", provider=self.name,
+            )
         if result.returncode != 0:
             return ChatResponse(
                 content=f"Error: {result.stderr.strip()}", provider=self.name,
@@ -82,7 +88,12 @@ class OpenAIProvider(Provider):
             "--json", "--full-auto",
             "-C", working_directory,
         ]
-        result = run_cli(args, timeout=600)
+        try:
+            result = run_cli(args, timeout=600)
+        except subprocess.TimeoutExpired:
+            return ChatResponse(
+                content="Error: Codex CLI timed out after 600s", provider=self.name,
+            )
         if result.returncode != 0:
             return ChatResponse(
                 content=f"Error: {result.stderr.strip()}", provider=self.name,

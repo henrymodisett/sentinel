@@ -9,6 +9,7 @@ Code: `claude -p "prompt" --output-format json` (full agentic mode with tools)
 from __future__ import annotations
 
 import shutil
+import subprocess
 
 from sentinel.providers.interface import (
     ChatResponse,
@@ -45,7 +46,12 @@ class ClaudeProvider(Provider):
         if system_prompt:
             args.extend(["--system-prompt", system_prompt])
 
-        result = run_cli(args, timeout=120)
+        try:
+            result = run_cli(args, timeout=300)
+        except subprocess.TimeoutExpired:
+            return ChatResponse(
+                content="Error: Claude CLI timed out after 300s", provider=self.name,
+            )
         if result.returncode != 0:
             return ChatResponse(
                 content=f"Error: {result.stderr.strip()}", provider=self.name,
@@ -83,7 +89,12 @@ class ClaudeProvider(Provider):
             "--max-turns", "20",
             "--no-session-persistence",
         ]
-        result = run_cli(args, timeout=600)
+        try:
+            result = run_cli(args, timeout=600)
+        except subprocess.TimeoutExpired:
+            return ChatResponse(
+                content="Error: Claude CLI timed out after 600s", provider=self.name,
+            )
         if result.returncode != 0:
             return ChatResponse(
                 content=f"Error: {result.stderr.strip()}", provider=self.name,
