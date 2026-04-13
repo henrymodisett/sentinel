@@ -39,20 +39,28 @@ class ClaudeProvider(Provider):
         args = [
             "claude", "-p", prompt,
             "--output-format", "json",
-            "--bare",
             "--model", self.model,
             "--no-session-persistence",
         ]
         if system_prompt:
             args.extend(["--system-prompt", system_prompt])
 
-        result = run_cli(args)
+        result = run_cli(args, timeout=120)
         if result.returncode != 0:
-            return ChatResponse(content=f"Error: {result.stderr}", provider=self.name)
+            return ChatResponse(
+                content=f"Error: {result.stderr.strip()}", provider=self.name,
+            )
 
         data = parse_json_safe(result.stdout)
         if not data:
             return ChatResponse(content=result.stdout, provider=self.name)
+
+        # Claude CLI returns is_error=true for auth failures etc.
+        if data.get("is_error"):
+            return ChatResponse(
+                content=f"Error: {data.get('result', 'unknown error')}",
+                provider=self.name,
+            )
 
         usage = data.get("usage", {})
         return ChatResponse(
@@ -77,11 +85,19 @@ class ClaudeProvider(Provider):
         ]
         result = run_cli(args, timeout=600)
         if result.returncode != 0:
-            return ChatResponse(content=f"Error: {result.stderr}", provider=self.name)
+            return ChatResponse(
+                content=f"Error: {result.stderr.strip()}", provider=self.name,
+            )
 
         data = parse_json_safe(result.stdout)
         if not data:
             return ChatResponse(content=result.stdout, provider=self.name)
+
+        if data.get("is_error"):
+            return ChatResponse(
+                content=f"Error: {data.get('result', 'unknown error')}",
+                provider=self.name,
+            )
 
         usage = data.get("usage", {})
         return ChatResponse(
@@ -103,14 +119,13 @@ class ClaudeProvider(Provider):
                 install_hint="brew install claude",
                 auth_hint="claude login",
             )
-        # Check if authenticated by running a minimal command
-        result = run_cli(["claude", "-p", "reply with OK", "--bare", "--output-format", "json",
-                          "--no-session-persistence", "--max-turns", "1"], timeout=30)
-        authenticated = result.returncode == 0
+        # Just check if the binary runs — don't make an API call during detection
+        result = run_cli(["claude", "--version"], timeout=10)
+        installed = result.returncode == 0
 
         return ProviderStatus(
-            installed=True,
-            authenticated=authenticated,
+            installed=installed,
+            authenticated=installed,  # trust that if the CLI works, user has authed
             models=["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"],
             install_hint="brew install claude",
             auth_hint="claude login",

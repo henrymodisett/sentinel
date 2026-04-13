@@ -126,3 +126,14 @@ templates/
 1. **Use CLIs, not SDKs.** Each provider CLI handles its own auth. Sentinel never touches API keys. This eliminates an entire class of security concerns and simplifies the install path.
 2. **Derive, don't persist.** State assessments, goals, and plans are derived each cycle from current sources of truth. Persisting them creates a second source of truth that drifts silently.
 3. **Lenses > checklists.** Structured analytical perspectives produce better evaluations than flat checklists because they teach the LLM how to think about a dimension, not just what to check.
+
+## Sentinel Lenses
+
+@lenses/universal/architecture.md
+@lenses/universal/code-quality.md
+@lenses/universal/security.md
+@lenses/universal/testing.md
+@lenses/universal/reliability.md
+@lenses/universal/dependencies.md
+@lenses/universal/technical-debt.md
+@lenses/universal/developer-experience.md

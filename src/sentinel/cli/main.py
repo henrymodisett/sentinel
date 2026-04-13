@@ -1,18 +1,10 @@
 """
 Sentinel CLI — the command-line interface for the meta-agent.
-
-Commands:
-  sentinel init          Interactive setup — configure roles, providers, goals
-  sentinel cycle         Run one full loop cycle
-  sentinel watch         Continuous mode — loop on a schedule
-  sentinel scan          Run just the monitor (assess state)
-  sentinel research      Run just the researcher on a topic
-  sentinel plan          Run monitor + researcher + planner
-  sentinel status        Show current project health and backlog
-  sentinel goals         View or update project goals
-  sentinel config        View or update role configuration
-  sentinel providers     Show provider health and capabilities
 """
+
+from __future__ import annotations
+
+import asyncio
 
 import click
 
@@ -28,13 +20,25 @@ def main() -> None:
 @main.command()
 def init() -> None:
     """Initialize Sentinel in the current project."""
-    # TODO: Interactive setup flow
-    # 1. Detect project type and structure
-    # 2. Ask user to configure each role (provider + model)
-    # 3. Ask for project goals
-    # 4. Set up .sentinel/ directory
-    # 5. If local provider selected, help set up Ollama
-    click.echo("sentinel init — not yet implemented")
+    from sentinel.cli.init_cmd import run_init
+
+    run_init()
+
+
+@main.command()
+def scan() -> None:
+    """Assess current project state through lenses."""
+    from sentinel.cli.scan_cmd import run_scan
+
+    asyncio.run(run_scan())
+
+
+@main.command()
+def providers() -> None:
+    """Show provider health and capabilities."""
+    from sentinel.cli.providers_cmd import run_providers
+
+    run_providers()
 
 
 @main.command()
@@ -47,12 +51,6 @@ def cycle() -> None:
 def watch() -> None:
     """Continuous mode — run the loop on a schedule."""
     click.echo("sentinel watch — not yet implemented")
-
-
-@main.command()
-def scan() -> None:
-    """Run just the monitor — assess current project state."""
-    click.echo("sentinel scan — not yet implemented")
 
 
 @main.command()
@@ -80,19 +78,7 @@ def status() -> None:
     click.echo("sentinel status — not yet implemented")
 
 
-@main.command()
-def goals() -> None:
-    """View or update project goals."""
-    click.echo("sentinel goals — not yet implemented")
-
-
 @main.command("config")
 def config_cmd() -> None:
     """View or update role configuration."""
     click.echo("sentinel config — not yet implemented")
-
-
-@main.command()
-def providers() -> None:
-    """Show provider health and capabilities."""
-    click.echo("sentinel providers — not yet implemented")
