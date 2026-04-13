@@ -66,6 +66,129 @@ def _read_toolkit_command(config_path: Path, key: str) -> str | None:
     return None
 
 
+def detect_project_type(project_path: Path) -> dict:
+    """Detect project type and suggest test/lint commands.
+
+    Returns a dict with 'type', 'test_command', 'lint_command', and
+    'conditional_lenses' based on project files found.
+    """
+    result: dict = {
+        "type": "generic",
+        "test_command": None,
+        "lint_command": None,
+        "conditional_lenses": [],
+    }
+
+    # Swift
+    if (project_path / "Package.swift").exists():
+        result["type"] = "swift"
+        result["test_command"] = "swift test"
+        result["lint_command"] = "swiftlint"
+        result["conditional_lenses"].append("ui-design")
+        result["conditional_lenses"].append("accessibility")
+        result["conditional_lenses"].append("performance")
+
+    # Xcode project (SwiftUI app without Package.swift)
+    elif list(project_path.glob("*.xcodeproj")) or list(project_path.glob("*.xcworkspace")):
+        result["type"] = "xcode"
+        result["test_command"] = "xcodebuild test"
+        result["conditional_lenses"].append("ui-design")
+        result["conditional_lenses"].append("accessibility")
+        result["conditional_lenses"].append("performance")
+
+    # Rust
+    elif (project_path / "Cargo.toml").exists():
+        result["type"] = "rust"
+        result["test_command"] = "cargo test"
+        result["lint_command"] = "cargo clippy"
+        result["conditional_lenses"].append("performance")
+
+    # Go
+    elif (project_path / "go.mod").exists():
+        result["type"] = "go"
+        result["test_command"] = "go test ./..."
+        result["lint_command"] = "golangci-lint run"
+        result["conditional_lenses"].append("performance")
+
+    # Python (uv)
+    elif (project_path / "pyproject.toml").exists():
+        result["type"] = "python"
+        if (project_path / "uv.lock").exists():
+            result["test_command"] = "uv run pytest"
+            result["lint_command"] = "uv run ruff check ."
+        else:
+            result["test_command"] = "pytest"
+            result["lint_command"] = "ruff check ."
+
+    # Node/TypeScript
+    elif (project_path / "package.json").exists():
+        result["type"] = "node"
+        import json
+        try:
+            pkg = json.loads((project_path / "package.json").read_text())
+            scripts = pkg.get("scripts", {})
+            if "test" in scripts:
+                # Detect package manager
+                if (project_path / "pnpm-lock.yaml").exists():
+                    result["test_command"] = "pnpm test"
+                    result["lint_command"] = "pnpm lint" if "lint" in scripts else None
+                elif (project_path / "bun.lock").exists() or (project_path / "bun.lockb").exists():
+                    result["test_command"] = "bun test"
+                    result["lint_command"] = "bun lint" if "lint" in scripts else None
+                else:
+                    result["test_command"] = "npm test"
+                    result["lint_command"] = "npm run lint" if "lint" in scripts else None
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # Detect frontend → enable UI lenses
+    has_frontend = (
+        any(project_path.rglob("*.tsx"))
+        or any(project_path.rglob("*.jsx"))
+        or any(project_path.rglob("*.vue"))
+        or any(project_path.rglob("*.svelte"))
+        or (project_path / "next.config.js").exists()
+        or (project_path / "next.config.ts").exists()
+    )
+    if has_frontend:
+        if "ui-design" not in result["conditional_lenses"]:
+            result["conditional_lenses"].append("ui-design")
+        if "accessibility" not in result["conditional_lenses"]:
+            result["conditional_lenses"].append("accessibility")
+
+    # Detect API → enable API lens
+    has_api = (
+        any(project_path.rglob("**/routes*"))
+        or any(project_path.rglob("**/api*"))
+        or (project_path / "openapi.yaml").exists()
+        or (project_path / "openapi.json").exists()
+    )
+    if has_api:
+        result["conditional_lenses"].append("api-design")
+
+    # Detect database → enable data integrity lens
+    has_db = (
+        any(project_path.rglob("**/migrations*"))
+        or any(project_path.rglob("*.sql"))
+        or (project_path / "prisma").is_dir()
+        or (project_path / "alembic.ini").exists()
+    )
+    if has_db:
+        result["conditional_lenses"].append("data-integrity")
+
+    # Detect cloud infra → enable cost lens
+    has_cloud = (
+        (project_path / "Dockerfile").exists()
+        or (project_path / "docker-compose.yml").exists()
+        or (project_path / "terraform").is_dir()
+        or any(project_path.rglob("*.tf"))
+    )
+    if has_cloud:
+        result["conditional_lenses"].append("cost-efficiency")
+
+    return result
+
+
 def gather_state(project_path: Path) -> ProjectState:
     """Gather the current state of a project.
 
@@ -128,9 +251,12 @@ def gather_state(project_path: Path) -> ProjectState:
     else:
         state.readme = "(no README.md)"
 
-    # Test results
+    # Test results — try toolkit-config first, then auto-detect
     toolkit_config = project_path / ".toolkit-config"
     test_cmd = _read_toolkit_command(toolkit_config, "test_command")
+    if not test_cmd:
+        detected = detect_project_type(project_path)
+        test_cmd = detected.get("test_command")
     if test_cmd:
         try:
             result = _run(test_cmd.split(), project_path, timeout=120)
@@ -149,8 +275,11 @@ def gather_state(project_path: Path) -> ProjectState:
     else:
         state.test_output = "(no test command configured)"
 
-    # Lint results
+    # Lint results — try toolkit-config first, then auto-detect
     lint_cmd = _read_toolkit_command(toolkit_config, "lint_command")
+    if not lint_cmd:
+        detected = detect_project_type(project_path)
+        lint_cmd = detected.get("lint_command")
     if lint_cmd:
         try:
             result = _run(lint_cmd.split(), project_path, timeout=60)
