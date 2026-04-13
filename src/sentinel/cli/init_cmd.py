@@ -170,6 +170,23 @@ def run_init(project_path: str | None = None) -> None:
     else:
         import tomli_w
 
+        # Auto-detect conditional lenses based on project type
+        from sentinel.state import detect_project_type
+
+        detected = detect_project_type(project)
+        base_lenses = list(LensConfig().enabled)
+        for lens in detected.get("conditional_lenses", []):
+            if lens not in base_lenses:
+                base_lenses.append(lens)
+
+        if detected.get("conditional_lenses"):
+            console.print(
+                f"  Detected project type: [bold]{detected['type']}[/bold]"
+            )
+            console.print(
+                f"  Auto-enabled lenses: {', '.join(detected['conditional_lenses'])}"
+            )
+
         config_dict = {
             "project": {"name": project.name, "path": str(project)},
             "roles": {
@@ -177,7 +194,7 @@ def run_init(project_path: str | None = None) -> None:
                 for role, (prov, model) in role_assignments.items()
             },
             "budget": {"daily_limit_usd": 15.0, "warn_at_usd": 10.0},
-            "lenses": {"enabled": LensConfig().enabled},
+            "lenses": {"enabled": base_lenses},
         }
         config_path.write_bytes(tomli_w.dumps(config_dict).encode())
         console.print("  [green]✓[/green] Created .sentinel/config.toml")

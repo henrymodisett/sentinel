@@ -47,10 +47,10 @@ class ClaudeProvider(Provider):
             args.extend(["--system-prompt", system_prompt])
 
         try:
-            result = run_cli(args, timeout=300)
+            result = run_cli(args, timeout=600)
         except subprocess.TimeoutExpired:
             return ChatResponse(
-                content="Error: Claude CLI timed out after 300s", provider=self.name,
+                content="Error: Claude CLI timed out after 600s", provider=self.name,
             )
         if result.returncode != 0:
             return ChatResponse(
