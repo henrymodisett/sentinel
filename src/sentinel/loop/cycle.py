@@ -1,4 +1,4 @@
-"""Core loop cycle implementation."""
+"""Core loop cycle — the five-step cycle that drives Sentinel."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from sentinel.roles.researcher import ResearchBrief, Researcher
 from sentinel.roles.reviewer import Reviewer, ReviewResult
 
 if TYPE_CHECKING:
-    from sentinel.config.schema import Goals, SentinelConfig
+    from sentinel.config.schema import SentinelConfig
     from sentinel.providers.router import Router
 
 
@@ -40,24 +40,22 @@ class Loop:
         self.reviewer = Reviewer(router)
 
     async def cycle(self) -> CycleResult:
-        """Run one full cycle of the loop."""
+        """Run one full cycle: assess → research → plan → execute → review."""
         start = time.time()
-        goals = self.config.goals
-        if not goals:
-            raise ValueError("No goals configured. Run `sentinel goals` to set project goals.")
+        project_path = self.config.project.path
+        active_lenses = self.config.lenses.enabled
 
-        # Step 1: KNOW GOALS — already in config
-        # Step 2: ASSESS STATE
-        assessment = await self.monitor.assess(self.config.project.path)
+        # Step 1: ASSESS — Monitor scans through lenses
+        assessment = await self.monitor.assess(project_path, active_lenses)
 
-        # Step 3: RESEARCH
-        research_briefs = await self._research_phase(goals, assessment)
+        # Step 2: RESEARCH — investigate issues found
+        research_briefs = await self._research_phase(assessment)
 
-        # Step 4: PLAN
-        plan = await self.planner.plan(goals, assessment, research_briefs)
+        # Step 3: PLAN — create prioritized work items
+        plan = await self.planner.plan(assessment, research_briefs)
 
-        # Step 5: DELEGATE
-        executions, reviews = await self._execute_phase(plan)
+        # Step 4: DELEGATE — execute and review
+        executions, reviews = await self._execute_phase(plan, project_path)
 
         return CycleResult(
             timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -66,29 +64,26 @@ class Loop:
             plan=plan,
             executions=executions,
             reviews=reviews,
-            total_cost_usd=sum(e.usage.cost_usd for e in executions),
+            total_cost_usd=sum(e.cost_usd for e in executions),
             duration_ms=int((time.time() - start) * 1000),
         )
 
-    async def _research_phase(
-        self, goals: Goals, assessment: StateAssessment
-    ) -> list[ResearchBrief]:
-        # TODO: Determine what needs researching based on goals + state
+    async def _research_phase(self, assessment: StateAssessment) -> list[ResearchBrief]:
+        # TODO: determine what needs researching based on lens results
         return []
 
     async def _execute_phase(
-        self, plan: Plan
+        self, plan: Plan, project_path: str,
     ) -> tuple[list[ExecutionResult], list[ReviewResult]]:
         executions: list[ExecutionResult] = []
         reviews: list[ReviewResult] = []
 
-        # Execute top priority items (respecting budget)
         for item in plan.backlog[:3]:  # limit per cycle
-            result = await self.coder.execute(item, self.config.project.path)
+            result = await self.coder.execute(item, project_path)
             executions.append(result)
 
             if result.status == "success":
-                review = await self.reviewer.review(item, result, self.config.project.path)
+                review = await self.reviewer.review(item, result, project_path)
                 reviews.append(review)
 
         return executions, reviews

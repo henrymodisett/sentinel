@@ -42,6 +42,9 @@
 #   CODEX_REVIEW_MAX_DIFF_LINES   — skip review if diff > this many lines (default: 5000)
 #   CODEX_REVIEW_CACHE_CLEAN      — cache exact-input clean reviews (default: true)
 #   CODEX_REVIEW_TIMEOUT          — wall-clock timeout per invocation in seconds (default: 300, 0=none)
+#   CODEX_REVIEW_ASSIST           — enable peer reviewer help requests (default: false)
+#   CODEX_REVIEW_ASSIST_TIMEOUT   — timeout for peer reviewer helper calls (default: 60)
+#   CODEX_REVIEW_ASSIST_MAX_ROUNDS — max helper calls per review run (default: 1)
 #   CODEX_REVIEW_ON_ERROR         — fail-open (default) or fail-closed
 #   CODEX_REVIEW_DISABLE_CACHE    — set to true/1 to force a fresh review
 #   CODEX_REVIEW_FORCE            — set to true/1 to run even on non-default-branch pushes
@@ -75,6 +78,10 @@ REVIEW_TIMEOUT="${CODEX_REVIEW_TIMEOUT:-300}"
 ON_ERROR="${CODEX_REVIEW_ON_ERROR:-fail-open}"
 UNSAFE_PATHS=""
 REVIEWER_CASCADE=()
+ASSIST_ENABLED="${CODEX_REVIEW_ASSIST:-false}"
+ASSIST_TIMEOUT="${CODEX_REVIEW_ASSIST_TIMEOUT:-60}"
+ASSIST_MAX_ROUNDS="${CODEX_REVIEW_ASSIST_MAX_ROUNDS:-1}"
+ASSIST_HELPERS=()
 
 trim() {
   local value="$1"
@@ -186,6 +193,29 @@ append_reviewers_csv() {
   done
 }
 
+append_assist_helper() {
+  local value="$1"
+  value="$(trim "$value")"
+  value="${value%,}"
+  value="$(trim "$value")"
+  case "$value" in
+    \"*\") value="${value#\"}"; value="${value%\"}" ;;
+    \'*\') value="${value#\'}"; value="${value%\'}" ;;
+  esac
+  [ -z "$value" ] && return
+  ASSIST_HELPERS+=("$value")
+}
+
+append_assist_helpers_csv() {
+  local csv="$1" item
+  local -a items=()
+  [ -n "$csv" ] || return 0
+  IFS=',' read -r -a items <<< "$csv"
+  for item in "${items[@]}"; do
+    append_assist_helper "$item"
+  done
+}
+
 normalize_bool() {
   local value="$1"
   value="$(trim "$value")"
@@ -214,6 +244,7 @@ is_truthy() {
 if [ -f "$CONFIG_FILE" ]; then
   IN_UNSAFE_PATHS=false
   IN_REVIEWERS=false
+  IN_ASSIST_HELPERS=false
   CURRENT_SECTION=""
   while IFS= read -r raw_line || [ -n "$raw_line" ]; do
     # Strip comments and trim whitespace
@@ -224,6 +255,7 @@ if [ -f "$CONFIG_FILE" ]; then
     if [[ "$line" == "["*"]" ]]; then
       IN_UNSAFE_PATHS=false
       IN_REVIEWERS=false
+      IN_ASSIST_HELPERS=false
       CURRENT_SECTION="${line#\[}"
       CURRENT_SECTION="${CURRENT_SECTION%\]}"
       CURRENT_SECTION="$(trim "$CURRENT_SECTION")"
@@ -247,6 +279,44 @@ if [ -f "$CONFIG_FILE" ]; then
       else
         append_reviewer "$line"
       fi
+      continue
+    fi
+    if [ "$IN_ASSIST_HELPERS" = true ]; then
+      if [[ "$line" == *"]"* ]]; then
+        append_assist_helpers_csv "${line%%]*}"
+        IN_ASSIST_HELPERS=false
+      else
+        append_assist_helper "$line"
+      fi
+      continue
+    fi
+
+    # Parse [review.assist] section keys.
+    if [ "$CURRENT_SECTION" = "review.assist" ]; then
+      case "$line" in
+        enabled*=*)
+          ASSIST_ENABLED="${CODEX_REVIEW_ASSIST:-$(normalize_bool "${line#*=}")}"
+          ;;
+        helpers*=*)
+          array_value="$(trim "${line#*=}")"
+          array_value="${array_value#\[}"
+          if [[ "$array_value" == *"]"* ]]; then
+            append_assist_helpers_csv "${array_value%%]*}"
+          else
+            append_assist_helpers_csv "$array_value"
+            IN_ASSIST_HELPERS=true
+          fi
+          ;;
+        helper*=*)
+          append_assist_helper "${line#*=}"
+          ;;
+        timeout*=*)
+          ASSIST_TIMEOUT="${CODEX_REVIEW_ASSIST_TIMEOUT:-$(trim "${line#*=}")}"
+          ;;
+        max_rounds*=*)
+          ASSIST_MAX_ROUNDS="${CODEX_REVIEW_ASSIST_MAX_ROUNDS:-$(trim "${line#*=}")}"
+          ;;
+      esac
       continue
     fi
 
@@ -337,6 +407,13 @@ NO_AUTOFIX="$(normalize_bool "$NO_AUTOFIX")"
 if [ "${#REVIEWER_CASCADE[@]}" -eq 0 ]; then
   REVIEWER_CASCADE=("codex")
 fi
+
+# Default peer helpers, used only when review.assist is enabled. The active
+# primary reviewer is skipped at runtime, so this order favors a different CLI.
+if [ "${#ASSIST_HELPERS[@]}" -eq 0 ]; then
+  ASSIST_HELPERS=("codex" "gemini" "claude")
+fi
+ASSIST_ENABLED="$(normalize_bool "$ASSIST_ENABLED")"
 
 # TOOLKIT_REVIEWER env var overrides the cascade with a single forced reviewer.
 if [ -n "${TOOLKIT_REVIEWER:-}" ]; then
@@ -487,6 +564,31 @@ When in doubt, STOP and emit BLOCKED."
   echo "$policy"
 }
 
+build_assist_policy() {
+  if ! is_truthy "$ASSIST_ENABLED" || [ "${ASSIST_MAX_ROUNDS:-0}" -le 0 ] 2>/dev/null; then
+    return 0
+  fi
+
+  cat <<ASSIST_EOF
+
+## Optional peer assistance
+
+For larger or high-risk changes, you may ask one configured peer reviewer for a second opinion before making your final decision.
+Use this only for a specific technical question where another reviewer could materially improve the result.
+
+To request help, include exactly one block in your output and end with CODEX_REVIEW_BLOCKED:
+
+TOOLKIT_HELP_REQUEST_BEGIN
+question: <one concrete question for the peer reviewer>
+context: <brief context; include files or risk areas if useful>
+TOOLKIT_HELP_REQUEST_END
+CODEX_REVIEW_BLOCKED
+
+The hook will ask a peer reviewer in read-only mode, then call you once more with the peer answer.
+On that second pass, do not request help again; emit the normal final sentinel.
+ASSIST_EOF
+}
+
 # --------------------------------------------------------------------------
 # Reviewer adapters
 # --------------------------------------------------------------------------
@@ -579,17 +681,53 @@ resolve_reviewer() {
   return 1
 }
 
+ASSIST_REVIEWER=""
+ASSIST_REVIEWER_STATUS=""
+
+resolve_assist_reviewer() {
+  local helper
+  ASSIST_REVIEWER=""
+  ASSIST_REVIEWER_STATUS=""
+
+  for helper in "${ASSIST_HELPERS[@]}"; do
+    if [ "$helper" = "$ACTIVE_REVIEWER" ]; then
+      ASSIST_REVIEWER_STATUS="${ASSIST_REVIEWER_STATUS}    ${helper}: skipped primary reviewer\n"
+      continue
+    fi
+    if ! declare -F "reviewer_${helper}_available" >/dev/null; then
+      ASSIST_REVIEWER_STATUS="${ASSIST_REVIEWER_STATUS}    ${helper}: unknown reviewer\n"
+      continue
+    fi
+    if ! "reviewer_${helper}_available"; then
+      ASSIST_REVIEWER_STATUS="${ASSIST_REVIEWER_STATUS}    ${helper}: CLI not installed\n"
+      continue
+    fi
+    if ! "reviewer_${helper}_auth_ok"; then
+      ASSIST_REVIEWER_STATUS="${ASSIST_REVIEWER_STATUS}    ${helper}: auth check failed\n"
+      continue
+    fi
+    ASSIST_REVIEWER="$helper"
+    return 0
+  done
+
+  return 1
+}
+
 run_reviewer() {
   "reviewer_${ACTIVE_REVIEWER}_exec" "$1"
 }
 
-reviewer_label() {
-  case "$ACTIVE_REVIEWER" in
+reviewer_label_for() {
+  case "$1" in
     codex)  printf 'Codex' ;;
     claude) printf 'Claude' ;;
     gemini) printf 'Gemini' ;;
-    *)      printf '%s' "$ACTIVE_REVIEWER" ;;
+    *)      printf '%s' "$1" ;;
   esac
+}
+
+reviewer_label() {
+  reviewer_label_for "$ACTIVE_REVIEWER"
 }
 
 # --------------------------------------------------------------------------
@@ -597,7 +735,8 @@ reviewer_label() {
 # --------------------------------------------------------------------------
 
 REVIEW_OUTPUT_FILE="$(mktemp "${TMPDIR:-/tmp}/toolkit-review-output.XXXXXX")"
-trap 'rm -f "$REVIEW_OUTPUT_FILE"' EXIT
+ASSIST_OUTPUT_FILE="$(mktemp "${TMPDIR:-/tmp}/toolkit-review-assist-output.XXXXXX")"
+trap 'rm -f "$REVIEW_OUTPUT_FILE" "$ASSIST_OUTPUT_FILE"' EXIT
 
 kill_process_tree() {
   local pid="$1"
@@ -617,16 +756,18 @@ kill_process_tree() {
 #   Exit 124 = timeout. Works correctly with subshells (no $() capture needed).
 run_reviewer_with_timeout() {
   local timeout_secs="$1"
+  local prompt="${2:-$REVIEW_PROMPT}"
+  local output_file="${3:-$REVIEW_OUTPUT_FILE}"
 
   # No timeout: run directly
   if [ "$timeout_secs" -le 0 ] 2>/dev/null; then
-    run_reviewer "$REVIEW_PROMPT" > "$REVIEW_OUTPUT_FILE" 2>/dev/null
+    run_reviewer "$prompt" > "$output_file" 2>/dev/null
     return $?
   fi
 
   # Run reviewer in background, kill if it exceeds timeout.
   (
-    run_reviewer "$REVIEW_PROMPT" > "$REVIEW_OUTPUT_FILE" 2>/dev/null &
+    run_reviewer "$prompt" > "$output_file" 2>/dev/null &
     local reviewer_pid=$!
 
     terminate_reviewer() {
@@ -762,6 +903,7 @@ fi)
 ## Auto-fix policy
 
 $AUTOFIX_POLICY
+$(build_assist_policy)
 $(if [ -n "$REVIEW_CONTEXT_FILE" ]; then
 printf '\n## Project review context\n\n'
 cat "$REVIEW_CONTEXT_FILE"
@@ -827,6 +969,10 @@ review_cache_key() {
     printf 'base=%s\n' "$BASE"
     printf 'merge_base=%s\n' "$MERGE_BASE"
     printf 'worktree_dirty_before_review=%s\n' "$WORKTREE_DIRTY_BEFORE_REVIEW"
+    printf 'assist_enabled=%s\n' "$ASSIST_ENABLED"
+    printf 'assist_timeout=%s\n' "$ASSIST_TIMEOUT"
+    printf 'assist_max_rounds=%s\n' "$ASSIST_MAX_ROUNDS"
+    printf 'assist_helpers=%s\n' "${ASSIST_HELPERS[*]}"
     printf '\n-- prompt --\n%s\n' "$REVIEW_PROMPT"
     append_cache_file "AGENTS.md" "$REPO_ROOT/AGENTS.md"
     append_cache_file "CLAUDE.md" "$REPO_ROOT/CLAUDE.md"
@@ -934,11 +1080,136 @@ $path"
   printf '%s' "$disallowed"
 }
 
+extract_help_request() {
+  awk '
+    /^TOOLKIT_HELP_REQUEST_BEGIN$/ { in_request = 1; next }
+    /^TOOLKIT_HELP_REQUEST_END$/ { exit }
+    in_request { print }
+  ' <<EOF
+$1
+EOF
+}
+
+build_assist_prompt() {
+  local primary_label="$1"
+  local help_request="$2"
+
+  cat <<ASSIST_PROMPT_EOF
+You are a peer reviewer giving a focused second opinion before a push.
+
+Do not edit files. Do not stage, commit, or modify anything. You are advisory only.
+Answer the primary reviewer concisely and directly. Do not emit CODEX_REVIEW_CLEAN, CODEX_REVIEW_FIXED, or CODEX_REVIEW_BLOCKED.
+
+Read AGENTS.md at the repo root for the review rubric if it exists.
+Read CLAUDE.md at the repo root for project context if it exists.
+
+## Primary reviewer
+
+$primary_label asked:
+
+$help_request
+
+## Branch context
+
+Base: $BASE
+Merge base: $MERGE_BASE
+
+Commit messages:
+
+$(git log --reverse --format='### %s%n%n%b' "$MERGE_BASE"..HEAD 2>/dev/null | sed '/^$/N;/^\n$/d')
+$(if [ -n "$REVIEW_CONTEXT_FILE" ]; then
+printf '\n## Project review context\n\n'
+cat "$REVIEW_CONTEXT_FILE"
+fi)
+
+## Diff
+
+\`\`\`diff
+$(git diff "$MERGE_BASE"..HEAD 2>/dev/null)
+\`\`\`
+ASSIST_PROMPT_EOF
+}
+
+build_assisted_final_prompt() {
+  local help_request="$1"
+  local helper_label="$2"
+  local helper_output="$3"
+
+  cat <<ASSISTED_PROMPT_EOF
+$REVIEW_PROMPT
+
+## Peer reviewer answer
+
+You previously asked for a second opinion:
+
+$help_request
+
+$helper_label answered:
+
+$helper_output
+
+Now make the final review decision. Do not request peer assistance again.
+The LAST line of your output must be exactly one of:
+- CODEX_REVIEW_CLEAN
+- CODEX_REVIEW_FIXED
+- CODEX_REVIEW_BLOCKED
+ASSISTED_PROMPT_EOF
+}
+
+run_assist_review() {
+  local help_request="$1"
+  local primary_reviewer="$ACTIVE_REVIEWER"
+  local primary_label="$REVIEWER_LABEL"
+  local primary_mode="$REVIEW_MODE"
+  local helper_label assist_prompt rc helper_output assisted_prompt
+
+  if ! resolve_assist_reviewer; then
+    echo "==> Peer assistance requested, but no helper reviewer is available:"
+    printf '%b' "$ASSIST_REVIEWER_STATUS"
+    return 1
+  fi
+
+  helper_label="$(reviewer_label_for "$ASSIST_REVIEWER")"
+  phase "asking $helper_label for peer assistance"
+  assist_prompt="$(build_assist_prompt "$primary_label" "$help_request")"
+
+  ACTIVE_REVIEWER="$ASSIST_REVIEWER"
+  REVIEW_MODE="diff-only"
+  set +e
+  run_reviewer_with_timeout "$ASSIST_TIMEOUT" "$assist_prompt" "$ASSIST_OUTPUT_FILE"
+  rc=$?
+  set -e
+  ACTIVE_REVIEWER="$primary_reviewer"
+  REVIEW_MODE="$primary_mode"
+  REVIEWER_LABEL="$primary_label"
+
+  helper_output="$(cat "$ASSIST_OUTPUT_FILE" 2>/dev/null || true)"
+  if [ "$rc" -eq 124 ]; then
+    echo "==> $helper_label peer assistance timed out after ${ASSIST_TIMEOUT}s."
+    return 1
+  fi
+  if [ "$rc" -ne 0 ]; then
+    echo "==> $helper_label peer assistance failed with exit $rc."
+    return 1
+  fi
+
+  phase "re-reviewing with $primary_label after peer assistance"
+  assisted_prompt="$(build_assisted_final_prompt "$help_request" "$helper_label" "$helper_output")"
+  ASSIST_ROUNDS=$((ASSIST_ROUNDS + 1))
+  ASSIST_FINAL_REVIEW_RAN=true
+  set +e
+  run_reviewer_with_timeout "$REVIEW_TIMEOUT" "$assisted_prompt" "$REVIEW_OUTPUT_FILE"
+  rc=$?
+  set -e
+  return "$rc"
+}
+
 # --------------------------------------------------------------------------
 # Review loop
 # --------------------------------------------------------------------------
 
 FIX_COMMITS=0
+ASSIST_ROUNDS=0
 BANNER_PRINTED=false
 REVIEW_START_TIME="$(date +%s)"
 REVIEW_FILES_INSPECTED="$(git diff --name-only "$MERGE_BASE"..HEAD | wc -l | tr -d ' ')"
@@ -1003,15 +1274,16 @@ print_summary() {
   printf "  ${C_DIM}diff lines:     %s${C_RESET}\n" "$DIFF_LINE_COUNT"
   printf "  ${C_DIM}iterations:     %s/%s${C_RESET}\n" "${iter:-0}" "$MAX_ITERATIONS"
   printf "  ${C_DIM}fix commits:    %s${C_RESET}\n" "$FIX_COMMITS"
+  printf "  ${C_DIM}peer assists:   %s${C_RESET}\n" "$ASSIST_ROUNDS"
   printf "  ${C_DIM}findings:       %s${C_RESET}\n" "$findings"
   printf "  ${C_DIM}exit reason:    %s${C_RESET}\n" "$REVIEW_EXIT_REASON"
   printf "  ${C_DIM}elapsed:        %dm%ds${C_RESET}\n" "$mins" "$secs"
   printf "  ${C_DIM}──────────────────────────────────────────${C_RESET}\n"
 
   if [ -n "${CODEX_REVIEW_SUMMARY_FILE:-}" ]; then
-    printf '{"reviewer":"%s","mode":"%s","files":%d,"diff_lines":%d,"iterations":%d,"fix_commits":%d,"findings":%d,"exit_reason":"%s","elapsed_seconds":%d}\n' \
+    printf '{"reviewer":"%s","mode":"%s","files":%d,"diff_lines":%d,"iterations":%d,"fix_commits":%d,"peer_assists":%d,"findings":%d,"exit_reason":"%s","elapsed_seconds":%d}\n' \
       "$REVIEWER_LABEL" "$REVIEW_MODE" "$REVIEW_FILES_INSPECTED" "$DIFF_LINE_COUNT" \
-      "${iter:-0}" "$FIX_COMMITS" "$findings" "$REVIEW_EXIT_REASON" "$elapsed" \
+      "${iter:-0}" "$FIX_COMMITS" "$ASSIST_ROUNDS" "$findings" "$REVIEW_EXIT_REASON" "$elapsed" \
       > "$CODEX_REVIEW_SUMMARY_FILE" 2>/dev/null || true
   fi
 }
@@ -1092,6 +1364,49 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
     REVIEW_EXIT_REASON="error"
     print_summary
     handle_error "reviewer exit $EXIT"
+  fi
+
+  HELP_REQUEST=""
+  if is_truthy "$ASSIST_ENABLED" && [ "$ASSIST_ROUNDS" -lt "$ASSIST_MAX_ROUNDS" ] 2>/dev/null; then
+    HELP_REQUEST="$(extract_help_request "$OUTPUT" | sed '/^[[:space:]]*$/d' || true)"
+    if [ -n "$HELP_REQUEST" ]; then
+      ASSIST_FINAL_REVIEW_RAN=false
+      set +e
+      run_assist_review "$HELP_REQUEST"
+      ASSIST_EXIT=$?
+      set -e
+
+      if [ "$ASSIST_FINAL_REVIEW_RAN" = true ]; then
+        EXIT="$ASSIST_EXIT"
+        OUTPUT="$(cat "$REVIEW_OUTPUT_FILE" 2>/dev/null || true)"
+
+        if ! mode_allows_fix; then
+          if ! check_worktree_invariants; then
+            REVIEW_EXIT_REASON="worktree-mutated"
+            print_summary
+            echo "==> ERROR: Worktree was mutated in '$REVIEW_MODE' mode — blocking push." >&2
+            exit 1
+          fi
+        fi
+
+        if [ "$EXIT" -eq 124 ]; then
+          phase "timed out"
+          echo "==> $REVIEWER_LABEL timed out after ${REVIEW_TIMEOUT}s after peer assistance."
+          REVIEW_EXIT_REASON="timeout"
+          print_summary
+          handle_error "timeout after ${REVIEW_TIMEOUT}s after peer assistance"
+        fi
+
+        if [ "$EXIT" -ne 0 ]; then
+          echo "==> $REVIEWER_LABEL review failed with exit $EXIT after peer assistance."
+          REVIEW_EXIT_REASON="error"
+          print_summary
+          handle_error "reviewer exit $EXIT after peer assistance"
+        fi
+      else
+        echo "==> Continuing with the primary reviewer output."
+      fi
+    fi
   fi
 
   LAST_LINE="$(printf '%s\n' "$OUTPUT" | tail -1 | tr -d '\r ')"

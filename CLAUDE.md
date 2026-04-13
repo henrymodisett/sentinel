@@ -2,11 +2,11 @@
 
 ## Who You Are on This Project
 
-Sentinel is an autonomous meta-agent that manages software projects through a continuous loop of goal-setting, state assessment, research, planning, and delegated execution across multiple LLM providers. Think of it as an AI technical PM — it understands a project holistically, identifies what needs doing, plans the work, dispatches coding agents, and verifies the results.
+Sentinel is an autonomous meta-agent that manages software projects through a continuous loop of state assessment, research, planning, and delegated execution across multiple LLM providers. It's an AI technical PM — it understands a project holistically through analytical lenses, identifies what needs doing, researches the best approach, and dispatches coding agents.
 
 You are building a tool that automates what Henry does every day: investigate the project, research best approaches, make a plan, and ask AI coding agents to execute. The goal is to take this into any project and hand it off to the meta-agent.
 
-"Good" looks like: clean TypeScript, well-defined provider abstraction, the 5-role architecture working end-to-end, and eventually Sentinel managing its own development (dogfooding).
+"Good" looks like: clean Python, CLI-based provider abstraction (no API keys stored), the 5-role architecture working end-to-end, analytical lenses that provide structured expertise, and eventually Sentinel managing its own development (dogfooding).
 
 ## Engineering Principles
 
@@ -35,53 +35,56 @@ You are building a tool that automates what Henry does every day: investigate th
 ## Testing
 
 ```bash
-# Reinstall dependencies without rerunning the full machine setup
-bash setup.sh --deps-only
-
-# Before any push — uses .toolkit-config profile defaults and command overrides
-bash scripts/toolkit-run.sh validate
-
-# Run tests directly
-uv run pytest
-
-# Lint
-uv run ruff check src/ tests/
-
-# Auto-fix lint issues
-uv run ruff check --fix src/ tests/
+bash setup.sh --deps-only          # reinstall deps
+bash scripts/toolkit-run.sh validate  # full validation
+uv run pytest                      # tests
+uv run ruff check src/ tests/      # lint
+uv run ruff check --fix src/ tests/   # auto-fix
 ```
 
 Fix failing tests before pushing.
 
 ## Release & Distribution
 
-Not yet established. Planned: PyPI package (`sentinel`) + Homebrew formula (following the toolkit pattern). The release process will mirror toolkit's: version bump, tag, push, GitHub release, formula update.
+Homebrew formula (`brew install sentinel` via `henrymodisett/sentinel` tap) + PyPI (`pip install sentinel`). Release process mirrors toolkit: version bump in `__init__.py`, tag, push, `gh release create`, update Homebrew formula SHA.
 
 ## Architecture
 
-### The Five-Step Loop
+### Core Design Principles
 
-Sentinel's core is a continuous cycle that mirrors what a human technical PM does:
+- **CLI-based providers**: Sentinel wraps CLIs (claude, codex, gemini, ollama) — never stores API keys
+- **Derive, don't persist**: Goals come from CLAUDE.md/README/GitHub, not a separate config. No memory module.
+- **Lenses as structured expertise**: Analytical perspectives (architecture, security, testing, etc.) that guide every step
+- **Hybrid distribution**: Works as a standalone CLI AND as Claude Code agents/skills/loop.md
+
+### The Loop
 
 ```
-1. KNOW GOALS    → Read project goals from config
-2. ASSESS STATE  → Monitor role scans the codebase
-3. RESEARCH      → Researcher role investigates best approaches
-4. PLAN          → Planner role creates prioritized backlog
-5. DELEGATE      → Coder role executes, Reviewer role verifies
+1. ASSESS STATE  → Monitor scans through lenses (cheap provider)
+2. RESEARCH      → Researcher investigates best approaches (web search)
+3. PLAN          → Planner creates prioritized work items (best judgment)
+4. DELEGATE      → Coder executes, Reviewer verifies (agentic + independent)
 ```
+
+Goals are derived from CLAUDE.md, README.md, and GitHub issues — not stored separately.
 
 ### The Five Roles
 
-Each role is assigned a configurable LLM provider during `sentinel init`:
+| Role | Default CLI | Why |
+|------|------------|-----|
+| Monitor | `ollama` (local) | Runs often, should be free |
+| Researcher | `gemini` CLI | Built-in Google Search grounding |
+| Planner | `claude` CLI | Best judgment and reasoning |
+| Coder | `claude` (Claude Code) | Full agentic coding loop |
+| Reviewer | `gemini` CLI | Independent from coder |
 
-| Role | Purpose | Default Provider | Why |
-|------|---------|-----------------|-----|
-| Monitor | Scans codebase, assesses state | Local (Ollama) | Runs often, should be free |
-| Researcher | Deep research, web search | Gemini 2.5 Pro | Built-in web search grounding |
-| Planner | Strategic decisions, task decomposition | Claude Opus 4.6 | Best judgment and reasoning |
-| Coder | Writes code, executes tasks | Claude Agent SDK | Full agentic coding loop |
-| Reviewer | Verifies completed work | Gemini 2.5 Pro | Independent from coder |
+### Provider Layer
+
+Each provider wraps a CLI — no SDKs, no API keys in Sentinel:
+- `claude -p "prompt" --output-format json --bare` → JSON response
+- `codex exec "prompt" --json` → NDJSON events
+- `gemini -p "prompt" -o json` → JSON response
+- Ollama: HTTP API at `localhost:11434/api/chat` via `httpx`
 
 ### Package Structure
 
@@ -89,51 +92,37 @@ Each role is assigned a configurable LLM provider during `sentinel init`:
 src/sentinel/
 ├── cli/          CLI entrypoint (click)
 ├── config/       Pydantic schemas for .sentinel/config.toml
-├── providers/    Unified LLM provider abstraction
-│   ├── interface.py   Common types (Provider, ChatResponse, etc.)
-│   ├── claude.py      Anthropic SDK + Agent SDK
-│   ├── openai.py      OpenAI Responses API + Codex SDK
-│   ├── gemini.py      Google GenAI SDK
-│   ├── local.py       Ollama via OpenAI-compatible API
-│   └── router.py      Role → provider routing
-├── roles/        The five agent roles
-│   ├── monitor.py     State assessment
-│   ├── researcher.py  Deep research + multi-model consensus
-│   ├── planner.py     Task decomposition + prioritization
-│   ├── coder.py       Code execution
-│   └── reviewer.py    Independent code review
+├── providers/    CLI-based provider wrappers
+├── roles/        The five roles (monitor, researcher, planner, coder, reviewer)
 ├── loop/         The core cycle orchestrator
-├── research/     Extended research engine
-└── memory/       Persistent project knowledge
+└── research/     Extended research engine
+lenses/
+├── universal/    Always active (architecture, security, testing, etc.)
+└── conditional/  Activated per project type (ui-design, api-design, etc.)
+templates/
+└── .claude/      Agents, skills, and loop.md installed by `sentinel init`
 ```
-
-### Provider Abstraction
-
-All providers implement a common `Provider` interface with `chat()`, optional `research()` (web search), and optional `code()` (agentic execution). The `Router` maps roles to providers based on config. Local models use the OpenAI SDK pointed at Ollama's compatible API.
-
-### Multi-Model Consensus (Research)
-
-For important research questions, Sentinel can query multiple providers independently and synthesize their responses. Agreements = high confidence. Disagreements = worth investigating deeper.
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
-| `src/sentinel/providers/interface.py` | The core Provider type that all LLM integrations implement |
-| `src/sentinel/providers/router.py` | Maps roles to providers based on project config |
-| `src/sentinel/config/schema.py` | Pydantic schemas defining .sentinel/config.toml shape |
-| `src/sentinel/loop/cycle.py` | The five-step cycle orchestrator |
-| `src/sentinel/roles/*.py` | Individual role implementations |
-| `src/sentinel/cli/main.py` | CLI entrypoint and command definitions |
+| `src/sentinel/providers/interface.py` | Provider base class, CLI helpers |
+| `src/sentinel/providers/router.py` | Maps roles to providers, detects CLIs |
+| `src/sentinel/config/schema.py` | Pydantic config with role/lens definitions |
+| `src/sentinel/loop/cycle.py` | The four-step cycle orchestrator |
+| `lenses/universal/*.md` | Analytical perspectives for project evaluation |
+| `templates/.claude/` | Claude Code agents/skills installed into target projects |
 
 ## State & Config
 
-- **Project config**: `.sentinel/config.toml` in the target project (created by `sentinel init`)
-- **Memory**: `.sentinel/memory/` directory (markdown files with YAML frontmatter)
-- **Backlog**: `.sentinel/backlog/` directory (generated work items)
-- **Reports**: `.sentinel/reports/` directory (health snapshots over time)
-- **Gitignored**: `node_modules/`, `dist/`, `.sentinel/memory/` (project-specific, not committed)
+- **Config**: `.sentinel/config.toml` — role-to-provider mapping, budget, active lenses
+- **No memory module** — derive, don't persist
+- **No goals in config** — derived from CLAUDE.md, README, GitHub issues
+- **Lenses**: `lenses/` directory, copied to target projects. Users add custom lenses.
 
 ## Hard-Won Lessons
 
-(None yet — project is brand new. This section will grow as we encounter and resolve real issues.)
+1. **Use CLIs, not SDKs.** Each provider CLI handles its own auth. Sentinel never touches API keys. This eliminates an entire class of security concerns and simplifies the install path.
+2. **Derive, don't persist.** State assessments, goals, and plans are derived each cycle from current sources of truth. Persisting them creates a second source of truth that drifts silently.
+3. **Lenses > checklists.** Structured analytical perspectives produce better evaluations than flat checklists because they teach the LLM how to think about a dimension, not just what to check.

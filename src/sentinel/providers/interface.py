@@ -1,22 +1,24 @@
 """
 Provider interface — the unified abstraction across all LLM providers.
 
-Every provider (Claude, OpenAI, Gemini, Local/Ollama) implements this
-interface. The router selects a provider based on role configuration.
+Every provider wraps a CLI tool (claude, codex, gemini) or HTTP API (ollama).
+Sentinel never touches API keys — each CLI handles its own authentication.
 
 Design decisions:
-- chat() is the universal primitive — all providers support it
-- research() adds web search capability (not all providers support it)
-- code() adds agentic code execution (only Claude Agent SDK and Codex SDK)
-- Providers declare their capabilities so the router can make informed choices
+- chat() is the universal primitive — send a prompt, get a response
+- research() adds web search capability (Gemini grounding, Claude web search)
+- code() adds agentic code execution (Claude Code, Codex full-auto mode)
+- Providers declare their capabilities so the router can warn about mismatches
+- All cloud providers use CLI subprocesses; Ollama uses its local HTTP API
 """
 
 from __future__ import annotations
 
+import json
+import subprocess
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Literal
 
 
 class ProviderName(StrEnum):
@@ -27,63 +29,15 @@ class ProviderName(StrEnum):
 
 
 @dataclass
-class Message:
-    role: Literal["system", "user", "assistant"]
-    content: str
-
-
-@dataclass
-class ToolDefinition:
-    name: str
-    description: str
-    parameters: dict
-
-
-@dataclass
-class ToolCall:
-    name: str
-    arguments: dict
-
-
-@dataclass
-class TokenUsage:
-    input_tokens: int = 0
-    output_tokens: int = 0
-    cached_tokens: int = 0
-    cost_usd: float = 0.0
-
-
-@dataclass
 class ChatResponse:
     content: str
-    tool_calls: list[ToolCall] = field(default_factory=list)
-    usage: TokenUsage = field(default_factory=TokenUsage)
     model: str = ""
     provider: ProviderName = ProviderName.CLAUDE
-
-
-@dataclass
-class ChatOptions:
-    model: str | None = None
-    temperature: float | None = None
-    max_tokens: int | None = None
-    tools: list[ToolDefinition] | None = None
-    system_prompt: str | None = None
-    thinking: bool = False
-
-
-@dataclass
-class ResearchOptions(ChatOptions):
-    web_search: bool = True
-    max_sources: int = 10
-
-
-@dataclass
-class CodeOptions:
-    working_directory: str = "."
-    allowed_tools: list[str] | None = None
-    max_budget_usd: float | None = None
-    max_turns: int | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: float = 0.0
+    duration_ms: int = 0
+    session_id: str | None = None
 
 
 @dataclass
@@ -91,11 +45,56 @@ class ProviderCapabilities:
     chat: bool = True
     web_search: bool = False
     agentic_code: bool = False
-    tool_use: bool = False
-    long_context: bool = False  # 200k+ tokens
-    thinking: bool = False  # extended reasoning
-    streaming: bool = False
-    batch: bool = False
+    long_context: bool = False
+    thinking: bool = False
+
+
+@dataclass
+class ProviderStatus:
+    installed: bool = False
+    authenticated: bool = False
+    version: str | None = None
+    models: list[str] = field(default_factory=list)
+    install_hint: str = ""
+    auth_hint: str = ""
+
+
+def run_cli(args: list[str], timeout: int = 300) -> subprocess.CompletedProcess[str]:
+    """Run a CLI command and return the result."""
+    return subprocess.run(
+        args,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def parse_json_safe(text: str) -> dict | None:
+    """Parse JSON from CLI output, handling trailing garbage (Gemini CLI issue)."""
+    text = text.strip()
+    if not text:
+        return None
+    # Try full text first
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    # Find the first complete JSON object (handles trailing hook output)
+    depth = 0
+    start = text.find("{")
+    if start == -1:
+        return None
+    for i in range(start, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start : i + 1])
+                except json.JSONDecodeError:
+                    return None
+    return None
 
 
 class Provider(ABC):
@@ -103,28 +102,22 @@ class Provider(ABC):
 
     name: ProviderName
     capabilities: ProviderCapabilities
-    available_models: list[str]
+    cli_command: str  # the CLI binary name
 
     @abstractmethod
-    async def chat(
-        self, messages: list[Message], options: ChatOptions | None = None
-    ) -> ChatResponse:
-        """Basic chat completion — all providers support this."""
+    async def chat(self, prompt: str, system_prompt: str | None = None) -> ChatResponse:
+        """Send a prompt, get a response."""
 
-    async def research(
-        self, messages: list[Message], options: ResearchOptions | None = None
-    ) -> ChatResponse:
-        """Chat with web search grounding — not all providers support this."""
-        # Default: fall back to regular chat
-        return await self.chat(messages, options)
+    async def research(self, prompt: str) -> ChatResponse:
+        """Chat with web search grounding. Falls back to regular chat."""
+        return await self.chat(prompt)
 
-    async def code(self, prompt: str, options: CodeOptions | None = None) -> ChatResponse:
-        """Agentic code execution — only Claude Agent SDK and Codex SDK."""
+    async def code(self, prompt: str, working_directory: str = ".") -> ChatResponse:
+        """Agentic code execution. Only Claude and Codex support this."""
         raise NotImplementedError(
-            f"Provider {self.name} does not support agentic code execution. "
-            "Consider using claude or openai for the coder role."
+            f"Provider {self.name} does not support agentic code execution."
         )
 
     @abstractmethod
-    async def health_check(self) -> bool:
-        """Check if the provider is configured and reachable."""
+    def detect(self) -> ProviderStatus:
+        """Check if the CLI is installed and authenticated."""

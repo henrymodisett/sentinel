@@ -9,12 +9,10 @@ authors = [{ name = "Henry Modisett" }]
 keywords = ["ai", "agent", "meta-agent", "llm", "project-management", "autonomous"]
 
 dependencies = [
-    "anthropic>=0.88.0",
-    "openai>=1.60.0",
-    "google-genai>=1.0.0",
     "click>=8.1.0",
     "pydantic>=2.10.0",
     "rich>=13.9.0",
+    "httpx>=0.28.0",
     "tomli>=2.0.0;python_version<'3.11'",
     "tomli-w>=1.1.0",
 ]

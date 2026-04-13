@@ -1,14 +1,13 @@
 """
 Configuration schema — defines the shape of .sentinel/config.toml
 
-Uses Pydantic for runtime validation so we can give clear error messages
-when config is malformed.
+Minimal footprint: just role-to-provider mapping and operational constraints.
+Goals are derived from CLAUDE.md/README/GitHub — not stored here.
 """
 
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -69,38 +68,24 @@ ROLE_DEFAULTS: dict[RoleName, RoleDefault] = {
 class RoleConfig(BaseModel):
     provider: ProviderName
     model: str
-    endpoint: str | None = None
-    web_search: bool = False
-    thinking: bool = False
-    max_context: int | None = None
-    mode: Literal["agent-sdk", "api", "local"] | None = None
-    max_budget_per_task_usd: float | None = None
-    schedule: Literal["on-change", "hourly", "daily", "manual"] = "manual"
-
-
-class Goals(BaseModel):
-    description: str
-    milestones: list[str] = Field(default_factory=list)
-    constraints: list[str] = Field(default_factory=list)
-    priorities: list[str] = Field(default_factory=list)
 
 
 class BudgetConfig(BaseModel):
     daily_limit_usd: float = 15.0
     warn_at_usd: float = 10.0
-    track_local_tokens: bool = True
 
 
 class LocalConfig(BaseModel):
     ollama_endpoint: str = "http://localhost:11434"
-    models_pulled: list[str] = Field(default_factory=list)
-    auto_start_ollama: bool = True
 
 
-class ResearchConfig(BaseModel):
-    multi_model_consensus: bool = False
-    max_sources_per_query: int = 10
-    cache_ttl_minutes: int = 60
+class LensConfig(BaseModel):
+    """Which lenses are active for this project."""
+    enabled: list[str] = Field(default_factory=lambda: [
+        "architecture", "code-quality", "security", "testing",
+        "reliability", "dependencies", "technical-debt", "developer-experience",
+    ])
+    custom_dir: str | None = None  # path to project-specific lenses
 
 
 class RolesConfig(BaseModel):
@@ -118,8 +103,7 @@ class ProjectConfig(BaseModel):
 
 class SentinelConfig(BaseModel):
     project: ProjectConfig
-    goals: Goals | None = None
     roles: RolesConfig
     budget: BudgetConfig = Field(default_factory=BudgetConfig)
     local: LocalConfig = Field(default_factory=LocalConfig)
-    research: ResearchConfig = Field(default_factory=ResearchConfig)
+    lenses: LensConfig = Field(default_factory=LensConfig)
