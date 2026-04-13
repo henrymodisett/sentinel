@@ -1,5 +1,4 @@
 ---
-<!-- Installed copy. Canonical source: templates/.claude/agents/sentinel-coder.md -->
 name: sentinel-coder
 description: Executes well-scoped coding tasks. Given a work item with acceptance criteria, writes code, runs tests, and verifies.
 model: sonnet

@@ -17,27 +17,12 @@ from rich.table import Table
 
 from sentinel.config.schema import (
     ROLE_DEFAULTS,
-    LensConfig,
     ProviderName,
     RoleName,
 )
 from sentinel.providers.router import Router
 
 console = Console()
-
-# Lens references to append to CLAUDE.md
-LENS_REFERENCES = """
-## Sentinel Lenses
-
-@lenses/universal/architecture.md
-@lenses/universal/code-quality.md
-@lenses/universal/security.md
-@lenses/universal/testing.md
-@lenses/universal/reliability.md
-@lenses/universal/dependencies.md
-@lenses/universal/technical-debt.md
-@lenses/universal/developer-experience.md
-"""
 
 
 def _find_sentinel_root() -> Path:
@@ -170,23 +155,6 @@ def run_init(project_path: str | None = None) -> None:
     else:
         import tomli_w
 
-        # Auto-detect conditional lenses based on project type
-        from sentinel.state import detect_project_type
-
-        detected = detect_project_type(project)
-        base_lenses = list(LensConfig().enabled)
-        for lens in detected.get("conditional_lenses", []):
-            if lens not in base_lenses:
-                base_lenses.append(lens)
-
-        if detected.get("conditional_lenses"):
-            console.print(
-                f"  Detected project type: [bold]{detected['type']}[/bold]"
-            )
-            console.print(
-                f"  Auto-enabled lenses: {', '.join(detected['conditional_lenses'])}"
-            )
-
         config_dict = {
             "project": {"name": project.name, "path": str(project)},
             "roles": {
@@ -194,26 +162,13 @@ def run_init(project_path: str | None = None) -> None:
                 for role, (prov, model) in role_assignments.items()
             },
             "budget": {"daily_limit_usd": 15.0, "warn_at_usd": 10.0},
-            "lenses": {"enabled": base_lenses},
+            "scan": {"max_lenses": 10, "evaluate_per_lens": True},
         }
         config_path.write_bytes(tomli_w.dumps(config_dict).encode())
         console.print("  [green]✓[/green] Created .sentinel/config.toml")
 
-    # Step 4: Install lenses
+    # Step 4: Install .claude/ templates (agents, skills, loop.md)
     sentinel_root = _find_sentinel_root()
-    lenses_src = sentinel_root / "lenses"
-    lenses_dst = project / "lenses"
-
-    if lenses_src.exists():
-        created = _copy_tree(lenses_src, lenses_dst)
-        if created:
-            console.print(f"  [green]✓[/green] Installed {len(created)} lens files to lenses/")
-        else:
-            console.print("  [dim]  lenses/ already up to date[/dim]")
-    else:
-        console.print(f"  [yellow]  lenses/ source not found at {lenses_src}[/yellow]")
-
-    # Step 5: Install .claude/ templates (agents, skills, loop.md)
     templates_src = sentinel_root / "templates" / ".claude"
     claude_dst = project / ".claude"
 
@@ -229,17 +184,7 @@ def run_init(project_path: str | None = None) -> None:
     else:
         console.print(f"  [yellow]  templates/.claude/ not found at {templates_src}[/yellow]")
 
-    # Step 6: Append lens references to CLAUDE.md (if not already there)
-    claude_md = project / "CLAUDE.md"
-    if claude_md.exists():
-        content = claude_md.read_text()
-        if "@lenses/universal/architecture.md" not in content:
-            claude_md.write_text(content.rstrip() + "\n" + LENS_REFERENCES)
-            console.print("  [green]✓[/green] Appended lens references to CLAUDE.md")
-        else:
-            console.print("  [dim]  CLAUDE.md already has lens references[/dim]")
-    else:
-        console.print("  [dim]  No CLAUDE.md found (create one or run toolkit init)[/dim]")
+    console.print("  [dim]  Lenses generated dynamically during scan (not pre-installed)[/dim]")
 
     # Done
     console.print("\n[bold green]Done![/bold green]\n")

@@ -99,7 +99,7 @@ class TestSentinelConfig:
                 },
             )
 
-    def test_default_lenses(self) -> None:
+    def test_default_scan_config(self) -> None:
         config = SentinelConfig(
             project={"name": "test", "path": "/tmp"},
             roles={
@@ -110,9 +110,8 @@ class TestSentinelConfig:
                 "reviewer": {"provider": "gemini", "model": "test"},
             },
         )
-        assert "architecture" in config.lenses.enabled
-        assert "security" in config.lenses.enabled
-        assert len(config.lenses.enabled) == 8
+        assert config.scan.max_lenses == 10
+        assert config.scan.evaluate_per_lens is True
 
 
 class TestRoleConfig:

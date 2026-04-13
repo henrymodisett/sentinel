@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from sentinel.roles.coder import Coder, ExecutionResult
-from sentinel.roles.monitor import Monitor, ScanResult, load_lenses
+from sentinel.roles.monitor import Monitor, ScanResult
 from sentinel.roles.planner import Plan, Planner
 from sentinel.roles.researcher import ResearchBrief, Researcher
 from sentinel.roles.reviewer import Reviewer, ReviewResult
@@ -47,10 +47,9 @@ class Loop:
         start = time.time()
         project_path = Path(self.config.project.path)
 
-        # Step 1: ASSESS — gather state + scan through lenses
+        # Step 1: ASSESS — multi-step scan (explore → generate lenses → evaluate)
         state = gather_state(project_path)
-        lenses = load_lenses(project_path, self.config.lenses.enabled)
-        assessment = await self.monitor.assess(state, lenses)
+        assessment = await self.monitor.assess(state)
 
         # Step 2: RESEARCH — investigate issues found
         research_briefs = await self._research_phase(assessment)

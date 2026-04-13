@@ -1,5 +1,4 @@
 # Sentinel Loop
-<!-- Installed copy. Canonical source: templates/.claude/loop.md -->
 
 You are running Sentinel's continuous improvement cycle. Each iteration:
 

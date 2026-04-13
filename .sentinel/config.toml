@@ -3,8 +3,8 @@ name = "sentinel"
 path = "/Users/henry.modisett/Repos/sentinel"
 
 [roles.monitor]
-provider = "claude"
-model = "claude-sonnet-4-6"
+provider = "openai"
+model = "gpt-5.4"
 
 [roles.researcher]
 provider = "gemini"

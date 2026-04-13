@@ -79,13 +79,10 @@ class LocalConfig(BaseModel):
     ollama_endpoint: str = "http://localhost:11434"
 
 
-class LensConfig(BaseModel):
-    """Which lenses are active for this project."""
-    enabled: list[str] = Field(default_factory=lambda: [
-        "architecture", "code-quality", "security", "testing",
-        "reliability", "dependencies", "technical-debt", "developer-experience",
-    ])
-    custom_dir: str | None = None  # path to project-specific lenses
+class ScanConfig(BaseModel):
+    """Configuration for the scan pipeline."""
+    max_lenses: int = 10  # max lenses to generate per scan
+    evaluate_per_lens: bool = True  # if False, skip individual evaluation step
 
 
 class RolesConfig(BaseModel):
@@ -106,4 +103,4 @@ class SentinelConfig(BaseModel):
     roles: RolesConfig
     budget: BudgetConfig = Field(default_factory=BudgetConfig)
     local: LocalConfig = Field(default_factory=LocalConfig)
-    lenses: LensConfig = Field(default_factory=LensConfig)
+    scan: ScanConfig = Field(default_factory=ScanConfig)
