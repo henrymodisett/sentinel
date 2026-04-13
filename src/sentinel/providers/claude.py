@@ -1,63 +1,117 @@
 """
-Claude provider — Anthropic API + Claude Agent SDK
+Claude provider — wraps the Claude Code CLI.
 
-Supports all roles. The Agent SDK mode wraps Claude Code as a subprocess,
-giving full agentic coding capability (file editing, terminal, test running).
-
-Models: claude-opus-4-6, claude-sonnet-4-6, claude-haiku-4-5
+Auth: user runs `claude login` themselves.
+Chat: `claude -p "prompt" --output-format json --bare`
+Code: `claude -p "prompt" --output-format json` (full agentic mode with tools)
 """
 
 from __future__ import annotations
 
-import os
+import shutil
 
 from sentinel.providers.interface import (
-    ChatOptions,
     ChatResponse,
-    CodeOptions,
-    Message,
     Provider,
     ProviderCapabilities,
     ProviderName,
-    ResearchOptions,
+    ProviderStatus,
+    parse_json_safe,
+    run_cli,
 )
-
-CLAUDE_MODELS = [
-    "claude-opus-4-6",
-    "claude-sonnet-4-6",
-    "claude-haiku-4-5",
-]
 
 
 class ClaudeProvider(Provider):
     name = ProviderName.CLAUDE
-    available_models = CLAUDE_MODELS
+    cli_command = "claude"
     capabilities = ProviderCapabilities(
         chat=True,
         web_search=True,
         agentic_code=True,
-        tool_use=True,
         long_context=True,
         thinking=True,
-        streaming=True,
-        batch=True,
     )
 
-    async def chat(
-        self, messages: list[Message], options: ChatOptions | None = None
-    ) -> ChatResponse:
-        # TODO: Implement via anthropic SDK
-        raise NotImplementedError
+    def __init__(self, model: str = "sonnet") -> None:
+        self.model = model
 
-    async def research(
-        self, messages: list[Message], options: ResearchOptions | None = None
-    ) -> ChatResponse:
-        # TODO: Implement via Anthropic SDK with web_search tool
-        raise NotImplementedError
+    async def chat(self, prompt: str, system_prompt: str | None = None) -> ChatResponse:
+        args = [
+            "claude", "-p", prompt,
+            "--output-format", "json",
+            "--bare",
+            "--model", self.model,
+            "--no-session-persistence",
+        ]
+        if system_prompt:
+            args.extend(["--system-prompt", system_prompt])
 
-    async def code(self, prompt: str, options: CodeOptions | None = None) -> ChatResponse:
-        # TODO: Implement via claude-agent-sdk (Claude Code as subprocess)
-        raise NotImplementedError
+        result = run_cli(args)
+        if result.returncode != 0:
+            return ChatResponse(content=f"Error: {result.stderr}", provider=self.name)
 
-    async def health_check(self) -> bool:
-        return bool(os.environ.get("ANTHROPIC_API_KEY"))
+        data = parse_json_safe(result.stdout)
+        if not data:
+            return ChatResponse(content=result.stdout, provider=self.name)
+
+        usage = data.get("usage", {})
+        return ChatResponse(
+            content=data.get("result", ""),
+            model=self.model,
+            provider=self.name,
+            input_tokens=usage.get("input_tokens", 0),
+            output_tokens=usage.get("output_tokens", 0),
+            cost_usd=data.get("total_cost_usd", 0.0),
+            duration_ms=data.get("duration_ms", 0),
+            session_id=data.get("session_id"),
+        )
+
+    async def code(self, prompt: str, working_directory: str = ".") -> ChatResponse:
+        """Full agentic Claude Code — file editing, terminal, tests."""
+        args = [
+            "claude", "-p", prompt,
+            "--output-format", "json",
+            "--model", self.model,
+            "--max-turns", "20",
+            "--no-session-persistence",
+        ]
+        result = run_cli(args, timeout=600)
+        if result.returncode != 0:
+            return ChatResponse(content=f"Error: {result.stderr}", provider=self.name)
+
+        data = parse_json_safe(result.stdout)
+        if not data:
+            return ChatResponse(content=result.stdout, provider=self.name)
+
+        usage = data.get("usage", {})
+        return ChatResponse(
+            content=data.get("result", ""),
+            model=self.model,
+            provider=self.name,
+            input_tokens=usage.get("input_tokens", 0),
+            output_tokens=usage.get("output_tokens", 0),
+            cost_usd=data.get("total_cost_usd", 0.0),
+            duration_ms=data.get("duration_ms", 0),
+            session_id=data.get("session_id"),
+        )
+
+    def detect(self) -> ProviderStatus:
+        path = shutil.which("claude")
+        if not path:
+            return ProviderStatus(
+                installed=False,
+                install_hint="brew install claude",
+                auth_hint="claude login",
+            )
+        # Check if authenticated by running a minimal command
+        result = run_cli(["claude", "-p", "reply with OK", "--bare", "--output-format", "json",
+                          "--no-session-persistence", "--max-turns", "1"], timeout=30)
+        authenticated = result.returncode == 0
+
+        return ProviderStatus(
+            installed=True,
+            authenticated=authenticated,
+            models=["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"],
+            install_hint="brew install claude",
+            auth_hint="claude login",
+        )

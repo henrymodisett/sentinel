@@ -2,10 +2,9 @@ from sentinel.config.schema import (
     ROLE_DEFAULTS,
     ROLE_DESCRIPTIONS,
     BudgetConfig,
-    Goals,
+    LensConfig,
     LocalConfig,
     ProviderName,
-    ResearchConfig,
     RoleConfig,
     RoleName,
     SentinelConfig,
@@ -13,13 +12,12 @@ from sentinel.config.schema import (
 
 __all__ = [
     "BudgetConfig",
-    "Goals",
+    "LensConfig",
     "LocalConfig",
     "ProviderName",
-    "ResearchConfig",
+    "ROLE_DEFAULTS",
+    "ROLE_DESCRIPTIONS",
     "RoleConfig",
     "RoleName",
     "SentinelConfig",
-    "ROLE_DEFAULTS",
-    "ROLE_DESCRIPTIONS",
 ]

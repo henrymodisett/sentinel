@@ -1,55 +1,99 @@
 """
-Local provider — Ollama via OpenAI-compatible API
+Local provider — Ollama via HTTP API.
 
-Uses the OpenAI SDK pointed at localhost. Zero cost, full privacy,
-works offline. Best for the Monitor role and simple coding tasks.
-
-Models: whatever the user has pulled in Ollama
+Auth: none needed.
+Chat: POST http://localhost:11434/api/chat
+Models: whatever the user has pulled.
 """
 
 from __future__ import annotations
 
+import shutil
+
+import httpx
+
 from sentinel.providers.interface import (
-    ChatOptions,
     ChatResponse,
-    Message,
     Provider,
     ProviderCapabilities,
     ProviderName,
+    ProviderStatus,
 )
 
 
 class LocalProvider(Provider):
     name = ProviderName.LOCAL
+    cli_command = "ollama"
     capabilities = ProviderCapabilities(
         chat=True,
         web_search=False,
         agentic_code=False,
-        tool_use=True,  # partial — works with Qwen, Llama 3.1+
-        long_context=False,  # typically 32K-128K, not 1M
+        long_context=False,
         thinking=False,
-        streaming=True,
-        batch=False,
     )
 
-    def __init__(self, endpoint: str = "http://localhost:11434/v1") -> None:
+    def __init__(
+        self, model: str = "qwen2.5-coder:14b", endpoint: str = "http://localhost:11434",
+    ) -> None:
+        self.model = model
         self.endpoint = endpoint
-        self.available_models: list[str] = []
 
-    async def chat(
-        self, messages: list[Message], options: ChatOptions | None = None
-    ) -> ChatResponse:
-        # TODO: Implement via openai SDK with base_url pointed at Ollama
-        # from openai import AsyncOpenAI
-        # client = AsyncOpenAI(base_url=self.endpoint, api_key="ollama")
-        raise NotImplementedError
+    async def chat(self, prompt: str, system_prompt: str | None = None) -> ChatResponse:
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
 
-    async def health_check(self) -> bool:
-        # TODO: Check if Ollama is running and responsive
-        # try: httpx.get(f"{self.endpoint.replace('/v1', '')}/api/tags")
-        return False
+        async with httpx.AsyncClient(timeout=300) as client:
+            resp = await client.post(
+                f"{self.endpoint}/api/chat",
+                json={"model": self.model, "messages": messages, "stream": False},
+            )
 
-    async def discover_models(self) -> list[str]:
-        """Discover which models the user has pulled in Ollama."""
-        # TODO: GET http://localhost:11434/api/tags
-        return []
+        if resp.status_code != 200:
+            return ChatResponse(
+                content=f"Error: Ollama returned {resp.status_code}", provider=self.name,
+            )
+
+        data = resp.json()
+        message = data.get("message", {})
+        return ChatResponse(
+            content=message.get("content", ""),
+            model=self.model,
+            provider=self.name,
+            input_tokens=data.get("prompt_eval_count", 0),
+            output_tokens=data.get("eval_count", 0),
+            duration_ms=data.get("total_duration", 0) // 1_000_000,  # nanoseconds → ms
+        )
+
+    def detect(self) -> ProviderStatus:
+        path = shutil.which("ollama")
+        if not path:
+            return ProviderStatus(
+                installed=False,
+                install_hint="brew install ollama",
+                auth_hint="(no auth needed — start with: ollama serve)",
+            )
+
+        # Check if Ollama is running and list models
+        try:
+            resp = httpx.get(f"{self.endpoint}/api/tags", timeout=5)
+            if resp.status_code == 200:
+                data = resp.json()
+                models = [m["name"] for m in data.get("models", [])]
+                return ProviderStatus(
+                    installed=True,
+                    authenticated=True,
+                    models=models,
+                    install_hint="brew install ollama",
+                    auth_hint="ollama serve && ollama pull qwen2.5-coder:14b",
+                )
+        except httpx.ConnectError:
+            pass
+
+        return ProviderStatus(
+            installed=True,
+            authenticated=False,
+            install_hint="brew install ollama",
+            auth_hint="ollama serve && ollama pull qwen2.5-coder:14b",
+        )

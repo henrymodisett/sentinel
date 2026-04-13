@@ -1,66 +1,119 @@
 """
-OpenAI provider — Responses API + Codex SDK
+OpenAI provider — wraps the Codex CLI.
 
-Supports all roles. The Codex SDK mode provides agentic code execution
-similar to Claude Agent SDK.
-
-Models: gpt-5.4, gpt-5.4-mini, gpt-5.3-codex, o4-mini
+Auth: user runs `codex login` themselves.
+Chat: `codex exec "prompt" --json`
+Code: `codex exec "prompt" --json --full-auto`
 """
 
 from __future__ import annotations
 
-import os
+import json
+import shutil
 
 from sentinel.providers.interface import (
-    ChatOptions,
     ChatResponse,
-    CodeOptions,
-    Message,
     Provider,
     ProviderCapabilities,
     ProviderName,
-    ResearchOptions,
+    ProviderStatus,
+    run_cli,
 )
-
-OPENAI_MODELS = [
-    "gpt-5.4",
-    "gpt-5.4-mini",
-    "gpt-5.4-nano",
-    "gpt-5.3-codex",
-    "o4-mini",
-    "o3",
-]
 
 
 class OpenAIProvider(Provider):
     name = ProviderName.OPENAI
-    available_models = OPENAI_MODELS
+    cli_command = "codex"
     capabilities = ProviderCapabilities(
         chat=True,
         web_search=True,
         agentic_code=True,
-        tool_use=True,
         long_context=True,
         thinking=True,
-        streaming=True,
-        batch=True,
     )
 
-    async def chat(
-        self, messages: list[Message], options: ChatOptions | None = None
-    ) -> ChatResponse:
-        # TODO: Implement via openai SDK (Responses API)
-        raise NotImplementedError
+    def __init__(self, model: str = "gpt-5.4") -> None:
+        self.model = model
 
-    async def research(
-        self, messages: list[Message], options: ResearchOptions | None = None
-    ) -> ChatResponse:
-        # TODO: Implement via Responses API with web_search built-in tool
-        raise NotImplementedError
+    async def chat(self, prompt: str, system_prompt: str | None = None) -> ChatResponse:
+        args = ["codex", "exec", prompt, "--json", "--ephemeral"]
+        result = run_cli(args)
+        if result.returncode != 0:
+            return ChatResponse(content=f"Error: {result.stderr}", provider=self.name)
 
-    async def code(self, prompt: str, options: CodeOptions | None = None) -> ChatResponse:
-        # TODO: Implement via Codex SDK
-        raise NotImplementedError
+        # Parse NDJSON — find the last agent_message item
+        content = ""
+        total_input = 0
+        total_output = 0
+        for line in result.stdout.strip().splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") == "item.completed":
+                item = event.get("item", {})
+                if item.get("type") == "agent_message":
+                    content = item.get("text", "")
+            elif event.get("type") == "turn.completed":
+                usage = event.get("usage", {})
+                total_input += usage.get("input_tokens", 0)
+                total_output += usage.get("output_tokens", 0)
 
-    async def health_check(self) -> bool:
-        return bool(os.environ.get("OPENAI_API_KEY"))
+        return ChatResponse(
+            content=content,
+            model=self.model,
+            provider=self.name,
+            input_tokens=total_input,
+            output_tokens=total_output,
+        )
+
+    async def code(self, prompt: str, working_directory: str = ".") -> ChatResponse:
+        args = [
+            "codex", "exec", prompt,
+            "--json", "--full-auto",
+            "-C", working_directory,
+        ]
+        result = run_cli(args, timeout=600)
+        if result.returncode != 0:
+            return ChatResponse(content=f"Error: {result.stderr}", provider=self.name)
+
+        content = ""
+        total_input = 0
+        total_output = 0
+        for line in result.stdout.strip().splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") == "item.completed":
+                item = event.get("item", {})
+                if item.get("type") == "agent_message":
+                    content = item.get("text", "")
+            elif event.get("type") == "turn.completed":
+                usage = event.get("usage", {})
+                total_input += usage.get("input_tokens", 0)
+                total_output += usage.get("output_tokens", 0)
+
+        return ChatResponse(
+            content=content,
+            model=self.model,
+            provider=self.name,
+            input_tokens=total_input,
+            output_tokens=total_output,
+        )
+
+    def detect(self) -> ProviderStatus:
+        path = shutil.which("codex")
+        if not path:
+            return ProviderStatus(
+                installed=False,
+                install_hint="npm install -g @openai/codex",
+                auth_hint="codex login",
+            )
+        return ProviderStatus(
+            installed=True,
+            authenticated=True,  # codex exec will fail if not authed
+            models=["gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "o4-mini"],
+            install_hint="npm install -g @openai/codex",
+            auth_hint="codex login",
+        )
