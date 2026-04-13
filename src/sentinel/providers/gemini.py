@@ -44,7 +44,12 @@ class GeminiProvider(Provider):
         if system_prompt:
             full_prompt = f"{system_prompt}\n\n{prompt}"
 
-        args = ["gemini", "-p", full_prompt, "-o", "json"]
+        # Use --approval-mode default (requires approval for file writes/edits)
+        # -e "" disables all extensions (no tool use — pure chat)
+        args = [
+            "gemini", "-p", full_prompt, "-o", "json",
+            "--approval-mode", "default",
+        ]
         # Only pass -m if not the default auto model
         if self.model and self.model != "auto":
             args.extend(["-m", self.model])

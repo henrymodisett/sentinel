@@ -69,14 +69,33 @@ class ScanResult:
 # --- Step 1: EXPLORE ---
 
 EXPLORE_PROMPT = """\
-You are a senior technical PM joining a new project for the first time.
-Read everything below and build a deep understanding of:
+You are taking over this project. You are now responsible for making it successful.
 
-- What this project IS (domain, purpose, users)
+First, read everything below and build a deep, first-principles understanding of:
+
+- What this project IS (domain, purpose, users, context)
 - What it's trying to BECOME (trajectory, goals, ambitions)
-- What MATTERS MOST for this specific project
+- What MATTERS MOST for this specific project to succeed
 - What the team has been WORKING ON recently (commit patterns, momentum)
 - What's UNIQUE about this project that generic advice would miss
+
+Then ask yourself: **"What team would I assemble to advise me on this project?"**
+
+For a high-frequency trading system, you'd want a quant, a reliability engineer,
+a risk officer, and a compliance lawyer. You would NOT want a UX designer or a
+GTM strategist — they're irrelevant.
+
+For a VC-backed consumer app, you'd want a product strategist, a designer, a
+growth marketer, an engineering lead, and someone who thinks about retention.
+You would NOT want a formal verification expert or a protocol compliance
+specialist.
+
+For a passion-project developer tool with no business model, you'd want senior
+engineers focused on code quality, craft, and user experience for developers.
+You would NOT want a GTM strategist or a pricing expert.
+
+The lenses you generate ARE that team. Each lens represents one advisor giving
+you their perspective. Generate only the advisors this project actually needs.
 
 ## Project Context
 
@@ -112,18 +131,16 @@ Uncommitted files: {uncommitted_files}
 
 ## Your Task
 
-Write a 2-3 paragraph project summary that demonstrates deep understanding.
-Then output a JSON block with custom lenses this project needs.
+Write a 2-3 paragraph project summary that demonstrates deep understanding —
+what it is, what it's trying to be, what makes it unique, what matters.
 
-Think carefully. A trading system needs financial risk analysis, not UI design.
-A terminal emulator needs protocol compliance, not API design. A CLI toolkit
-needs backward compatibility, not database integrity.
+Then decide: what team of advisors does THIS project need to succeed?
+Each lens = one advisor's perspective.
 
-Always include a few engineering lenses (code quality, testing, reliability)
-but make most lenses DOMAIN-SPECIFIC to what this project actually does.
-
-Generate 6-10 lenses. Each lens should be something a domain expert would
-evaluate, not something a generic linter would check.
+Output a JSON block with the lenses. Generate as many or as few as this project
+actually needs — don't pad with irrelevant perspectives, don't skip things that
+matter. A 3-lens scan for a simple library is fine. A 12-lens scan for a complex
+production system is fine. Quality of judgment matters more than quantity.
 
 Output format — write the summary as prose, then a JSON block:
 
@@ -132,8 +149,8 @@ Output format — write the summary as prose, then a JSON block:
   "lenses": [
     {{
       "name": "lens-name",
-      "description": "One sentence: what this lens evaluates",
-      "what_to_look_for": "2-3 sentences: specific things to examine in this project",
+      "description": "One sentence: what this advisor evaluates and why they matter here",
+      "what_to_look_for": "2-3 sentences: specific things to examine, grounded in this project",
       "questions": ["Question 1?", "Question 2?", "Question 3?"]
     }}
   ]

@@ -37,11 +37,14 @@ class ClaudeProvider(Provider):
         self.model = model
 
     async def chat(self, prompt: str, system_prompt: str | None = None) -> ChatResponse:
+        # chat() is read-only — no tools, no file writes, no terminal.
+        # For agentic code execution with full tools, use code() instead.
         args = [
             "claude", "-p", prompt,
             "--output-format", "json",
             "--model", self.model,
             "--no-session-persistence",
+            "--disallowedTools", "Bash,Edit,Write,NotebookEdit",
         ]
         if system_prompt:
             args.extend(["--system-prompt", system_prompt])
