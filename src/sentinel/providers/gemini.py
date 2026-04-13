@@ -9,6 +9,7 @@ Research: same, but Gemini's built-in Google Search grounding activates automati
 from __future__ import annotations
 
 import shutil
+import subprocess
 
 from sentinel.providers.interface import (
     ChatResponse,
@@ -48,7 +49,12 @@ class GeminiProvider(Provider):
         if self.model and self.model != "auto":
             args.extend(["-m", self.model])
 
-        result = run_cli(args, timeout=180)
+        try:
+            result = run_cli(args, timeout=300)
+        except subprocess.TimeoutExpired:
+            return ChatResponse(
+                content="Error: Gemini CLI timed out after 300s", provider=self.name,
+            )
         if result.returncode != 0:
             return ChatResponse(
                 content=f"Error: {result.stderr.strip()}", provider=self.name,
