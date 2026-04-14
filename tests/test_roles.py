@@ -6,6 +6,7 @@ Mock the Provider interface to test role logic without real LLM calls.
 from __future__ import annotations
 
 import tempfile
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -164,6 +165,126 @@ class TestCoderRejectsNonAgenticProvider:
             assert "agentic_code" in (result.error or "") or "claude" in (
                 result.error or ""
             ).lower()
+
+
+class TestFilesChangedIgnoresSentinelArtifacts:
+    """Regression: transcripts and other .sentinel/ artifacts must never
+    be counted as Coder changes. Otherwise a no-op Coder run shows up as
+    successful because the transcript it just wrote looks like a diff."""
+
+    def test_excludes_sentinel_paths_from_change_detection(self) -> None:
+        import subprocess as _sp
+
+        from sentinel.roles.coder import _files_changed
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _sp.run(["git", "init", "-q"], cwd=tmpdir, check=True)
+            _sp.run(
+                ["git", "-c", "user.email=a@b", "-c", "user.name=t",
+                 "commit", "--allow-empty", "-m", "init", "-q"],
+                cwd=tmpdir, check=True,
+            )
+            # Write an execution transcript — looks like a change to git
+            sentinel_dir = Path(tmpdir) / ".sentinel" / "executions"
+            sentinel_dir.mkdir(parents=True)
+            (sentinel_dir / "2026-01-01-dummy.md").write_text("# fake")
+            # And a real change in project code
+            (Path(tmpdir) / "real.py").write_text("print('hi')")
+
+            changed = _files_changed(tmpdir)
+            assert "real.py" in changed
+            assert not any(f.startswith(".sentinel/") for f in changed), (
+                f"_files_changed returned sentinel artifacts: {changed}"
+            )
+
+
+class TestCoderPersistsTranscripts:
+    """Every execution attempt — success, failure, or exception —
+    must leave a debuggable record behind. Before this PR, bare
+    `Error: ` failures produced no trace at all."""
+
+    @pytest.mark.asyncio
+    async def test_writes_transcript_for_empty_error_response(self) -> None:
+        """The exact failure mode we saw on sigint: claude returns
+        content='Error: ' with empty stderr. The transcript must
+        exist so the user can still see what the provider sent."""
+        provider = MockProvider(code_response=ChatResponse(
+            content="Error: ",
+            provider=ProviderName.CLAUDE,
+            is_error=True,
+            stderr="max turns reached",
+            raw_stdout='{"is_error": true, "result": ""}',
+        ))
+        provider.capabilities = ProviderCapabilities(
+            chat=True, agentic_code=True,
+        )
+        router = _mock_router(provider)
+        coder = Coder(router)
+
+        work_item = WorkItem(
+            id="1", title="demo item", description="do a thing",
+            type="fix", priority="high", complexity=1,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Init an empty git repo so branch creation succeeds
+            import subprocess as _sp
+            _sp.run(["git", "init", "-q"], cwd=tmpdir, check=True)
+            _sp.run(
+                ["git", "-c", "user.email=a@b", "-c", "user.name=t",
+                 "commit", "--allow-empty", "-m", "init", "-q"],
+                cwd=tmpdir, check=True,
+            )
+
+            result = await coder.execute(work_item, tmpdir)
+            assert result.status == "failed"
+            # The fix: transcript exists on disk
+            transcripts = list(
+                (Path(tmpdir) / ".sentinel" / "executions").glob("*.md"),
+            )
+            assert len(transcripts) == 1, "execution must leave a transcript"
+            body = transcripts[0].read_text()
+            # Stderr surfaces in the transcript even when content was empty
+            assert "max turns reached" in body
+            # Raw stdout is preserved for post-hoc JSON diffing
+            assert "is_error" in body
+            # And the error string now mentions what really happened,
+            # not just "Error: "
+            assert result.error and result.error != "Error: "
+
+    @pytest.mark.asyncio
+    async def test_empty_error_surfaces_stderr_in_result(self) -> None:
+        """Regression: Coder used to set `result.error = "Error: "` and
+        throw away stderr. Now stderr is appended to the error surfaced
+        upward so the cycle-level output is informative."""
+        provider = MockProvider(code_response=ChatResponse(
+            content="Error: ",
+            provider=ProviderName.CLAUDE,
+            is_error=True,
+            stderr="authentication failed — run `claude auth login`",
+            raw_stdout="",
+        ))
+        provider.capabilities = ProviderCapabilities(
+            chat=True, agentic_code=True,
+        )
+        router = _mock_router(provider)
+        coder = Coder(router)
+
+        work_item = WorkItem(
+            id="2", title="another", description="",
+            type="fix", priority="low", complexity=1,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            import subprocess as _sp
+            _sp.run(["git", "init", "-q"], cwd=tmpdir, check=True)
+            _sp.run(
+                ["git", "-c", "user.email=a@b", "-c", "user.name=t",
+                 "commit", "--allow-empty", "-m", "init", "-q"],
+                cwd=tmpdir, check=True,
+            )
+            result = await coder.execute(work_item, tmpdir)
+            assert "authentication failed" in (result.error or "")
 
 
 # --- Reviewer Tests ---
