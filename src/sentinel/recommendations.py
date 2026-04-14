@@ -87,7 +87,8 @@ PRESETS = {
     "recommended": "Smart defaults per role (the default)",
     "simple": "Use claude for everything — simplest, one API",
     "cheap": "Prefer local/gemini-flash everywhere possible",
-    "local": "Use Ollama for everything — free, private, offline",
+    "local": "Ollama for the cold path; claude/codex for coder (agentic)",
+    "hybrid": "Local Monitor (hot path) + cloud everything else — best $/quality",
     "power": "Highest-quality model per role (expensive)",
 }
 
@@ -243,13 +244,55 @@ def apply_preset(
         return cheap_result
 
     if preset == "local":
-        # Use ollama everywhere (if installed)
+        # Ollama for every cold-path role (monitor/researcher/planner/
+        # reviewer). Coder MUST be an agentic-capable provider since
+        # Ollama has no Claude-Code-equivalent loop — fall back to
+        # claude or openai for that role. If neither is available, the
+        # preset degrades gracefully via recommend_for_role.
         if ProviderName.LOCAL not in available:
-            # Fall back to recommended — ollama isn't installed
+            # No Ollama → use recommended defaults
             return apply_preset("recommended", available, ollama_models)
-        model = _pick_local_model(ollama_models)
-        # Note: coder via local may be lower quality but we respect user choice
-        return {role: (ProviderName.LOCAL, model) for role in RoleName}
+        local_model = _pick_local_model(ollama_models)
+        local_result: dict[RoleName, tuple[ProviderName, str]] = {}
+        for role in RoleName:
+            if role == RoleName.CODER:
+                if ProviderName.CLAUDE in available:
+                    local_result[role] = (
+                        ProviderName.CLAUDE, "claude-sonnet-4-6",
+                    )
+                elif ProviderName.OPENAI in available:
+                    local_result[role] = (
+                        ProviderName.OPENAI, "gpt-5.4-mini",
+                    )
+                else:
+                    rec = recommend_for_role(role, available, ollama_models)
+                    local_result[role] = (rec.provider, rec.model)
+            else:
+                local_result[role] = (ProviderName.LOCAL, local_model)
+        return local_result
+
+    if preset == "hybrid":
+        # Local Monitor (runs every cycle — save cloud spend on the hot
+        # path), cloud everything else for quality. Falls back per-role
+        # when the ideal provider isn't installed.
+        hybrid_result: dict[RoleName, tuple[ProviderName, str]] = {}
+        if ProviderName.LOCAL in available:
+            hybrid_result[RoleName.MONITOR] = (
+                ProviderName.LOCAL, _pick_local_model(ollama_models),
+            )
+        else:
+            rec = recommend_for_role(
+                RoleName.MONITOR, available, ollama_models,
+            )
+            hybrid_result[RoleName.MONITOR] = (rec.provider, rec.model)
+        # Researcher/Planner/Coder/Reviewer use recommended defaults
+        for role in (
+            RoleName.RESEARCHER, RoleName.PLANNER,
+            RoleName.CODER, RoleName.REVIEWER,
+        ):
+            rec = recommend_for_role(role, available, ollama_models)
+            hybrid_result[role] = (rec.provider, rec.model)
+        return hybrid_result
 
     if preset == "power":
         # Highest-quality model per role — fall back to best available
