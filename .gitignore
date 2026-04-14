@@ -44,6 +44,7 @@ uv.lock
 
 # Sentinel dogfood artifacts (the sentinel repo runs sentinel on itself
 # for testing — these are generated per-run and shouldn't be committed)
+.sentinel/config.toml
 .sentinel/goals.md
 .sentinel/backlog.md
 .sentinel/lenses.md
