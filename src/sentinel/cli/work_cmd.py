@@ -283,9 +283,26 @@ async def _run_single_cycle(
                     break
                 actions = _parse_actions_from_scan(scan_file)
                 _write_backlog(project, actions, scan_file)
+                # Write expansion proposals so user can approve later
+                from sentinel.cli.plan_cmd import _write_proposals
+                proposals = _write_proposals(project, actions, scan_file)
+
+                refinements = [
+                    a for a in actions
+                    if a.get("kind", "refine") == "refine"
+                ]
+                expansions = [a for a in actions if a.get("kind") == "expand"]
                 console.print(
-                    f"  [green]✓[/green] {len(actions)} items in backlog\n"
+                    f"  [green]✓[/green] {len(refinements)} refinements, "
+                    f"{len(expansions)} expansion proposals"
                 )
+                if proposals:
+                    console.print(
+                        "  [dim]  New proposals in .sentinel/proposals/ — "
+                        "review and flip Status to 'approved' to queue[/dim]\n"
+                    )
+                else:
+                    console.print()
 
             # --- 5. Execute next item ---
             items = _remaining_backlog_items(project)
@@ -309,7 +326,11 @@ async def _run_single_cycle(
             if dry_run:
                 console.print("[bold cyan]→ Would execute[/bold cyan]")
                 for i, a in enumerate(items[:3], 1):
-                    console.print(f"  {i}. {a['title']}")
+                    kind = a.get("kind", "refine")
+                    color = "green" if kind == "refine" else "yellow"
+                    console.print(
+                        f"  {i}. [{color}][{kind}][/{color}] {a['title']}"
+                    )
                 console.print()
                 console.print("[yellow]  Dry run — stopping[/yellow]")
                 break
