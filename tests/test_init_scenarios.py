@@ -256,11 +256,12 @@ class TestPresets:
             f"cheap preset wrote unavailable providers: {providers}"
         )
 
-    def test_preset_local_assigns_every_role_to_ollama(self):
-        """Direct unit test — `local` preset hits the ollama HTTP API at
-        runtime, so we test the pure function here rather than round-tripping
-        through the CLI (which would need a live server)."""
-        from sentinel.config.schema import ProviderName
+    def test_preset_local_keeps_coder_on_claude(self):
+        """Regression: `local` used to assign Ollama to every role
+        including Coder, but Ollama has no Claude-Code-equivalent
+        agentic loop, so Coder would never actually execute. Now
+        Coder falls back to claude/openai while other roles stay local."""
+        from sentinel.config.schema import ProviderName, RoleName
         from sentinel.recommendations import apply_preset
 
         available = {
@@ -269,8 +270,64 @@ class TestPresets:
         assignments = apply_preset(
             "local", available, ollama_models=["qwen2.5-coder:14b"],
         )
-        providers = {prov for prov, _ in assignments.values()}
-        assert providers == {ProviderName.LOCAL}
+        # Coder must be claude (agentic-capable)
+        assert assignments[RoleName.CODER][0] == ProviderName.CLAUDE
+        # All other roles stay local
+        for role in (
+            RoleName.MONITOR, RoleName.RESEARCHER,
+            RoleName.PLANNER, RoleName.REVIEWER,
+        ):
+            assert assignments[role][0] == ProviderName.LOCAL, (
+                f"{role} should be local in `local` preset"
+            )
+
+    def test_preset_local_falls_back_to_openai_when_no_claude(self):
+        """If neither claude nor ollama gives agentic, coder picks
+        openai. This keeps the preset usable on openai-only installs."""
+        from sentinel.config.schema import ProviderName, RoleName
+        from sentinel.recommendations import apply_preset
+
+        available = {ProviderName.OPENAI, ProviderName.LOCAL}
+        assignments = apply_preset(
+            "local", available, ollama_models=["qwen2.5-coder:14b"],
+        )
+        assert assignments[RoleName.CODER][0] == ProviderName.OPENAI
+
+    def test_preset_hybrid_local_monitor_cloud_elsewhere(self):
+        """New `hybrid` preset: Ollama for Monitor only (runs on every
+        cycle — save cloud $ on the hot path), cloud for the other
+        four roles for quality."""
+        from sentinel.config.schema import ProviderName, RoleName
+        from sentinel.recommendations import apply_preset
+
+        available = {
+            ProviderName.CLAUDE, ProviderName.GEMINI, ProviderName.LOCAL,
+        }
+        assignments = apply_preset(
+            "hybrid", available, ollama_models=["qwen2.5-coder:14b"],
+        )
+        assert assignments[RoleName.MONITOR][0] == ProviderName.LOCAL
+        # All other roles must NOT be local
+        for role in (
+            RoleName.RESEARCHER, RoleName.PLANNER,
+            RoleName.CODER, RoleName.REVIEWER,
+        ):
+            assert assignments[role][0] != ProviderName.LOCAL
+
+    def test_preset_hybrid_falls_back_when_no_ollama(self):
+        """Without Ollama, hybrid degrades to recommended defaults
+        for all roles including Monitor."""
+        from sentinel.config.schema import ProviderName, RoleName
+        from sentinel.recommendations import apply_preset
+
+        available = {ProviderName.CLAUDE, ProviderName.GEMINI}
+        assignments = apply_preset(
+            "hybrid", available, ollama_models=[],
+        )
+        # Monitor should be recommended (gemini-flash) — no local available
+        assert assignments[RoleName.MONITOR][0] == ProviderName.GEMINI
+        # Coder still claude
+        assert assignments[RoleName.CODER][0] == ProviderName.CLAUDE
 
     def test_unknown_preset_fails_cleanly(self, fake_cli_env, isolated_home):
         fake_cli_env(claude=True)

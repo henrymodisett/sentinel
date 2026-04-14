@@ -87,7 +87,7 @@ def status() -> None:
 @click.option(
     "--preset",
     type=click.Choice(
-        ["recommended", "simple", "cheap", "local", "power"],
+        ["recommended", "simple", "cheap", "local", "hybrid", "power"],
         case_sensitive=False,
     ),
     default=None,
@@ -100,7 +100,8 @@ def init(yes: bool, preset: str | None) -> None:
       recommended  — smart defaults per role (the default)
       simple       — use claude for everything
       cheap        — prefer local / gemini-flash where possible
-      local        — use Ollama everywhere (free, private, offline)
+      local        — Ollama for cold path, claude/codex for agentic coder
+      hybrid       — local Monitor + cloud everything else (best $/quality)
       power        — highest-quality model per role (expensive)
     """
     from sentinel.cli.init_cmd import run_init
