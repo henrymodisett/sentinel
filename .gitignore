@@ -52,6 +52,7 @@ uv.lock
 .sentinel/state/
 .sentinel/proposals/
 .sentinel/executions/
+.sentinel/reviews/
 
 # Test coverage
 coverage/

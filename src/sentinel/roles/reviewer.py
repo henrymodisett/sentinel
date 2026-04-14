@@ -7,8 +7,11 @@ different blind spots catch more issues than one reviewing its own work.
 
 from __future__ import annotations
 
+import datetime as _dt
+import logging
 import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
@@ -107,6 +110,101 @@ If there are zero blocking issues, verdict is "approved" and you can say
 """
 
 
+def _slug(title: str) -> str:
+    import re
+    s = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+    return s[:50]
+
+
+def _write_review_transcript(
+    project_path: str,
+    work_item: WorkItem,
+    execution: ExecutionResult,
+    result: ReviewResult,
+    diff: str,
+    raw_response: str,
+) -> Path | None:
+    """Persist the reviewer's full output to `.sentinel/reviews/`.
+
+    The work_cmd log only prints the verdict and first few blocking
+    issues. Everything else (non-blocking observations, criteria
+    scorecard, full summary, raw provider response) was dying on the
+    floor. Sigint dogfood showed this: item 1 got "changes-requested"
+    and we had NO idea what the reviewer actually said. Without this
+    record, a follow-up Coder run can't address the feedback.
+
+    Returns the transcript path on success, None on write failure —
+    we never want transcript persistence to mask the real verdict.
+    """
+    try:
+        reviews_dir = Path(project_path) / ".sentinel" / "reviews"
+        reviews_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = _dt.datetime.now().strftime("%Y-%m-%d-%H%M%S")
+        filename = f"{timestamp}-{_slug(work_item.title)}.md"
+        path = reviews_dir / filename
+
+        verdict_badge = {
+            "approved": "✅ APPROVED",
+            "changes-requested": "✏️  CHANGES REQUESTED",
+            "rejected": "❌ REJECTED",
+        }.get(result.verdict, result.verdict)
+
+        lines: list[str] = [
+            f"# Review — {work_item.title}",
+            "",
+            f"**Verdict:** {verdict_badge}",
+            "",
+            f"- **Work item ID:** {work_item.id}",
+            f"- **Branch:** {execution.branch or '(none)'}",
+            f"- **Commit:** {execution.commit_sha or '(none)'}",
+            f"- **Files changed:** {len(execution.files_changed)}",
+            f"- **Tests passing:** {execution.tests_passing}",
+            f"- **Cost (review):** ${result.cost_usd:.4f}",
+        ]
+
+        if result.summary:
+            lines += ["", "## Summary", "", result.summary]
+
+        if result.blocking_issues:
+            lines += ["", "## Blocking issues", ""]
+            lines += [f"- {issue}" for issue in result.blocking_issues]
+
+        if result.non_blocking_observations:
+            lines += ["", "## Non-blocking observations", ""]
+            lines += [f"- {obs}" for obs in result.non_blocking_observations]
+
+        if result.acceptance_criteria_met:
+            lines += ["", "## Acceptance criteria", ""]
+            for crit, met in result.acceptance_criteria_met.items():
+                mark = "✅" if met else "❌"
+                lines += [f"- {mark} {crit}"]
+
+        if raw_response:
+            lines += [
+                "", "## Raw reviewer response", "",
+                "```",
+                raw_response[:15000].rstrip(),
+                "```",
+            ]
+
+        if diff:
+            lines += [
+                "", "## Diff under review", "",
+                "```diff",
+                diff[:15000].rstrip(),
+                "```",
+            ]
+
+        lines += [""]
+        path.write_text("\n".join(lines))
+        return path
+    except OSError:
+        logging.getLogger(__name__).exception(
+            "Failed to write review transcript (non-fatal)",
+        )
+        return None
+
+
 def _get_diff(project_path: str, base_branch: str = "main") -> str:
     """Get the diff between current HEAD and base branch."""
     result = subprocess.run(
@@ -165,6 +263,10 @@ class Reviewer:
             result.verdict = "rejected"
             result.summary = f"Review failed: {response.content[:200]}"
             result.blocking_issues = ["Reviewer could not produce a structured verdict"]
+            _write_review_transcript(
+                project_path, work_item, execution, result,
+                diff=diff, raw_response=response.content,
+            )
             return result
 
         result.verdict = parsed["verdict"]
@@ -172,5 +274,9 @@ class Reviewer:
         result.blocking_issues = parsed.get("blocking_issues", [])
         result.non_blocking_observations = parsed.get("non_blocking_observations", [])
         result.acceptance_criteria_met = parsed.get("criteria_met", {})
+        _write_review_transcript(
+            project_path, work_item, execution, result,
+            diff=diff, raw_response=response.content,
+        )
 
         return result

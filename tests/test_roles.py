@@ -648,3 +648,77 @@ class TestReviewerHandlesBadResponse:
             result = await reviewer.review(work_item, execution, tmpdir)
             assert result.verdict == "rejected"
             assert len(result.blocking_issues) > 0
+
+
+class TestReviewerPersistsTranscripts:
+    """Sigint dogfood: reviewer said 'changes-requested' on item 1 and
+    we had no record of what it actually flagged. Follow-up work was
+    impossible without re-running review. Now every review writes a
+    Markdown transcript including summary, blocking issues, non-
+    blocking observations, and the raw provider response."""
+
+    @pytest.mark.asyncio
+    async def test_writes_review_transcript_on_success(self) -> None:
+        import json as _json
+
+        coder_provider = MockProvider()
+        review_payload = {
+            "verdict": "changes-requested",
+            "summary": "Good direction but missing tests for the new branch.",
+            "blocking_issues": [
+                "No regression test for the 20-turn max path",
+                "subprocess.run without timeout in retry loop",
+            ],
+            "non_blocking_observations": [
+                "Consider caching the Finnhub API key lookup",
+            ],
+            "criteria_met": {"minimum change": True, "tests pass": False},
+        }
+        reviewer_provider = MockProvider(json_responses=[
+            (review_payload, ChatResponse(
+                content=_json.dumps(review_payload),
+                provider=ProviderName.GEMINI,
+                cost_usd=0.003,
+            )),
+        ])
+        router = MagicMock()
+        router.get_provider = lambda role: (
+            reviewer_provider if role == "reviewer" else coder_provider
+        )
+        reviewer = Reviewer(router)
+
+        work_item = WorkItem(
+            id="cycle-1", title="fix the thing",
+            description="make it work", type="fix",
+            priority="high", complexity=2,
+            acceptance_criteria=["minimum change", "tests pass"],
+        )
+        from sentinel.roles.coder import ExecutionResult
+        execution = ExecutionResult(
+            work_item_id="cycle-1", status="partial",
+            branch="sentinel/fix/fix-the-thing",
+            commit_sha="deadbeef",
+            files_changed=["src/foo.py"],
+        )
+
+        with (
+            patch(
+                "sentinel.roles.reviewer._get_diff",
+                return_value="diff --git a/src/foo.py b/src/foo.py\n+new line",
+            ),
+            tempfile.TemporaryDirectory() as tmpdir,
+        ):
+            result = await reviewer.review(work_item, execution, tmpdir)
+
+            assert result.verdict == "changes-requested"
+            # The fix: transcript exists
+            transcripts = list(
+                (Path(tmpdir) / ".sentinel" / "reviews").glob("*.md"),
+            )
+            assert len(transcripts) == 1, "review must leave a transcript"
+            body = transcripts[0].read_text()
+            assert "CHANGES REQUESTED" in body
+            assert "20-turn max path" in body  # blocking issue preserved
+            assert "Finnhub API key" in body  # non-blocking observation
+            assert "minimum change" in body  # acceptance criteria scorecard
+            assert "deadbeef" in body  # commit SHA link
