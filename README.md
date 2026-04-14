@@ -9,20 +9,21 @@ Built around the way a technical PM actually operates: understand the project, r
 Every run walks one cycle:
 
 ```
-ASSESS → RESEARCH → PLAN → DELEGATE
-  ↑                          │
-  └──────────────────────────┘
+ASSESS → PLAN → DELEGATE
+  ↑                │
+  └────────────────┘
 ```
 
 1. **Assess.** Read `goals.md`, scan the code, generate 6–8 project-specific lenses (e.g. `risk-surface`, `cost-awareness`, `adoption`), evaluate the project through each.
-2. **Research.** Investigate the best approach for the highest-priority findings — web search, docs, cross-provider comparison.
-3. **Plan.** Produce a ranked backlog with acceptance criteria.
-4. **Delegate.** Hand each item to a coding agent. A different provider reviews.
+2. **Plan.** Produce a ranked backlog with acceptance criteria. Optionally sync to GitHub issues with `sentinel plan --sync-github`.
+3. **Delegate.** Hand each item to a coding agent. A different provider reviews.
+
+A dedicated research phase (cross-provider comparison, consensus queries) is on the roadmap but not shipped yet.
 
 Two ideas do most of the work:
 
-- **Goals are derived, not stored.** Pulled from `goals.md`, `CLAUDE.md`, `README.md`, and GitHub issues each cycle. No second source of truth to drift.
-- **Lenses are generated per scan, not shipped as fixed checklists.** For a trading system you'd get `risk-surface` and `reliability`; for a dev tool you'd get `craft` and `adoption`. Sentinel decides the advisory team based on what the project actually is.
+- **Goals are derived, not stored.** Read from `goals.md`, `CLAUDE.md`, and `README.md` each cycle. No second source of truth to drift.
+- **Lenses are generated from your project, not shipped as fixed checklists.** For a trading system you'd get `risk-surface` and `reliability`; for a dev tool you'd get `craft` and `adoption`. Sentinel generates the lens set on first scan and persists it to `.sentinel/lenses.md` so subsequent scans use the same lenses (useful for trend tracking). Delete that file to regenerate.
 
 ## The five roles
 
@@ -47,7 +48,7 @@ Sentinel wraps CLIs — **no API keys live inside sentinel**. Each CLI handles i
 - `gemini` — Google (native web search)
 - `ollama` — local, free, offline
 
-Any role can use any provider.
+Any role can use any provider, with one constraint: the **Coder** needs agentic-code capability (Claude or OpenAI today — Gemini and local don't qualify yet).
 
 ## Quick start
 
@@ -74,7 +75,7 @@ sentinel work
 ```bash
 sentinel work                   # one full cycle
 sentinel work --budget 10m      # time-bounded
-sentinel work --budget $5       # money-bounded
+sentinel work --budget '$5'     # money-bounded (quote to stop shell expansion)
 sentinel work --every 1h        # loop continuously
 sentinel work --dry-run         # plan, don't execute
 ```
@@ -93,6 +94,7 @@ sentinel providers              # provider detection + health
 ```toml
 [project]
 name = "my-project"
+path = "/Users/you/Repos/my-project"
 
 [roles.monitor]
 provider = "local"              # Ollama, runs on your machine
