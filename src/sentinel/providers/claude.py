@@ -83,6 +83,73 @@ class ClaudeProvider(Provider):
             session_id=data.get("session_id"),
         )
 
+    async def chat_json(
+        self, prompt: str, schema: dict, system_prompt: str | None = None,
+    ) -> tuple[dict | None, ChatResponse]:
+        """Native JSON schema enforcement via Claude CLI's --json-schema flag."""
+        import json as _json
+        import tempfile
+        from pathlib import Path as _Path
+
+        # Write schema to temp file (Claude CLI wants a file path)
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False,
+        ) as f:
+            _json.dump(schema, f)
+            schema_path = f.name
+
+        try:
+            args = [
+                "claude", "-p", prompt,
+                "--output-format", "json",
+                "--model", self.model,
+                "--no-session-persistence",
+                "--disallowedTools", "Bash,Edit,Write,NotebookEdit",
+                "--json-schema", schema_path,
+            ]
+            if system_prompt:
+                args.extend(["--system-prompt", system_prompt])
+
+            try:
+                result = run_cli(args, timeout=600)
+            except subprocess.TimeoutExpired:
+                return None, ChatResponse(
+                    content="Error: Claude CLI timed out",
+                    provider=self.name,
+                )
+
+            if result.returncode != 0:
+                return None, ChatResponse(
+                    content=f"Error: {result.stderr.strip()}",
+                    provider=self.name,
+                )
+
+            outer = parse_json_safe(result.stdout)
+            if not outer or outer.get("is_error"):
+                err = outer.get("result") if outer else result.stdout[:200]
+                return None, ChatResponse(
+                    content=f"Error: {err}", provider=self.name,
+                )
+
+            # The actual schema-validated JSON is in result.result (as a string)
+            inner_str = outer.get("result", "")
+            parsed = parse_json_safe(inner_str)
+
+            usage = outer.get("usage", {})
+            response = ChatResponse(
+                content=inner_str,
+                model=self.model,
+                provider=self.name,
+                input_tokens=usage.get("input_tokens", 0),
+                output_tokens=usage.get("output_tokens", 0),
+                cost_usd=outer.get("total_cost_usd", 0.0),
+                duration_ms=outer.get("duration_ms", 0),
+                session_id=outer.get("session_id"),
+            )
+            return parsed, response
+        finally:
+            _Path(schema_path).unlink(missing_ok=True)
+
     async def code(self, prompt: str, working_directory: str = ".") -> ChatResponse:
         """Full agentic Claude Code — file editing, terminal, tests."""
         args = [

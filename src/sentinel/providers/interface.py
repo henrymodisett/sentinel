@@ -108,6 +108,31 @@ class Provider(ABC):
     async def chat(self, prompt: str, system_prompt: str | None = None) -> ChatResponse:
         """Send a prompt, get a response."""
 
+    async def chat_json(
+        self, prompt: str, schema: dict, system_prompt: str | None = None,
+    ) -> tuple[dict | None, ChatResponse]:
+        """Send a prompt, get a structured JSON response validated against schema.
+
+        Default implementation: prompt-based enforcement + safe parsing.
+        Providers should override with native schema support where available
+        (Claude --json-schema, Codex --output-schema).
+
+        Returns (parsed_data_or_None, full_response). Caller can inspect
+        the response for cost/tokens even if parsing failed.
+        """
+        import json as _json
+        schema_str = _json.dumps(schema, indent=2)
+        strict_prompt = (
+            f"{prompt}\n\n"
+            f"CRITICAL: Respond with ONLY a JSON object matching this schema. "
+            f"No prose outside the JSON, no markdown fences, no explanation. "
+            f"Just valid JSON starting with {{ and ending with }}.\n\n"
+            f"Schema:\n{schema_str}"
+        )
+        response = await self.chat(strict_prompt, system_prompt)
+        parsed = parse_json_safe(response.content)
+        return parsed, response
+
     async def research(self, prompt: str) -> ChatResponse:
         """Chat with web search grounding. Falls back to regular chat."""
         return await self.chat(prompt)
