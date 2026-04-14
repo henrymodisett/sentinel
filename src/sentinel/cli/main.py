@@ -84,11 +84,28 @@ def status() -> None:
 
 @main.command(hidden=True)
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
-def init(yes: bool) -> None:
-    """Initialize Sentinel in the current project (usually auto-run by work)."""
+@click.option(
+    "--preset",
+    type=click.Choice(
+        ["recommended", "simple", "cheap", "local", "power"],
+        case_sensitive=False,
+    ),
+    default=None,
+    help="Use a named preset instead of interactive questions.",
+)
+def init(yes: bool, preset: str | None) -> None:
+    """Initialize Sentinel in the current project (usually auto-run by work).
+
+    Presets (skip interactive prompts):
+      recommended  — smart defaults per role (the default)
+      simple       — use claude for everything
+      cheap        — prefer local / gemini-flash where possible
+      local        — use Ollama everywhere (free, private, offline)
+      power        — highest-quality model per role (expensive)
+    """
     from sentinel.cli.init_cmd import run_init
 
-    run_init(auto_yes=yes)
+    run_init(auto_yes=yes, preset=preset)
 
 
 @main.command(hidden=True)

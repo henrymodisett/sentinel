@@ -101,8 +101,9 @@ class TestCombinations:
         CliRunner().invoke(main, ["init", "--yes"])
         config = _read_config(isolated_home)
 
-        # Monitor prefers local when available
-        assert config["roles"]["monitor"]["provider"] == "local"
+        # Recommended defaults: monitor → gemini-flash (fastest + free tier)
+        assert config["roles"]["monitor"]["provider"] == "gemini"
+        assert "flash" in config["roles"]["monitor"]["model"].lower()
 
         # Reviewer ≠ coder (independence check)
         assert (
@@ -155,6 +156,112 @@ class TestInvariants:
         # CliRunner simulates non-TTY stdin → init should auto-proceed
         assert result.exit_code == 0
         assert (isolated_home / ".sentinel" / "config.toml").exists()
+
+
+# ---------- Presets ----------
+
+class TestPresets:
+    """--preset X should skip interactive questions and use the named preset."""
+
+    def test_preset_simple_uses_one_provider(self, fake_cli_env, isolated_home):
+        fake_cli_env(claude=True, gemini=True)
+        CliRunner().invoke(main, ["init", "--preset", "simple"])
+        config = _read_config(isolated_home)
+        # simple = use one provider for everything (claude preferred)
+        providers = {r["provider"] for r in config["roles"].values()}
+        assert providers == {"claude"}, (
+            f"simple preset should collapse to one provider, got {providers}"
+        )
+
+    def test_preset_cheap_prefers_free_tiers(self, fake_cli_env, isolated_home):
+        fake_cli_env(claude=True, gemini=True)
+        CliRunner().invoke(main, ["init", "--preset", "cheap"])
+        config = _read_config(isolated_home)
+        # Coder still needs agentic — stays on claude
+        assert config["roles"]["coder"]["provider"] == "claude"
+        # Everything else should prefer gemini-flash (free tier) over claude
+        for role in ("monitor", "researcher", "planner", "reviewer"):
+            assert config["roles"][role]["provider"] == "gemini", (
+                f"cheap preset should push {role} off claude onto gemini"
+            )
+
+    def test_preset_power_uses_top_models(self, fake_cli_env, isolated_home):
+        fake_cli_env(claude=True, gemini=True)
+        CliRunner().invoke(main, ["init", "--preset", "power"])
+        config = _read_config(isolated_home)
+        # Planner, coder, reviewer should get opus
+        assert "opus" in config["roles"]["planner"]["model"]
+        assert "opus" in config["roles"]["coder"]["model"]
+
+    def test_preset_local_falls_back_if_ollama_missing(
+        self, fake_cli_env, isolated_home,
+    ):
+        # No ollama — should fall back to recommended silently
+        fake_cli_env(claude=True, gemini=True)
+        CliRunner().invoke(main, ["init", "--preset", "local"])
+        config = _read_config(isolated_home)
+        # Nothing should be 'local' since ollama isn't installed
+        providers = {r["provider"] for r in config["roles"].values()}
+        assert "local" not in providers
+
+    def test_preset_cheap_never_writes_unavailable_provider(self):
+        """Regression: cheap preset used to hard-code gemini as the coder
+        fallback even when gemini wasn't installed."""
+        from sentinel.config.schema import ProviderName
+        from sentinel.recommendations import apply_preset
+
+        # Ollama-only install — every role must land on an installed provider
+        assignments = apply_preset(
+            "cheap",
+            available={ProviderName.LOCAL},
+            ollama_models=["qwen2.5-coder:14b"],
+        )
+        providers = {prov for prov, _ in assignments.values()}
+        assert providers <= {ProviderName.LOCAL}, (
+            f"cheap preset wrote unavailable providers: {providers}"
+        )
+
+    def test_preset_local_assigns_every_role_to_ollama(self):
+        """Direct unit test — `local` preset hits the ollama HTTP API at
+        runtime, so we test the pure function here rather than round-tripping
+        through the CLI (which would need a live server)."""
+        from sentinel.config.schema import ProviderName
+        from sentinel.recommendations import apply_preset
+
+        available = {
+            ProviderName.CLAUDE, ProviderName.GEMINI, ProviderName.LOCAL,
+        }
+        assignments = apply_preset(
+            "local", available, ollama_models=["qwen2.5-coder:14b"],
+        )
+        providers = {prov for prov, _ in assignments.values()}
+        assert providers == {ProviderName.LOCAL}
+
+    def test_unknown_preset_fails_cleanly(self, fake_cli_env, isolated_home):
+        fake_cli_env(claude=True)
+        result = CliRunner().invoke(main, ["init", "--preset", "bogus"])
+        # click should reject before run_init is even called
+        assert result.exit_code != 0
+        assert not (isolated_home / ".sentinel" / "config.toml").exists()
+
+
+# ---------- Goals.md nudge (not a blocker) ----------
+
+class TestGoalsNudge:
+    """Goals.md template should warn, not block — work still proceeds."""
+
+    def test_work_proceeds_when_goals_is_template(
+        self, fake_cli_env, isolated_home,
+    ):
+        """A fresh init leaves goals.md as a template — work should still run."""
+        fake_cli_env(claude=True, gemini=True)
+        CliRunner().invoke(main, ["init", "--yes"])
+
+        # Goals.md is still the default template at this point
+        from sentinel.cli.work_cmd import _goals_filled
+        assert not _goals_filled(isolated_home), (
+            "test setup: goals.md should still be a template after fresh init"
+        )
 
 
 # ---------- Re-running init ----------

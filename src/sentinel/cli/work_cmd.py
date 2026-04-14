@@ -213,15 +213,14 @@ async def _run_single_cycle(
     if not config:
         return
 
-    # --- 2. Check goals.md ---
+    # --- 2. Nudge (don't block) if goals.md is still the template ---
     if not _goals_filled(project):
         console.print(
-            "[yellow]  Goals not filled in yet.[/yellow]\n"
-            "  Edit [cyan].sentinel/goals.md[/cyan] to describe your project, "
-            "then run `sentinel work` again.\n"
-            "  Sentinel produces much better results with goals.md filled in."
+            "[yellow]  Heads up:[/yellow] [cyan].sentinel/goals.md[/cyan] "
+            "still has the default template.\n"
+            "  Scans will run, but lens generation is much sharper once you "
+            "describe the project there.\n"
         )
-        return
 
     # --- Main work loop ---
     router = Router(config)
