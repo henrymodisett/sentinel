@@ -571,7 +571,7 @@ class TestCoderPersistsTranscripts:
                 (Path(tmpdir) / ".sentinel" / "executions").glob("*.md"),
             )
             assert len(transcripts) == 1, "execution must leave a transcript"
-            body = transcripts[0].read_text()
+            body = transcripts[0].read_text(encoding="utf-8")
             # Stderr surfaces in the transcript even when content was empty
             assert "max turns reached" in body
             # Raw stdout is preserved for post-hoc JSON diffing
@@ -759,7 +759,7 @@ class TestReviewerPersistsTranscripts:
                 (Path(tmpdir) / ".sentinel" / "reviews").glob("*.md"),
             )
             assert len(transcripts) == 1, "review must leave a transcript"
-            body = transcripts[0].read_text()
+            body = transcripts[0].read_text(encoding="utf-8")
             assert "CHANGES REQUESTED" in body
             assert "20-turn max path" in body  # blocking issue preserved
             assert "Finnhub API key" in body  # non-blocking observation
