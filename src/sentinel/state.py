@@ -114,8 +114,15 @@ def detect_project_type(project_path: Path) -> dict:
         result["lint_command"] = "golangci-lint run"
         result["conditional_lenses"].append("performance")
 
-    # Python (uv)
-    elif (project_path / "pyproject.toml").exists():
+    # Python (uv, pip-tools, setuptools, pipenv) — any of these markers
+    # flags the project as Python for scans/work commands
+    elif any(
+        (project_path / marker).exists()
+        for marker in (
+            "pyproject.toml", "requirements.txt", "setup.py",
+            "setup.cfg", "Pipfile",
+        )
+    ):
         result["type"] = "python"
         if (project_path / "uv.lock").exists():
             result["test_command"] = "uv run pytest"

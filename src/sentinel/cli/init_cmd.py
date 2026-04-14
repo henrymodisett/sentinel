@@ -60,23 +60,26 @@ def _copy_tree(src: Path, dst: Path) -> list[str]:
 
 
 def _detect_project_type(project: Path) -> str:
-    if (project / "Package.swift").exists() or list(project.glob("*.xcodeproj")):
-        return "swift"
-    if (project / "Cargo.toml").exists():
-        return "rust"
-    if (project / "go.mod").exists():
-        return "go"
-    python_markers = (
-        "pyproject.toml", "requirements.txt", "setup.py", "setup.cfg", "Pipfile",
-    )
-    if any((project / marker).exists() for marker in python_markers):
-        return "python"
+    """Return a short project-type label for config.toml.
+
+    Delegates the Swift/Rust/Go/Python/Node/generic decision to the
+    single source of truth in sentinel.state.detect_project_type() so
+    init and gather_state() can't drift apart. Adds a few labels init
+    wants that state's type-hint keys don't cover (typescript vs
+    javascript, haskell).
+    """
+    from sentinel.state import detect_project_type as _state_detect
+
+    # TypeScript vs JavaScript — init surfaces the distinction in the
+    # goals.md template, but scans don't care, so it lives here.
     if (project / "package.json").exists():
-        tsconfig = (project / "tsconfig.json").exists()
-        return "typescript" if tsconfig else "javascript"
+        return "typescript" if (project / "tsconfig.json").exists() else "javascript"
+
+    # Haskell — no state-level test/lint command support yet
     if list(project.glob("*.cabal")) or (project / "stack.yaml").exists():
         return "haskell"
-    return "generic"
+
+    return _state_detect(project)["type"]
 
 
 def _write_goals_template(project: Path, project_type: str) -> Path:

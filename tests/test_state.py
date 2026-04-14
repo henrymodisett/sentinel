@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
-from sentinel.state import ProjectState, gather_state
+from sentinel.state import ProjectState, detect_project_type, gather_state
 
 
 def _mock_run(args, **kwargs):
@@ -84,6 +84,38 @@ class TestGatherState:
             state = gather_state(Path(tmpdir))
             assert len(state.errors) > 0
             assert state.branch == "unknown"
+
+
+class TestDetectProjectType:
+    """Regression: gather_state uses this to pick test/lint commands.
+    A project with requirements.txt but no pyproject.toml used to land
+    as 'generic' and get no pytest/ruff invocation at all."""
+
+    def test_requirements_txt_is_python(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "requirements.txt").write_text("requests\n")
+            result = detect_project_type(Path(tmpdir))
+            assert result["type"] == "python"
+            assert result["test_command"] == "pytest"
+
+    def test_setup_py_is_python(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "setup.py").write_text("from setuptools import setup\n")
+            result = detect_project_type(Path(tmpdir))
+            assert result["type"] == "python"
+
+    def test_pipfile_is_python(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "Pipfile").write_text("[packages]\n")
+            result = detect_project_type(Path(tmpdir))
+            assert result["type"] == "python"
+
+    def test_pyproject_with_uv_lock_uses_uv_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "pyproject.toml").write_text('[project]\nname="x"\n')
+            (Path(tmpdir) / "uv.lock").write_text("")
+            result = detect_project_type(Path(tmpdir))
+            assert result["test_command"] == "uv run pytest"
 
 
 class TestProjectStateDefaults:
