@@ -126,6 +126,22 @@ class TestSecretFiltering:
         output = discover_project_docs(tmp_path)
         assert "secret123" not in output
 
+    def test_secret_directory_names_are_pruned(self, tmp_path: Path) -> None:
+        """Codex round 2: basename-only check used to let
+        `secrets/README.md` slip through because README is a valid
+        doc name. Now secret-adjacent DIR names are pruned during
+        walk, so README inside `secrets/` is never read."""
+        from sentinel.docs import discover_project_docs
+        _make_project(tmp_path, {
+            "secrets/README.md": "API_TOKEN=abc123",
+            "credentials/PLAN.md": "admin_password=xyz",
+            "ROADMAP.md": "# real roadmap",
+        })
+        output = discover_project_docs(tmp_path)
+        assert "API_TOKEN" not in output
+        assert "admin_password" not in output
+        assert "# real roadmap" in output
+
 
 class TestWalkPruning:
     """Codex review: rglob used to descend into skipped dirs before

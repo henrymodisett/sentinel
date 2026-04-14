@@ -132,14 +132,31 @@ def _iter_doc_candidates(project_path: Path) -> list[Path]:
     would stall state gathering for minutes before we returned. Pruning
     up-front is O(top-level-dirs) not O(all-files).
 
+    Walk errors (permission denied on a dir, etc.) are logged with
+    path context. Silently ignoring them violates the "no silent
+    failures" principle — operators should see which dir was skipped.
+
     Depth cap is 3 levels: project-level docs live at the top 1-2
     levels; 3 covers something like `agent/planning/thesis.md`.
+
+    Also skips any dir whose name matches a secret pattern (e.g.
+    `secrets/`, `credentials/`) — otherwise `secrets/README.md` would
+    read through the filename filter since README is a valid doc name.
     """
+    def _on_walk_error(err: OSError) -> None:
+        logger.warning(
+            "Doc discovery: could not enter %s (%s) — skipping",
+            getattr(err, "filename", "?"), err,
+        )
+
     candidates: list[Path] = []
     project_path_str = str(project_path)
-    for dirpath, dirs, files in os.walk(project_path):
-        # Prune noise dirs BEFORE descending into them (in-place mutation)
-        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+    for dirpath, dirs, files in os.walk(project_path, onerror=_on_walk_error):
+        # Prune noise dirs + secret-adjacent dirs BEFORE descending
+        dirs[:] = [
+            d for d in dirs
+            if d not in SKIP_DIRS and not _looks_like_secret(d)
+        ]
         # Enforce depth cap
         relative = os.path.relpath(dirpath, project_path_str)
         depth = 0 if relative == "." else len(relative.split(os.sep))
