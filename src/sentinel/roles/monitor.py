@@ -281,6 +281,14 @@ to understand what the project IS and what it's trying to BECOME —
 they usually encode more signal about priorities than the code does.
 {project_docs}
 
+### Domain expertise brief
+Pre-scan research on the subject-matter domain this project operates
+in. Use this to generate lenses that care about what MATTERS in this
+domain — e.g. for a trading system, lenses about calibration +
+adverse selection > generic "testing" lenses. If the brief is empty,
+lens generation should lean harder on the strategic docs above.
+{domain_brief}
+
 ### Recent commits
 ```
 {recent_commits}
@@ -425,6 +433,7 @@ def _build_explore_prompt(state: ProjectState) -> str:
         claude_md=state.claude_md[:3000],
         readme=state.readme[:2000],
         project_docs=state.project_docs or "(no strategic docs discovered)",
+        domain_brief=state.domain_brief or "(no domain brief — research step skipped or failed)",
         recent_commits=state.recent_commits,
         file_tree=state.file_tree[:2000],
         branch=state.branch,
@@ -560,6 +569,33 @@ class Monitor:
         def emit(event: str, data: dict) -> None:
             if on_progress:
                 on_progress(event, data)
+
+        # --- Step 0: DOMAIN BRIEF (LEARN phase) ---
+        # Before lens generation, ask the Researcher to build a
+        # subject-matter brief so the evaluator knows what "good"
+        # looks like in this domain. Cached to .sentinel/ with a
+        # 7-day TTL so most scans skip the research call. Failure
+        # is non-fatal — lens generation still runs with empty
+        # domain context, same as pre-LEARN-phase behavior.
+        from sentinel.roles.researcher import Researcher
+        try:
+            researcher = Researcher(self.router)
+            brief = await researcher.domain_brief(
+                project_path=state.path,
+                project_type=state.project_type,
+                project_name=state.name or Path(state.path or ".").name,
+                readme_excerpt=state.readme,
+                docs_excerpt=state.project_docs,
+            )
+            state.domain_brief = brief.synthesis
+            if brief.cost_usd > 0:
+                result.total_cost_usd += brief.cost_usd
+                emit("domain_brief", {
+                    "synthesis_len": len(brief.synthesis),
+                    "cost_usd": brief.cost_usd,
+                })
+        except (RuntimeError, OSError) as exc:
+            logger.warning("Domain brief step skipped: %s", exc)
 
         # --- Step 1: EXPLORE + GENERATE LENSES ---
         provider = self.router.get_provider("monitor")
