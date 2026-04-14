@@ -173,7 +173,11 @@ def _write_review_transcript(
             lines += ["", "## Non-blocking observations", ""]
             lines += [f"- {obs}" for obs in result.non_blocking_observations]
 
-        if result.acceptance_criteria_met:
+        # Defense in depth — the upstream parse normalizes to dict, but
+        # a drifted schema or future contributor could still feed this
+        # a non-dict. An isinstance check keeps transcript persistence
+        # from crashing on surprise types.
+        if isinstance(result.acceptance_criteria_met, dict) and result.acceptance_criteria_met:
             lines += ["", "## Acceptance criteria", ""]
             for crit, met in result.acceptance_criteria_met.items():
                 mark = "✅" if met else "❌"
@@ -277,7 +281,13 @@ class Reviewer:
         result.summary = parsed.get("summary", "")
         result.blocking_issues = parsed.get("blocking_issues", [])
         result.non_blocking_observations = parsed.get("non_blocking_observations", [])
-        result.acceptance_criteria_met = parsed.get("criteria_met", {})
+        # `criteria_met` is schema-optional and some providers drift to
+        # returning a list or a string. Normalize to dict at the parse
+        # boundary so downstream code can trust the type.
+        raw_criteria = parsed.get("criteria_met", {})
+        result.acceptance_criteria_met = (
+            raw_criteria if isinstance(raw_criteria, dict) else {}
+        )
         _write_review_transcript(
             project_path, work_item, execution, result,
             diff=diff, raw_response=response.content,

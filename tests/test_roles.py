@@ -658,6 +658,49 @@ class TestReviewerPersistsTranscripts:
     blocking observations, and the raw provider response."""
 
     @pytest.mark.asyncio
+    async def test_survives_drifted_criteria_met_type(self) -> None:
+        """Regression: if the provider returns criteria_met as a list
+        (schema drift), transcript persistence used to crash on
+        .items() and mask the real verdict."""
+        import json as _json
+
+        coder_provider = MockProvider()
+        drifted_payload = {
+            "verdict": "approved",
+            "summary": "LGTM",
+            "blocking_issues": [],
+            # Drifted schema: should be dict, came back as list
+            "criteria_met": ["first crit", "second crit"],
+        }
+        reviewer_provider = MockProvider(json_responses=[
+            (drifted_payload, ChatResponse(
+                content=_json.dumps(drifted_payload),
+                provider=ProviderName.GEMINI, cost_usd=0.0,
+            )),
+        ])
+        router = MagicMock()
+        router.get_provider = lambda role: (
+            reviewer_provider if role == "reviewer" else coder_provider
+        )
+        reviewer = Reviewer(router)
+        work_item = WorkItem(
+            id="1", title="drift test", description="", type="fix",
+            priority="low", complexity=1,
+        )
+        from sentinel.roles.coder import ExecutionResult
+        execution = ExecutionResult(work_item_id="1", status="success")
+
+        with (
+            patch("sentinel.roles.reviewer._get_diff", return_value=""),
+            tempfile.TemporaryDirectory() as tmpdir,
+        ):
+            # Must not crash even though criteria_met is a list
+            result = await reviewer.review(work_item, execution, tmpdir)
+            assert result.verdict == "approved"
+            # Normalized to empty dict
+            assert result.acceptance_criteria_met == {}
+
+    @pytest.mark.asyncio
     async def test_writes_review_transcript_on_success(self) -> None:
         import json as _json
 
