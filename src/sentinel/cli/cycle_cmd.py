@@ -97,7 +97,8 @@ async def run_cycle(
     monitor = Monitor(router)
 
     scan_cost_start = budget.today_spent_usd
-    scan_result = await monitor.assess(state)
+    from sentinel.cli.scan_cmd import scan_progress_printer
+    scan_result = await monitor.assess(state, on_progress=scan_progress_printer())
 
     if scan_result.total_cost_usd > 0:
         record_spend(

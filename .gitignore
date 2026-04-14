@@ -42,9 +42,12 @@ uv.lock
 .toolkit-version
 *.bak
 
-# Sentinel (in target projects — not this repo)
-# .sentinel/memory/
-# .sentinel/reports/
+# Sentinel dogfood artifacts (the sentinel repo runs sentinel on itself
+# for testing — these are generated per-run and shouldn't be committed)
+.sentinel/goals.md
+.sentinel/backlog.md
+.sentinel/scans/
+.sentinel/state/
 
 # Test coverage
 coverage/

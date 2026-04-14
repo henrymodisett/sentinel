@@ -244,7 +244,10 @@ async def _run_single_cycle(
                     console.print(f"  [dim]Last scan: {mins} min ago[/dim]")
 
                 state = gather_state(project)
-                scan_result = await monitor.assess(state)
+                from sentinel.cli.scan_cmd import scan_progress_printer
+                scan_result = await monitor.assess(
+                    state, on_progress=scan_progress_printer(),
+                )
 
                 if scan_result.total_cost_usd > 0:
                     record_spend(

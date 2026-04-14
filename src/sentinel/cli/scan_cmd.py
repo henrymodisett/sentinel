@@ -36,6 +36,52 @@ def _load_config(project_path: Path) -> SentinelConfig | None:
     return SentinelConfig(**data)
 
 
+def scan_progress_printer():
+    """Return an on_progress callback that prints scan events to console.
+
+    Shared across scan, work, and cycle commands for consistent streaming UX.
+    """
+    def on_progress(event: str, data: dict) -> None:
+        if event == "step_start":
+            console.print(
+                f"[bold cyan]▶[/bold cyan] {data.get('message', data['step'])}"
+            )
+        elif event == "lens_generated":
+            lenses = data["lenses"]
+            console.print(
+                f"  [green]✓[/green] Generated {len(lenses)} custom lenses:"
+            )
+            for lens in lenses:
+                console.print(
+                    f"    [bold]{lens.name}[/bold] — [dim]{lens.description}[/dim]"
+                )
+            console.print()
+        elif event == "lens_start":
+            idx = data["index"]
+            total = data["total"]
+            name = data["lens_name"]
+            console.print(
+                f"  [dim]({idx}/{total})[/dim] [cyan]evaluating[/cyan] {name}..."
+            )
+        elif event == "lens_done":
+            name = data["lens_name"]
+            score = data["score"]
+            running = data.get("running_cost_usd", 0.0)
+            color = "green" if score >= 75 else "yellow" if score >= 50 else "red"
+            cost_str = (
+                f" [dim](running: ${running:.4f})[/dim]" if running > 0 else ""
+            )
+            console.print(
+                f"  [green]✓[/green] {name}: "
+                f"[{color}]{score}/100[/{color}]{cost_str}"
+            )
+        elif event == "lens_failed":
+            console.print(
+                f"  [red]✗[/red] {data['lens_name']}: failed"
+            )
+    return on_progress
+
+
 def _print_state_summary(state: ProjectState) -> None:
     console.print(f"  Branch: {state.branch}")
     console.print(f"  Uncommitted: {state.uncommitted_files} files")
@@ -179,48 +225,7 @@ async def run_scan(
 
     # Streaming progress callback
     start = time.time()
-
-    def on_progress(event: str, data: dict) -> None:
-        if event == "step_start":
-            console.print(
-                f"[bold cyan]▶[/bold cyan] {data.get('message', data['step'])}"
-            )
-        elif event == "lens_generated":
-            lenses = data["lenses"]
-            console.print(
-                f"  [green]✓[/green] Generated {len(lenses)} custom lenses:"
-            )
-            for lens in lenses:
-                console.print(
-                    f"    [bold]{lens.name}[/bold] — [dim]{lens.description}[/dim]"
-                )
-            console.print()
-        elif event == "lens_start":
-            idx = data["index"]
-            total = data["total"]
-            name = data["lens_name"]
-            console.print(
-                f"  [dim]({idx}/{total})[/dim] [cyan]evaluating[/cyan] {name}..."
-            )
-        elif event == "lens_done":
-            name = data["lens_name"]
-            score = data["score"]
-            running = data.get("running_cost_usd", 0.0)
-            color = "green" if score >= 75 else "yellow" if score >= 50 else "red"
-            cost_str = (
-                f" [dim](running: ${running:.4f})[/dim]" if running > 0 else ""
-            )
-            console.print(
-                f"  [green]✓[/green] {name}: [{color}]{score}/100[/{color}]{cost_str}"
-            )
-        elif event == "lens_failed":
-            console.print(
-                f"  [red]✗[/red] {data['lens_name']}: failed"
-            )
-        elif event == "step_done":
-            pass  # could show step timing here
-
-    result = await monitor.assess(state, on_progress=on_progress)
+    result = await monitor.assess(state, on_progress=scan_progress_printer())
     elapsed = time.time() - start
 
     # Record spend regardless of success/failure (we paid for the tokens)
@@ -261,7 +266,17 @@ async def run_scan(
 
     # Show summary
     console.print()
-    console.print(f"[bold]Overall health: {result.overall_score}/100[/bold]")
+    n_total = len(result.evaluations)
+    n_ok = n_total - result.n_lenses_failed
+    score_line = f"[bold]Overall health: {result.overall_score}/100[/bold]"
+    if result.n_lenses_failed:
+        score_line += (
+            f" [yellow](based on {n_ok}/{n_total} lenses — "
+            f"{result.n_lenses_failed} failed to evaluate)[/yellow]"
+        )
+    else:
+        score_line += f" [dim](across {n_total} lenses)[/dim]"
+    console.print(score_line)
     console.print()
     console.print(result.raw_report)
 

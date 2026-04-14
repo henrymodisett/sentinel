@@ -70,15 +70,21 @@ def run_cli(args: list[str], timeout: int = 300) -> subprocess.CompletedProcess[
 
 
 async def run_cli_async(
-    args: list[str], timeout: int = 300,
+    args: list[str], timeout: int = 300, env: dict | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run a CLI command asynchronously — enables true parallelism via asyncio.gather()."""
+    """Run a CLI command asynchronously.
+
+    env: optional environment dict. If None, inherits parent env (most CLIs
+    need this for auth tokens in macOS keychain/config dirs). Providers
+    should pass a minimal env to reduce secret leakage into prompts.
+    """
     import asyncio as _asyncio
 
     process = await _asyncio.create_subprocess_exec(
         *args,
         stdout=_asyncio.subprocess.PIPE,
         stderr=_asyncio.subprocess.PIPE,
+        env=env,  # None means inherit
     )
 
     try:
@@ -96,6 +102,34 @@ async def run_cli_async(
         stdout=stdout_bytes.decode("utf-8", errors="replace"),
         stderr=stderr_bytes.decode("utf-8", errors="replace"),
     )
+
+
+def minimal_provider_env(preserve: list[str] | None = None) -> dict:
+    """Build a minimal env dict for provider subprocesses.
+
+    Includes only what's needed for CLI auth + process execution, not
+    the full user env (which could contain unrelated secrets that end
+    up in logs or prompts).
+
+    preserve: extra env var names to pass through (e.g. ['ANTHROPIC_API_KEY'])
+    """
+    import os as _os
+
+    # Base: things CLIs genuinely need to run
+    safe_keys = {
+        "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR",
+        "LANG", "LC_ALL", "LC_CTYPE",
+        # macOS keychain access
+        "SSH_AUTH_SOCK", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME",
+        # Homebrew paths (for CLIs installed via brew)
+        "HOMEBREW_PREFIX", "HOMEBREW_CELLAR", "HOMEBREW_REPOSITORY",
+        # Node/npm (Gemini CLI is Node-based)
+        "NODE_PATH", "NPM_CONFIG_PREFIX",
+    }
+    if preserve:
+        safe_keys.update(preserve)
+
+    return {k: v for k, v in _os.environ.items() if k in safe_keys}
 
 
 def parse_json_safe(text: str) -> dict | None:

@@ -17,6 +17,7 @@ from sentinel.providers.interface import (
     ProviderCapabilities,
     ProviderName,
     ProviderStatus,
+    minimal_provider_env,
     parse_json_safe,
     run_cli,
     run_cli_async,
@@ -51,7 +52,9 @@ class ClaudeProvider(Provider):
             args.extend(["--system-prompt", system_prompt])
 
         try:
-            result = await run_cli_async(args, timeout=self.timeout_sec)
+            result = await run_cli_async(
+                args, timeout=self.timeout_sec, env=minimal_provider_env(),
+            )
         except subprocess.TimeoutExpired:
             return ChatResponse(
                 content=f"Error: Claude CLI timed out after {self.timeout_sec}s",
@@ -99,7 +102,9 @@ class ClaudeProvider(Provider):
             "--no-session-persistence",
         ]
         try:
-            result = await run_cli_async(args, timeout=self.timeout_sec)
+            result = await run_cli_async(
+                args, timeout=self.timeout_sec, env=minimal_provider_env(),
+            )
         except subprocess.TimeoutExpired:
             return ChatResponse(
                 content=f"Error: Claude CLI timed out after {self.timeout_sec}s",

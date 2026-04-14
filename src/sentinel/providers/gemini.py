@@ -17,6 +17,7 @@ from sentinel.providers.interface import (
     ProviderCapabilities,
     ProviderName,
     ProviderStatus,
+    minimal_provider_env,
     parse_json_safe,
     run_cli,
     run_cli_async,
@@ -57,7 +58,9 @@ class GeminiProvider(Provider):
             args.extend(["-m", self.model])
 
         try:
-            result = await run_cli_async(args, timeout=self.timeout_sec)
+            result = await run_cli_async(
+                args, timeout=self.timeout_sec, env=minimal_provider_env(),
+            )
         except subprocess.TimeoutExpired:
             return ChatResponse(
                 content=f"Error: Gemini CLI timed out after {self.timeout_sec}s",

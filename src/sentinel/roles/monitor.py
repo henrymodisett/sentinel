@@ -62,6 +62,7 @@ class ScanResult:
     # Status
     ok: bool = False
     error: str | None = None
+    n_lenses_failed: int = 0  # lenses that errored during evaluation
     # Usage tracking
     model: str = ""
     provider: str = ""
@@ -95,7 +96,13 @@ EXPLORE_SCHEMA = {
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "kebab-case lens name, e.g. financial-risk-management",
+                        "description": (
+                            "Short kebab-case lens name, ideally 1-3 words, "
+                            "verb-ish or role-ish. Good: ships-cleanly, "
+                            "terminal-correctness, cost-awareness, adoption. "
+                            "Bad (too long): developer-experience-and-"
+                            "adoption-specialist-engineer."
+                        ),
                     },
                     "description": {
                         "type": "string",
@@ -120,8 +127,8 @@ EXPLORE_SCHEMA = {
                 "required": ["name", "description", "what_to_look_for", "questions"],
                 "additionalProperties": False,
             },
-            "minItems": 3,
-            "maxItems": 12,
+            "minItems": 5,
+            "maxItems": 10,
         },
     },
     "required": ["project_summary", "lenses"],
@@ -226,6 +233,18 @@ For a passion-project developer tool: senior engineers focused on craft.
 
 Generate lenses ONLY for the advisors this project actually needs.
 Don't pad with irrelevant perspectives. Don't skip what matters.
+
+Lens rules:
+- Aim for 6-8 lenses for substantive projects. Never fewer than 5.
+- Use SHORT names (1-3 words, kebab-case, verb-ish or role-ish).
+  Good: "ships-cleanly", "terminal-correctness", "cost-awareness",
+  "adoption", "risk-surface", "craft". Bad: long phrases with "and",
+  "specialist", "lead", "engineer", "architect" tacked on.
+- No two lenses should cover the same scope. If two would evaluate the
+  same files, consolidate them.
+- REQUIRED: at least one lens should be non-engineering — product,
+  operations, distribution, adoption, DX, strategy. Not every lens can
+  be "senior engineer looking at code."
 
 ## Project Context
 
@@ -424,6 +443,25 @@ class Monitor:
             result.total_output_tokens += resp.output_tokens
             result.total_cost_usd += resp.cost_usd
 
+            # Retry once with a sharper prompt if the first attempt didn't
+            # produce valid JSON. Providers like Gemini in read-only mode
+            # sometimes emit prose instead of schema output.
+            if not parsed_eval:
+                retry_prompt = (
+                    eval_prompt
+                    + "\n\nOUTPUT REQUIREMENT: Return ONLY the JSON object. "
+                    "No prose, no markdown, no explanation. Start with { and end with }."
+                )
+                parsed_eval, retry_resp = await provider.chat_json(
+                    retry_prompt, EVALUATE_SCHEMA,
+                )
+                result.total_input_tokens += retry_resp.input_tokens
+                result.total_output_tokens += retry_resp.output_tokens
+                result.total_cost_usd += retry_resp.cost_usd
+                # Use the retry response for error reporting if it also failed
+                if not parsed_eval:
+                    resp = retry_resp
+
             if not parsed_eval:
                 emit("lens_failed", {
                     "lens_name": lens.name,
@@ -497,11 +535,25 @@ class Monitor:
             logger.error(result.error)
             return result
 
-        result.overall_score = parsed_synth.get("overall_score", 0)
+        # Overall score excludes failed lens evaluations so the top-line
+        # number isn't dragged down by parsing bugs. The LLM synthesis gives
+        # a suggested weighted score but we override with our own average
+        # over successful lenses only — more robust and matches what users expect.
+        successful = [e for e in result.evaluations if not e.error]
+        n_failed = len(result.evaluations) - len(successful)
+        if successful:
+            result.overall_score = round(
+                sum(e.score for e in successful) / len(successful),
+            )
+        else:
+            # All lenses failed — fall back to the LLM's synthesis score
+            result.overall_score = parsed_synth.get("overall_score", 0)
+
         result.strengths = parsed_synth.get("strengths", [])
         result.critical_risks = parsed_synth.get("critical_risks", [])
         result.top_actions = parsed_synth.get("top_actions", [])
         result.raw_report = parsed_synth.get("summary", "")
+        result.n_lenses_failed = n_failed
         result.ok = True
 
         emit("step_done", {

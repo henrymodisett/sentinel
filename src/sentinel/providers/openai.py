@@ -18,6 +18,7 @@ from sentinel.providers.interface import (
     ProviderCapabilities,
     ProviderName,
     ProviderStatus,
+    minimal_provider_env,
     run_cli,
     run_cli_async,
 )
@@ -66,7 +67,9 @@ class OpenAIProvider(Provider):
             full_prompt = f"{system_prompt}\n\n{prompt}"
         args = ["codex", "exec", full_prompt, "--json", "--ephemeral"]
         try:
-            result = await run_cli_async(args, timeout=self.timeout_sec)
+            result = await run_cli_async(
+                args, timeout=self.timeout_sec, env=minimal_provider_env(),
+            )
         except subprocess.TimeoutExpired:
             return ChatResponse(
                 content=f"Error: Codex CLI timed out after {self.timeout_sec}s",
@@ -95,7 +98,9 @@ class OpenAIProvider(Provider):
             "-C", working_directory,
         ]
         try:
-            result = await run_cli_async(args, timeout=self.timeout_sec)
+            result = await run_cli_async(
+                args, timeout=self.timeout_sec, env=minimal_provider_env(),
+            )
         except subprocess.TimeoutExpired:
             return ChatResponse(
                 content=f"Error: Codex CLI timed out after {self.timeout_sec}s",
