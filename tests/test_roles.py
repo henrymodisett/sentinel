@@ -311,6 +311,114 @@ class TestCoderCommitsToFeatureBranch:
             )
 
 
+class TestCoderCommitPathspecIsolation:
+    """Codex review caught: _commit_files() ran `git add` + `git commit -m`
+    without a pathspec, so anything in the user's staged index got
+    swept into the sentinel commit. Now we use `git commit -- files`
+    which commits only those paths regardless of index state."""
+
+    @pytest.mark.asyncio
+    async def test_does_not_include_pre_staged_unrelated_files(self) -> None:
+        """Scenario: Claude writes a fix, but something else is already
+        staged in the index (e.g. from a prior partial operation).
+        The sentinel commit must NOT include those pre-staged files."""
+        import subprocess as _sp
+
+        class FileWritingMock(MockProvider):
+            async def code(self, prompt, options=None, **kwargs):
+                wd = kwargs.get("working_directory", ".")
+                (Path(wd) / "fixed.py").write_text("fixed\n")
+                return ChatResponse(
+                    content="done", provider=self.name, cost_usd=0.0,
+                )
+
+        provider = FileWritingMock()
+        provider.capabilities = ProviderCapabilities(
+            chat=True, agentic_code=True,
+        )
+        router = _mock_router(provider)
+        coder = Coder(router)
+        work_item = WorkItem(
+            id="1", title="isolate the commit", description="",
+            type="fix", priority="low", complexity=1,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _sp.run(["git", "init", "-q", "-b", "main"], cwd=tmpdir, check=True)
+            _sp.run(
+                ["git", "-c", "user.email=a@b", "-c", "user.name=t",
+                 "commit", "--allow-empty", "-m", "init", "-q"],
+                cwd=tmpdir, check=True,
+            )
+            # Pre-stage an unrelated file — simulates user's in-progress
+            # work or stray coder-agent staging outside our filter.
+            (Path(tmpdir) / "unrelated_staged.py").write_text("staged\n")
+            _sp.run(
+                ["git", "add", "unrelated_staged.py"],
+                cwd=tmpdir, check=True,
+            )
+
+            result = await coder.execute(work_item, tmpdir)
+
+            # Commit landed
+            assert result.commit_sha
+            # But only contains fixed.py — the pre-staged file is absent
+            show = _sp.run(
+                ["git", "show", "--name-only", "--pretty=format:", result.commit_sha],
+                capture_output=True, text=True, cwd=tmpdir,
+            ).stdout.strip()
+            assert "fixed.py" in show
+            assert "unrelated_staged.py" not in show, (
+                f"sentinel commit must not sweep pre-staged files; got:\n{show}"
+            )
+
+
+class TestWorkingTreeGuard:
+    """Codex review caught: work_cmd ran _reset_and_checkout before
+    the first item, wiping any user-uncommitted changes. Now we
+    refuse to start on a dirty tree."""
+
+    def test_detects_dirty_tree(self, tmp_path) -> None:
+        import subprocess as _sp
+
+        from sentinel.cli.work_cmd import _working_tree_clean
+
+        _sp.run(["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True)
+        _sp.run(
+            ["git", "-c", "user.email=a@b", "-c", "user.name=t",
+             "commit", "--allow-empty", "-m", "init", "-q"],
+            cwd=tmp_path, check=True,
+        )
+        assert _working_tree_clean(tmp_path) is True
+
+        # Add a tracked-file modification
+        (tmp_path / "file.py").write_text("x\n")
+        _sp.run(["git", "add", "file.py"], cwd=tmp_path, check=True)
+        _sp.run(
+            ["git", "-c", "user.email=a@b", "-c", "user.name=t",
+             "commit", "-m", "add", "-q"],
+            cwd=tmp_path, check=True,
+        )
+        (tmp_path / "file.py").write_text("x\nmodified\n")
+        assert _working_tree_clean(tmp_path) is False
+
+    def test_ignores_untracked_files(self, tmp_path) -> None:
+        """Untracked files (like .sentinel/transcripts) must not count
+        as dirty — reset --hard doesn't touch them."""
+        import subprocess as _sp
+
+        from sentinel.cli.work_cmd import _working_tree_clean
+
+        _sp.run(["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True)
+        _sp.run(
+            ["git", "-c", "user.email=a@b", "-c", "user.name=t",
+             "commit", "--allow-empty", "-m", "init", "-q"],
+            cwd=tmp_path, check=True,
+        )
+        (tmp_path / "untracked.md").write_text("x\n")
+        assert _working_tree_clean(tmp_path) is True
+
+
 class TestResetAndCheckoutReturnCodes:
     """Codex review caught: `_reset_and_checkout()` ignored return
     codes. A failed checkout would silently leave the loop running

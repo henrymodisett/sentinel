@@ -361,6 +361,47 @@ class TestAutoGitignore:
         assert result.exit_code == 0
         assert (isolated_home / ".gitignore").exists()
 
+    def test_gitignore_commit_ignores_prestaged_files(
+        self, fake_cli_env, isolated_home,
+    ):
+        """Regression: init's `git commit -m ...` without a pathspec
+        used to sweep in anything pre-staged in the user's index. Now
+        uses `git commit -- .gitignore` so only .gitignore lands."""
+        import subprocess as _sp
+
+        fake_cli_env(claude=True)
+        _sp.run(
+            ["git", "init", "-q", "-b", "main"],
+            cwd=isolated_home, check=True,
+        )
+        _sp.run(
+            ["git", "-c", "user.email=a@b", "-c", "user.name=t",
+             "commit", "--allow-empty", "-m", "init", "-q"],
+            cwd=isolated_home, check=True,
+        )
+        # User has a file staged BEFORE running sentinel init
+        (isolated_home / "my_work.py").write_text("print('work in progress')\n")
+        _sp.run(["git", "add", "my_work.py"], cwd=isolated_home, check=True)
+
+        CliRunner().invoke(main, ["init", "--yes"])
+
+        # User's staged file must still be staged (not committed)
+        staged = _sp.run(
+            ["git", "diff", "--cached", "--name-only"],
+            capture_output=True, text=True, cwd=isolated_home,
+        ).stdout.strip()
+        assert "my_work.py" in staged, (
+            "init must not commit user's pre-staged files; "
+            f"staged after init: {staged!r}"
+        )
+        # And the gitignore commit must NOT include my_work.py
+        latest_files = _sp.run(
+            ["git", "show", "--name-only", "--pretty=format:", "HEAD"],
+            capture_output=True, text=True, cwd=isolated_home,
+        ).stdout.strip()
+        assert "my_work.py" not in latest_files
+        assert ".gitignore" in latest_files
+
 
 class TestGoalsNudge:
     """Goals.md template should warn, not block — work still proceeds."""

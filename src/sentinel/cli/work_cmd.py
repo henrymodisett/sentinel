@@ -55,6 +55,25 @@ TEMPLATE_MARKERS = [
 ]
 
 
+def _working_tree_clean(project: Path | str) -> bool:
+    """True iff the project has no tracked modifications or staged changes.
+
+    Used at cycle start so we never wipe user work. Untracked files
+    (.sentinel/, .claude/, etc.) are not considered — those don't
+    threaten user work because reset --hard doesn't touch them, and
+    the between-item `git clean -fd` excludes them explicitly.
+    """
+    result = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=no"],
+        capture_output=True, text=True, cwd=project, timeout=10,
+    )
+    if result.returncode != 0:
+        # Not a git repo or git missing — let the caller proceed; other
+        # git calls will surface the real error downstream.
+        return True
+    return not result.stdout.strip()
+
+
 def _reset_and_checkout(project: str, branch: str) -> bool:
     """Reset the working tree and checkout a branch.
 
@@ -252,6 +271,19 @@ async def _run_single_cycle(
     if dry_run:
         console.print("  [yellow]Dry run — no execution[/yellow]")
     console.print()
+
+    # Refuse to start if the user has pending uncommitted work. Between
+    # items we own the working tree and reset freely; at cycle start
+    # that state is the user's, and silently wiping it would destroy
+    # hours of someone's work.
+    if not _working_tree_clean(project):
+        console.print(
+            "[red]  Working tree has uncommitted changes.[/red]\n"
+            "  sentinel resets the tree between work items; running on a "
+            "dirty tree would destroy your changes.\n"
+            "  Commit, stash, or discard your changes, then run again."
+        )
+        return
 
     # --- 1. Initialize if needed ---
     if not (project / ".sentinel" / "config.toml").exists():

@@ -466,21 +466,30 @@ def _commit_gitignore_if_in_repo(project: Path) -> None:
     if check.returncode != 0 or check.stdout.strip() != "true":
         return
 
-    subprocess.run(
-        ["git", "add", ".gitignore"],
-        capture_output=True, cwd=project, timeout=10,
+    # Check if there's anything to commit (tracked diff or untracked
+    # new file). `git diff` only sees tracked files so we also check
+    # git status for the untracked case.
+    status = subprocess.run(
+        ["git", "status", "--porcelain", "--", ".gitignore"],
+        capture_output=True, text=True, cwd=project, timeout=10,
     )
-    diff_check = subprocess.run(
-        ["git", "diff", "--cached", "--quiet", "--", ".gitignore"],
-        capture_output=True, cwd=project, timeout=10,
-    )
-    if diff_check.returncode == 0:
-        # Nothing actually staged (pre-existing ignore match or similar)
+    if not status.stdout.strip():
+        # .gitignore unchanged (already matched ignore rules or no diff)
         return
 
+    # Stage .gitignore specifically so a new (untracked) file ends up
+    # in the index. `git commit -- pathspec` only commits tracked paths.
+    subprocess.run(
+        ["git", "add", "--", ".gitignore"],
+        capture_output=True, cwd=project, timeout=10,
+    )
+
+    # `git commit <pathspec>` scopes the commit to ONLY .gitignore,
+    # ignoring anything else the user may have staged in their index.
     commit = subprocess.run(
         ["git", "commit", "-m",
-         "chore: gitignore sentinel artifacts (.sentinel/, .claude/)"],
+         "chore: gitignore sentinel artifacts (.sentinel/, .claude/)",
+         "--", ".gitignore"],
         capture_output=True, text=True, cwd=project, timeout=30,
     )
     if commit.returncode == 0:

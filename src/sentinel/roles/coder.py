@@ -56,25 +56,35 @@ def _run_git(
     )
 
 
+def _git_status_snapshot(project_path: str) -> set[str]:
+    """Return the set of paths currently tracked by `git status`.
+
+    Used to snapshot the tree before and after Claude runs so we can
+    isolate the Coder's actual output from anything that was already
+    dirty. Sentinel's own artifacts (.sentinel/, .claude/) are dropped
+    from the snapshot — they don't threaten user work and reset/clean
+    excludes them anyway.
+    """
+    result = _run_git(["status", "--porcelain"], project_path)
+    paths: set[str] = set()
+    for line in result.stdout.strip().splitlines():
+        if len(line) > 3:
+            filename = line[3:]
+            if filename.startswith(".sentinel/") or filename.startswith(".claude/"):
+                continue
+            paths.add(filename)
+    return paths
+
+
 def _files_changed(project_path: str) -> list[str]:
     """List files changed in the working tree, excluding Sentinel artifacts.
 
-    Files under `.sentinel/` are never counted as Coder changes — they
-    belong to sentinel itself (transcripts, scans, proposals). Without
-    this filter, a transcript written during THIS run would be picked
-    up as a "changed file" and turn a no-op Coder run into a false
-    success on projects that haven't gitignored .sentinel/.
+    Returns every non-sentinel path in `git status --porcelain`. Used
+    in pure "what's dirty right now" contexts; when you need "what did
+    the Coder add beyond what was already dirty," snapshot before and
+    after and diff the sets.
     """
-    result = _run_git(["status", "--porcelain"], project_path)
-    files = []
-    for line in result.stdout.strip().splitlines():
-        # Format: "XY filename" where XY is status code
-        if len(line) > 3:
-            filename = line[3:]
-            if filename.startswith(".sentinel/") or filename == ".sentinel":
-                continue
-            files.append(filename)
-    return files
+    return sorted(_git_status_snapshot(project_path))
 
 
 def _commit_files(
@@ -102,6 +112,9 @@ def _commit_files(
     if not safe_files:
         return False, "all files were sentinel/claude artifacts"
 
+    # Stage the files we care about — needed because untracked/new
+    # files aren't in the index yet, and `git commit -- pathspec`
+    # requires the paths to be known to git.
     add_result = _run_git(["add", "--", *safe_files], project_path)
     if add_result.returncode != 0:
         return False, f"git add failed: {add_result.stderr.strip()}"
@@ -114,8 +127,14 @@ def _commit_files(
     )
     commit_msg = f"sentinel: {title}{body}"
 
+    # `git commit -m MSG -- pathspec…` scopes the commit to ONLY the
+    # given paths even if other files are staged in the index. Without
+    # this constraint, anything the coding agent had staged outside
+    # our filter (.sentinel/ artifacts, stray binaries, user's
+    # pre-existing in-progress work) would sweep into the sentinel
+    # commit.
     commit_result = _run_git(
-        ["commit", "-m", commit_msg],
+        ["commit", "-m", commit_msg, "--", *safe_files],
         project_path,
     )
     if commit_result.returncode != 0:
@@ -298,6 +317,13 @@ class Coder:
         branch_name = f"sentinel/{work_item.type}/{_slug(work_item.title)}"
         result.branch = branch_name
 
+        # Snapshot pre-existing dirty files so we can subtract them
+        # later. Anything already in `git status` is NOT the Coder's
+        # output and must never land in the sentinel commit — even if
+        # _working_tree_clean at cycle start prevents this in
+        # practice, keep the subtraction as defense in depth.
+        pre_snapshot = _git_status_snapshot(project_path)
+
         co_result = _run_git(["checkout", "-b", branch_name], project_path)
         if co_result.returncode != 0:
             if "already exists" in co_result.stderr:
@@ -372,8 +398,11 @@ class Coder:
             )
             return result
 
-        # Check what files actually changed
-        changed = _files_changed(project_path)
+        # Figure out which files Claude actually touched by subtracting
+        # the pre-run snapshot — anything that was already dirty belongs
+        # to the user (or a prior failed item), not this execution.
+        post_snapshot = _git_status_snapshot(project_path)
+        changed = sorted(post_snapshot - pre_snapshot)
         result.files_changed = changed
 
         if not changed:
