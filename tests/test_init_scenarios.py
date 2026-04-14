@@ -148,6 +148,24 @@ class TestInvariants:
         config = _read_config(isolated_home)
         assert config["project"]["type"] == "python"
 
+    def test_python_detected_from_requirements_txt(
+        self, fake_cli_env, isolated_home,
+    ):
+        """Regression: sigint has requirements.txt but no top-level
+        pyproject.toml; previously landed as 'generic'."""
+        fake_cli_env(claude=True)
+        (isolated_home / "requirements.txt").write_text("requests\n")
+        CliRunner().invoke(main, ["init", "--yes"])
+        config = _read_config(isolated_home)
+        assert config["project"]["type"] == "python"
+
+    def test_python_detected_from_setup_py(self, fake_cli_env, isolated_home):
+        fake_cli_env(claude=True)
+        (isolated_home / "setup.py").write_text("from setuptools import setup\n")
+        CliRunner().invoke(main, ["init", "--yes"])
+        config = _read_config(isolated_home)
+        assert config["project"]["type"] == "python"
+
     def test_non_interactive_mode_auto_proceeds(self, fake_cli_env, isolated_home):
         """Running in a pipe (no TTY) must not hang on confirmation."""
         fake_cli_env(claude=True)

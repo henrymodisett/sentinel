@@ -287,6 +287,12 @@ Lens rules:
 ### Git state
 Branch: {branch} | Uncommitted: {uncommitted_files}
 
+### Available tools on this machine
+These CLIs are installed and on PATH — the Coder role can invoke them
+during execution. Factor this into which lenses you generate (e.g.
+generate a deploy-ops lens if deploy CLIs are present):
+{installed_tools}
+
 ### Test results
 {test_output}
 
@@ -574,6 +580,7 @@ class Monitor:
                 file_tree=state.file_tree[:2000],
                 branch=state.branch,
                 uncommitted_files=state.uncommitted_files,
+                installed_tools=state.installed_tools or "(not probed)",
                 test_output=state.test_output[:1000],
                 lint_output=state.lint_output[:500],
             )

@@ -66,7 +66,10 @@ def _detect_project_type(project: Path) -> str:
         return "rust"
     if (project / "go.mod").exists():
         return "go"
-    if (project / "pyproject.toml").exists():
+    python_markers = (
+        "pyproject.toml", "requirements.txt", "setup.py", "setup.cfg", "Pipfile",
+    )
+    if any((project / marker).exists() for marker in python_markers):
         return "python"
     if (project / "package.json").exists():
         tsconfig = (project / "tsconfig.json").exists()
