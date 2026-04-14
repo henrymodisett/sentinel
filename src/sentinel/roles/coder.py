@@ -233,9 +233,13 @@ def _write_execution_transcript(
             ]
         lines += ["", "## Prompt", "", "```", prompt[:20000].rstrip(), "```", ""]
 
-        path.write_text("\n".join(lines))
+        # Explicit utf-8 — same reasoning as reviewer transcripts:
+        # execution records contain provider JSON (Claude's output
+        # routinely has smart quotes, em dashes, emoji) and a non-UTF-8
+        # default locale must not mask the real execution result.
+        path.write_text("\n".join(lines), encoding="utf-8")
         return path
-    except OSError:
+    except (OSError, UnicodeError):
         # Persistence failure must not mask the execution result — log
         # to stderr in the calling process but continue normally.
         import logging

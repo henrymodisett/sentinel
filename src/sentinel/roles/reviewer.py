@@ -196,9 +196,13 @@ def _write_review_transcript(
             ]
 
         lines += [""]
-        path.write_text("\n".join(lines))
+        # Explicit utf-8 so emoji verdict badges don't crash on
+        # non-UTF-8 default locales (e.g. Windows cp1252). Catch broader
+        # than OSError — a UnicodeEncodeError here must never mask the
+        # real review verdict returned to the orchestrator.
+        path.write_text("\n".join(lines), encoding="utf-8")
         return path
-    except OSError:
+    except (OSError, UnicodeError):
         logging.getLogger(__name__).exception(
             "Failed to write review transcript (non-fatal)",
         )
