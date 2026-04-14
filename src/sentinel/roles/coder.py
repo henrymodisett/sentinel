@@ -57,13 +57,23 @@ def _run_git(
 
 
 def _files_changed(project_path: str) -> list[str]:
-    """List files changed in the working tree."""
+    """List files changed in the working tree, excluding Sentinel artifacts.
+
+    Files under `.sentinel/` are never counted as Coder changes — they
+    belong to sentinel itself (transcripts, scans, proposals). Without
+    this filter, a transcript written during THIS run would be picked
+    up as a "changed file" and turn a no-op Coder run into a false
+    success on projects that haven't gitignored .sentinel/.
+    """
     result = _run_git(["status", "--porcelain"], project_path)
     files = []
     for line in result.stdout.strip().splitlines():
         # Format: "XY filename" where XY is status code
         if len(line) > 3:
-            files.append(line[3:])
+            filename = line[3:]
+            if filename.startswith(".sentinel/") or filename == ".sentinel":
+                continue
+            files.append(filename)
     return files
 
 

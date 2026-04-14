@@ -167,6 +167,37 @@ class TestCoderRejectsNonAgenticProvider:
             ).lower()
 
 
+class TestFilesChangedIgnoresSentinelArtifacts:
+    """Regression: transcripts and other .sentinel/ artifacts must never
+    be counted as Coder changes. Otherwise a no-op Coder run shows up as
+    successful because the transcript it just wrote looks like a diff."""
+
+    def test_excludes_sentinel_paths_from_change_detection(self) -> None:
+        import subprocess as _sp
+
+        from sentinel.roles.coder import _files_changed
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _sp.run(["git", "init", "-q"], cwd=tmpdir, check=True)
+            _sp.run(
+                ["git", "-c", "user.email=a@b", "-c", "user.name=t",
+                 "commit", "--allow-empty", "-m", "init", "-q"],
+                cwd=tmpdir, check=True,
+            )
+            # Write an execution transcript — looks like a change to git
+            sentinel_dir = Path(tmpdir) / ".sentinel" / "executions"
+            sentinel_dir.mkdir(parents=True)
+            (sentinel_dir / "2026-01-01-dummy.md").write_text("# fake")
+            # And a real change in project code
+            (Path(tmpdir) / "real.py").write_text("print('hi')")
+
+            changed = _files_changed(tmpdir)
+            assert "real.py" in changed
+            assert not any(f.startswith(".sentinel/") for f in changed), (
+                f"_files_changed returned sentinel artifacts: {changed}"
+            )
+
+
 class TestCoderPersistsTranscripts:
     """Every execution attempt — success, failure, or exception —
     must leave a debuggable record behind. Before this PR, bare
