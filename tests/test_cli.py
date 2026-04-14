@@ -28,36 +28,28 @@ class TestCLIBasics:
         result = runner.invoke(main, ["scan", "--help"])
         assert result.exit_code == 0
 
+    def test_plan_help(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(main, ["plan", "--help"])
+        assert result.exit_code == 0
+
     def test_providers_help(self) -> None:
         runner = CliRunner()
         result = runner.invoke(main, ["providers", "--help"])
         assert result.exit_code == 0
 
+    def test_cycle_help(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(main, ["cycle", "--help"])
+        assert result.exit_code == 0
+
 
 class TestUnimplementedCommandsFailLoudly:
-    """Sentinel's own scan flagged silent stubs as the #1 issue."""
+    """Unimplemented commands must fail loudly, not silently."""
 
     def test_cycle_exits_with_error(self) -> None:
         runner = CliRunner()
         result = runner.invoke(main, ["cycle"])
-        assert result.exit_code == 1
-        assert "Not yet implemented" in result.output
-
-    def test_watch_exits_with_error(self) -> None:
-        runner = CliRunner()
-        result = runner.invoke(main, ["watch"])
-        assert result.exit_code == 1
-        assert "Not yet implemented" in result.output
-
-    def test_research_exits_with_error(self) -> None:
-        runner = CliRunner()
-        result = runner.invoke(main, ["research"])
-        assert result.exit_code == 1
-        assert "Not yet implemented" in result.output
-
-    def test_plan_exits_with_error(self) -> None:
-        runner = CliRunner()
-        result = runner.invoke(main, ["plan"])
         assert result.exit_code == 1
         assert "Not yet implemented" in result.output
 
@@ -72,3 +64,17 @@ class TestUnimplementedCommandsFailLoudly:
         result = runner.invoke(main, ["config"])
         assert result.exit_code == 1
         assert "Not yet implemented" in result.output
+
+
+class TestRemovedCommands:
+    """These commands were removed — ensure they're no longer available."""
+
+    def test_watch_removed(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(main, ["watch"])
+        assert result.exit_code != 0  # Should be unknown command
+
+    def test_research_removed(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(main, ["research"])
+        assert result.exit_code != 0  # Should be unknown command

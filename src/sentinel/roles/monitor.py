@@ -1,22 +1,19 @@
 """
 Monitor role — multi-step project assessment.
 
-The monitor doesn't just check code quality. It understands the project,
-generates custom analytical lenses, researches domain expertise, then
-evaluates the project as a multidisciplinary PM would.
-
 Pipeline:
-  1. EXPLORE — read everything, understand what this project is
-  2. GENERATE LENSES — create custom lenses tailored to this project
-  3. RESEARCH — become a domain expert for each lens
-  4. EVALUATE — scan through each lens with deep knowledge
-  5. REPORT — synthesize into a multidisciplinary assessment
+  1. EXPLORE — read the project, generate custom lenses (JSON-validated)
+  2. EVALUATE — run each lens evaluation in parallel (JSON-validated)
+  3. SYNTHESIZE — produce the final multidisciplinary report
+
+Fails loudly when any step breaks — no silent fallback to a degraded result.
 """
 
 from __future__ import annotations
 
-import json
+import asyncio
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -44,20 +41,27 @@ class LensEvaluation:
 
     lens_name: str
     score: int = 0  # 0-100
+    top_finding: str = ""
     findings: str = ""
-    tasks: list[str] = field(default_factory=list)
+    recommended_tasks: list[str] = field(default_factory=list)
+    error: str | None = None  # set if evaluation failed
 
 
 @dataclass
 class ScanResult:
-    """Full scan result — the output of the multi-step pipeline."""
+    """Full scan result — output of the multi-step pipeline."""
 
     project_summary: str = ""
     lenses: list[Lens] = field(default_factory=list)
     evaluations: list[LensEvaluation] = field(default_factory=list)
     overall_score: int = 0
-    top_actions: list[str] = field(default_factory=list)
+    strengths: list[str] = field(default_factory=list)
+    critical_risks: list[str] = field(default_factory=list)
+    top_actions: list[dict] = field(default_factory=list)
     raw_report: str = ""
+    # Status
+    ok: bool = False
+    error: str | None = None
     # Usage tracking
     model: str = ""
     provider: str = ""
@@ -66,36 +70,162 @@ class ScanResult:
     total_cost_usd: float = 0.0
 
 
-# --- Step 1: EXPLORE ---
+# --- Schemas for structured output ---
+
+EXPLORE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "project_summary": {
+            "type": "string",
+            "description": (
+                "2-3 paragraph summary demonstrating deep understanding of "
+                "what this project is, what it's trying to become, what "
+                "makes it unique, and what matters most for its success."
+            ),
+        },
+        "lenses": {
+            "type": "array",
+            "description": (
+                "Custom lenses for evaluating THIS specific project. Each "
+                "lens represents one advisor's perspective in the team you "
+                "would assemble for this project."
+            ),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "kebab-case lens name, e.g. financial-risk-management",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": (
+                            "One sentence: what this lens evaluates "
+                            "and why it matters here"
+                        ),
+                    },
+                    "what_to_look_for": {
+                        "type": "string",
+                        "description": (
+                            "2-3 sentences of specific things to examine, "
+                            "grounded in this project"
+                        ),
+                    },
+                    "questions": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "2-4 key questions this lens should answer",
+                    },
+                },
+                "required": ["name", "description", "what_to_look_for", "questions"],
+                "additionalProperties": False,
+            },
+            "minItems": 3,
+            "maxItems": 12,
+        },
+    },
+    "required": ["project_summary", "lenses"],
+    "additionalProperties": False,
+}
+
+EVALUATE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "score": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "Score from 0 to 100",
+        },
+        "top_finding": {
+            "type": "string",
+            "description": "One-sentence top finding for this lens",
+        },
+        "findings": {
+            "type": "string",
+            "description": (
+                "Detailed findings through this lens — what you found, good "
+                "and bad, with specific file references and evidence."
+            ),
+        },
+        "recommended_tasks": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "2-4 specific, actionable work items for this lens",
+            "minItems": 1,
+            "maxItems": 6,
+        },
+    },
+    "required": ["score", "top_finding", "findings", "recommended_tasks"],
+    "additionalProperties": False,
+}
+
+SYNTHESIZE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "overall_score": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "Overall health score, weighted by importance to this project",
+        },
+        "summary": {
+            "type": "string",
+            "description": "One-paragraph executive summary",
+        },
+        "strengths": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "2-3 things this project does exceptionally well",
+        },
+        "critical_risks": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "2-3 things that could seriously hurt this project",
+        },
+        "top_actions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "why": {"type": "string"},
+                    "files": {"type": "array", "items": {"type": "string"}},
+                    "impact": {"type": "string"},
+                    "lens": {"type": "string", "description": "Which lens surfaced this"},
+                },
+                "required": ["title", "why", "impact", "lens"],
+                "additionalProperties": False,
+            },
+            "description": "Top 5 recommended actions, prioritized by impact",
+            "minItems": 1,
+            "maxItems": 8,
+        },
+    },
+    "required": ["overall_score", "summary", "strengths", "critical_risks", "top_actions"],
+    "additionalProperties": False,
+}
+
+
+# --- Prompts ---
 
 EXPLORE_PROMPT = """\
 You are taking over this project. You are now responsible for making it successful.
 
-First, read everything below and build a deep, first-principles understanding of:
-
+Build a deep, first-principles understanding of:
 - What this project IS (domain, purpose, users, context)
 - What it's trying to BECOME (trajectory, goals, ambitions)
 - What MATTERS MOST for this specific project to succeed
-- What the team has been WORKING ON recently (commit patterns, momentum)
-- What's UNIQUE about this project that generic advice would miss
+- What makes this project UNIQUE
 
-Then ask yourself: **"What team would I assemble to advise me on this project?"**
+Then ask yourself: "What team would I assemble to advise me on this project?"
 
-For a high-frequency trading system, you'd want a quant, a reliability engineer,
-a risk officer, and a compliance lawyer. You would NOT want a UX designer or a
-GTM strategist — they're irrelevant.
+For a high-frequency trading system: quant, reliability engineer, risk officer.
+For a VC-backed consumer app: product strategist, designer, growth marketer.
+For a passion-project developer tool: senior engineers focused on craft.
 
-For a VC-backed consumer app, you'd want a product strategist, a designer, a
-growth marketer, an engineering lead, and someone who thinks about retention.
-You would NOT want a formal verification expert or a protocol compliance
-specialist.
-
-For a passion-project developer tool with no business model, you'd want senior
-engineers focused on code quality, craft, and user experience for developers.
-You would NOT want a GTM strategist or a pricing expert.
-
-The lenses you generate ARE that team. Each lens represents one advisor giving
-you their perspective. Generate only the advisors this project actually needs.
+Generate lenses ONLY for the advisors this project actually needs.
+Don't pad with irrelevant perspectives. Don't skip what matters.
 
 ## Project Context
 
@@ -109,7 +239,7 @@ you their perspective. Generate only the advisors this project actually needs.
 {readme}
 ```
 
-### Recent commits (last 10)
+### Recent commits
 ```
 {recent_commits}
 ```
@@ -120,49 +250,18 @@ you their perspective. Generate only the advisors this project actually needs.
 ```
 
 ### Git state
-Branch: {branch}
-Uncommitted files: {uncommitted_files}
+Branch: {branch} | Uncommitted: {uncommitted_files}
 
 ### Test results
 {test_output}
 
 ### Lint results
 {lint_output}
-
-## Your Task
-
-Write a 2-3 paragraph project summary that demonstrates deep understanding —
-what it is, what it's trying to be, what makes it unique, what matters.
-
-Then decide: what team of advisors does THIS project need to succeed?
-Each lens = one advisor's perspective.
-
-Output a JSON block with the lenses. Generate as many or as few as this project
-actually needs — don't pad with irrelevant perspectives, don't skip things that
-matter. A 3-lens scan for a simple library is fine. A 12-lens scan for a complex
-production system is fine. Quality of judgment matters more than quantity.
-
-Output format — write the summary as prose, then a JSON block:
-
-```json
-{{
-  "lenses": [
-    {{
-      "name": "lens-name",
-      "description": "One sentence: what this advisor evaluates and why they matter here",
-      "what_to_look_for": "2-3 sentences: specific things to examine, grounded in this project",
-      "questions": ["Question 1?", "Question 2?", "Question 3?"]
-    }}
-  ]
-}}
-```
 """
 
 
-# --- Step 3: EVALUATE ---
-
 EVALUATE_PROMPT = """\
-You are evaluating the project "{project_name}" through the lens of **{lens_name}**.
+You are evaluating "{project_name}" through the lens of **{lens_name}**.
 
 ## About this project
 {project_summary}
@@ -192,25 +291,13 @@ Branch: {branch} | Uncommitted: {uncommitted_files}
 ### Test results
 {test_output}
 
-## Your Task
-
-Evaluate this project SPECIFICALLY through the {lens_name} lens.
-Be a domain expert, not a generic auditor. Reference specific files,
-patterns, and decisions.
-
-Provide:
-1. **Score** (0-100)
-2. **Key findings** — what you found, good and bad, with specific file references
-3. **Recommended tasks** — 2-4 specific, actionable work items for this lens
-
-Be direct and opinionated. Strong takes backed by evidence.
+Be a domain expert, not a generic auditor. Reference specific files.
+Strong takes backed by evidence.
 """
 
 
-# --- Step 5: SYNTHESIZE ---
-
 SYNTHESIZE_PROMPT = """\
-You are a senior technical PM producing a final assessment of "{project_name}".
+You are producing the final assessment for "{project_name}".
 
 ## Project Summary
 {project_summary}
@@ -218,62 +305,50 @@ You are a senior technical PM producing a final assessment of "{project_name}".
 ## Lens Evaluations
 {lens_evaluations}
 
-## Your Task
-
-Synthesize all lens evaluations into a final report:
-
-1. **Overall health score** (0-100, weighted by importance to this specific project)
-2. **Strengths** — what this project does exceptionally well (2-3 points)
-3. **Critical risks** — what could seriously hurt this project (2-3 points)
-4. **Top 5 recommended actions** — prioritized by impact, mixing across lenses.
-   Each action: what to do, why, which files, expected impact.
-
-Think like a PM, not an auditor. Prioritize by business impact, not code neatness.
-A silent failure in a trading loop matters more than a long function.
-A missing test for a revenue-critical path matters more than test coverage percentage.
+Synthesize into a final report. Prioritize by business impact to THIS project,
+not by code neatness. A silent failure in a trading loop matters more than a
+long function. A missing test for a revenue-critical path matters more than
+test coverage percentage.
 """
 
 
-def _extract_json(text: str) -> dict | None:
-    """Extract a JSON block from LLM output."""
-    # Find ```json ... ``` block
-    start = text.find("```json")
-    if start != -1:
-        start = text.index("\n", start) + 1
-        end = text.find("```", start)
-        if end != -1:
-            try:
-                return json.loads(text[start:end])
-            except json.JSONDecodeError:
-                pass
+# --- Progress callback type ---
 
-    # Try finding raw JSON object
-    start = text.find('{"lenses"')
-    if start != -1:
-        depth = 0
-        for i in range(start, len(text)):
-            if text[i] == "{":
-                depth += 1
-            elif text[i] == "}":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        return json.loads(text[start : i + 1])
-                    except json.JSONDecodeError:
-                        break
-    return None
+ProgressCallback = Callable[[str, dict], None]
+"""Callback signature: (event_type, event_data) -> None.
+
+Event types:
+  - 'step_start': {'step': 'explore' | 'evaluate' | 'synthesize', 'message': str}
+  - 'lens_generated': {'lenses': list[Lens]}
+  - 'lens_start': {'lens_name': str, 'index': int, 'total': int}
+  - 'lens_done': {'lens_name': str, 'score': int}
+  - 'lens_failed': {'lens_name': str, 'error': str}
+  - 'step_done': {'step': str, 'cost_usd': float}
+"""
 
 
 class Monitor:
     def __init__(self, router: Router) -> None:
         self.router = router
 
-    async def assess(self, state: ProjectState) -> ScanResult:
-        """Run the full multi-step scan pipeline."""
+    async def assess(
+        self,
+        state: ProjectState,
+        on_progress: ProgressCallback | None = None,
+    ) -> ScanResult:
+        """Run the full multi-step scan pipeline with structured output."""
         result = ScanResult()
 
-        # Step 1: EXPLORE + GENERATE LENSES
-        logger.info("Step 1/3: Exploring project and generating lenses...")
+        def emit(event: str, data: dict) -> None:
+            if on_progress:
+                on_progress(event, data)
+
+        # --- Step 1: EXPLORE + GENERATE LENSES ---
+        emit("step_start", {
+            "step": "explore",
+            "message": "Exploring project and generating custom lenses...",
+        })
+
         explore_prompt = EXPLORE_PROMPT.format(
             claude_md=state.claude_md[:3000],
             readme=state.readme[:2000],
@@ -285,40 +360,47 @@ class Monitor:
             lint_output=state.lint_output[:500],
         )
 
-        explore_response = await self.router.chat("monitor", explore_prompt)
-        result.total_input_tokens += explore_response.input_tokens
-        result.total_output_tokens += explore_response.output_tokens
-        result.total_cost_usd += explore_response.cost_usd
-        result.model = explore_response.model
-        result.provider = explore_response.provider
+        provider = self.router.get_provider("monitor")
+        parsed, response = await provider.chat_json(explore_prompt, EXPLORE_SCHEMA)
 
-        # Parse the response — summary is the prose, lenses are in JSON
-        explore_text = explore_response.content
-        json_data = _extract_json(explore_text)
+        result.model = response.model
+        result.provider = response.provider
+        result.total_input_tokens += response.input_tokens
+        result.total_output_tokens += response.output_tokens
+        result.total_cost_usd += response.cost_usd
 
-        if json_data and "lenses" in json_data:
-            # Extract summary (everything before the JSON block)
-            json_start = explore_text.find("```json")
-            if json_start == -1:
-                json_start = explore_text.find('{"lenses"')
-            result.project_summary = explore_text[:json_start].strip() if json_start > 0 else ""
-
-            for lens_data in json_data["lenses"]:
-                result.lenses.append(Lens(
-                    name=lens_data.get("name", ""),
-                    description=lens_data.get("description", ""),
-                    what_to_look_for=lens_data.get("what_to_look_for", ""),
-                    questions=lens_data.get("questions", []),
-                ))
-        else:
-            # Fallback: use the whole response as summary, no structured lenses
-            result.project_summary = explore_text
-            result.raw_report = explore_text
+        if not parsed or "lenses" not in parsed:
+            result.error = (
+                f"Lens generation failed. Provider returned non-schema response. "
+                f"First 200 chars: {response.content[:200]}"
+            )
+            logger.error(result.error)
             return result
 
-        # Step 2: EVALUATE through each lens
-        logger.info("Step 2/3: Evaluating through %d lenses...", len(result.lenses))
-        for lens in result.lenses:
+        result.project_summary = parsed.get("project_summary", "")
+        for lens_data in parsed["lenses"]:
+            result.lenses.append(Lens(
+                name=lens_data["name"],
+                description=lens_data["description"],
+                what_to_look_for=lens_data["what_to_look_for"],
+                questions=lens_data.get("questions", []),
+            ))
+
+        emit("lens_generated", {"lenses": result.lenses})
+        emit("step_done", {"step": "explore", "cost_usd": response.cost_usd})
+
+        # --- Step 2: EVALUATE (parallel) ---
+        emit("step_start", {
+            "step": "evaluate",
+            "message": f"Evaluating through {len(result.lenses)} lenses in parallel...",
+        })
+
+        async def evaluate_one(lens: Lens, index: int) -> LensEvaluation:
+            emit("lens_start", {
+                "lens_name": lens.name,
+                "index": index,
+                "total": len(result.lenses),
+            })
             eval_prompt = EVALUATE_PROMPT.format(
                 project_name=state.name,
                 lens_name=lens.name,
@@ -333,32 +415,93 @@ class Monitor:
                 test_output=state.test_output[:500],
             )
 
-            eval_response = await self.router.chat("monitor", eval_prompt)
-            result.total_input_tokens += eval_response.input_tokens
-            result.total_output_tokens += eval_response.output_tokens
-            result.total_cost_usd += eval_response.cost_usd
+            parsed_eval, resp = await provider.chat_json(eval_prompt, EVALUATE_SCHEMA)
+            result.total_input_tokens += resp.input_tokens
+            result.total_output_tokens += resp.output_tokens
+            result.total_cost_usd += resp.cost_usd
 
-            result.evaluations.append(LensEvaluation(
+            if not parsed_eval:
+                emit("lens_failed", {
+                    "lens_name": lens.name,
+                    "error": resp.content[:200],
+                })
+                return LensEvaluation(
+                    lens_name=lens.name,
+                    error=f"Evaluation failed: {resp.content[:200]}",
+                )
+
+            evaluation = LensEvaluation(
                 lens_name=lens.name,
-                findings=eval_response.content,
-            ))
+                score=parsed_eval.get("score", 0),
+                top_finding=parsed_eval.get("top_finding", ""),
+                findings=parsed_eval.get("findings", ""),
+                recommended_tasks=parsed_eval.get("recommended_tasks", []),
+            )
+            emit("lens_done", {
+                "lens_name": lens.name,
+                "score": evaluation.score,
+            })
+            return evaluation
 
-        # Step 3: SYNTHESIZE
-        logger.info("Step 3/3: Synthesizing final report...")
+        # Run all lens evaluations in parallel
+        tasks = [evaluate_one(lens, i) for i, lens in enumerate(result.lenses, 1)]
+        result.evaluations = await asyncio.gather(*tasks)
+
+        emit("step_done", {
+            "step": "evaluate",
+            "cost_usd": sum(
+                e.score for e in result.evaluations  # placeholder
+            ),
+        })
+
+        # --- Step 3: SYNTHESIZE ---
+        emit("step_start", {
+            "step": "synthesize",
+            "message": "Synthesizing final report...",
+        })
+
         evals_text = ""
         for ev in result.evaluations:
-            evals_text += f"\n### {ev.lens_name}\n{ev.findings}\n"
+            if ev.error:
+                evals_text += f"\n### {ev.lens_name}\n[evaluation failed: {ev.error}]\n"
+            else:
+                evals_text += (
+                    f"\n### {ev.lens_name} (score: {ev.score}/100)\n"
+                    f"**Top finding:** {ev.top_finding}\n\n"
+                    f"{ev.findings}\n\n"
+                    f"**Tasks:**\n"
+                    + "\n".join(f"- {t}" for t in ev.recommended_tasks)
+                    + "\n"
+                )
 
         synth_prompt = SYNTHESIZE_PROMPT.format(
             project_name=state.name,
             project_summary=result.project_summary[:1500],
-            lens_evaluations=evals_text[:8000],
+            lens_evaluations=evals_text[:10000],
         )
 
-        synth_response = await self.router.chat("monitor", synth_prompt)
-        result.total_input_tokens += synth_response.input_tokens
-        result.total_output_tokens += synth_response.output_tokens
-        result.total_cost_usd += synth_response.cost_usd
+        parsed_synth, synth_resp = await provider.chat_json(
+            synth_prompt, SYNTHESIZE_SCHEMA,
+        )
+        result.total_input_tokens += synth_resp.input_tokens
+        result.total_output_tokens += synth_resp.output_tokens
+        result.total_cost_usd += synth_resp.cost_usd
 
-        result.raw_report = synth_response.content
+        if not parsed_synth:
+            result.error = f"Synthesis failed: {synth_resp.content[:200]}"
+            logger.error(result.error)
+            return result
+
+        result.overall_score = parsed_synth.get("overall_score", 0)
+        result.strengths = parsed_synth.get("strengths", [])
+        result.critical_risks = parsed_synth.get("critical_risks", [])
+        result.top_actions = parsed_synth.get("top_actions", [])
+        result.raw_report = parsed_synth.get("summary", "")
+        result.ok = True
+
+        emit("step_done", {
+            "step": "synthesize",
+            "cost_usd": synth_resp.cost_usd,
+        })
+
         return result

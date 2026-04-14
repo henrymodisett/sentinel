@@ -27,12 +27,35 @@ def init() -> None:
 
 
 @main.command()
-@click.option("--quick", "-q", is_flag=True, help="Quick mode — state summary only, no LLM call")
+@click.option(
+    "--quick", "-q", is_flag=True,
+    help="Quick mode — state summary only, no LLM call",
+)
 def scan(quick: bool) -> None:
-    """Assess current project state through lenses."""
+    """Assess project health through auto-generated lenses."""
     from sentinel.cli.scan_cmd import run_scan
 
     asyncio.run(run_scan(quick=quick))
+
+
+@main.command()
+@click.option(
+    "--sync-github", is_flag=True,
+    help="Also create GitHub issues via gh CLI",
+)
+def plan(sync_github: bool) -> None:
+    """Turn the most recent scan into a prioritized backlog."""
+    from sentinel.cli.plan_cmd import run_plan
+
+    asyncio.run(run_plan(sync_github=sync_github))
+
+
+@main.command()
+def cycle() -> None:
+    """Autonomous loop: scan → plan → execute → review."""
+    click.echo(f"{NOT_YET}")
+    click.echo("  Run `sentinel scan` then `sentinel plan` manually for now.")
+    sys.exit(1)
 
 
 @main.command()
@@ -44,49 +67,10 @@ def providers() -> None:
 
 
 @main.command()
-def cycle() -> None:
-    """Run one full loop: assess -> research -> plan -> execute -> review."""
-    click.echo(f"{NOT_YET}")
-    click.echo("  Use `sentinel scan` for assessment-only mode.")
-    sys.exit(1)
-
-
-@main.command()
-def watch() -> None:
-    """Continuous mode — run the loop on a schedule."""
-    click.echo(f"{NOT_YET}")
-    click.echo("  Use `/loop` in Claude Code for continuous mode.")
-    sys.exit(1)
-
-
-@main.command()
-@click.argument("topic", required=False)
-@click.option(
-    "--mode",
-    type=click.Choice(["targeted", "exploratory", "comparative", "consensus"]),
-    default="targeted",
-    help="Research mode",
-)
-def research(topic: str | None, mode: str) -> None:
-    """Run deep research on a topic."""
-    click.echo(f"{NOT_YET}")
-    click.echo("  Use `/sentinel-research` in Claude Code.")
-    sys.exit(1)
-
-
-@main.command()
-def plan() -> None:
-    """Generate a prioritized backlog from current state."""
-    click.echo(f"{NOT_YET}")
-    click.echo("  Use `/sentinel-plan` in Claude Code.")
-    sys.exit(1)
-
-
-@main.command()
 def status() -> None:
-    """Show current project health and backlog."""
+    """Show project health dashboard from recent scans."""
     click.echo(f"{NOT_YET}")
-    click.echo("  Use `sentinel scan` for a health report.")
+    click.echo("  Run `sentinel scan --quick` for quick state, `sentinel scan` for full.")
     sys.exit(1)
 
 
