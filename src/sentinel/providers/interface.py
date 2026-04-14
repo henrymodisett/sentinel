@@ -38,6 +38,16 @@ class ChatResponse:
     cost_usd: float = 0.0
     duration_ms: int = 0
     session_id: str | None = None
+    # Raw stderr captured from the underlying CLI. Always populated when
+    # the provider has it, regardless of success or failure — this is
+    # what makes empty-error Coder runs debuggable post-hoc.
+    stderr: str = ""
+    # Raw stdout — useful when the provider's error-path blanks out
+    # `content` but the CLI actually printed something meaningful.
+    raw_stdout: str = ""
+    # True iff the underlying CLI reported an error (non-zero exit,
+    # is_error JSON field, or timeout).
+    is_error: bool = False
 
 
 @dataclass

@@ -11,6 +11,7 @@ Produces: file changes + a commit on a feature branch.
 
 from __future__ import annotations
 
+import datetime as _dt
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -18,6 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from sentinel.providers.interface import ChatResponse
     from sentinel.providers.router import Router
     from sentinel.roles.planner import WorkItem
 
@@ -65,6 +67,99 @@ def _files_changed(project_path: str) -> list[str]:
     return files
 
 
+def _write_execution_transcript(
+    project_path: str,
+    work_item: WorkItem,
+    prompt: str,
+    response: ChatResponse | None,
+    result: ExecutionResult,
+    exception: BaseException | None = None,
+) -> Path | None:
+    """Persist a debuggable record of an execution attempt.
+
+    Writes a Markdown file under .sentinel/executions/ with the prompt,
+    the raw provider output (both content and stdout), stderr, duration,
+    status, and any exception trace. This is the difference between a
+    silent failure and one we can actually investigate.
+
+    Returns the transcript path on success, None if the write itself
+    failed (we don't want the transcript write to mask the real error).
+    """
+    try:
+        executions_dir = Path(project_path) / ".sentinel" / "executions"
+        executions_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = _dt.datetime.now().strftime("%Y-%m-%d-%H%M%S")
+        filename = f"{timestamp}-{_slug(work_item.title)}.md"
+        path = executions_dir / filename
+
+        lines: list[str] = [
+            f"# Execution Transcript — {work_item.title}",
+            "",
+            f"- **Work item ID:** {work_item.id}",
+            f"- **Type:** {work_item.type}",
+            f"- **Branch:** {result.branch or '(none — failed before branch)'}",
+            f"- **Status:** {result.status}",
+            f"- **Duration:** {result.duration_ms}ms",
+            f"- **Cost:** ${result.cost_usd:.4f}",
+            f"- **Files changed:** {len(result.files_changed)}",
+        ]
+        if result.error:
+            lines += ["", "## Error", "", "```", result.error, "```"]
+        if exception is not None:
+            import traceback
+            lines += [
+                "", "## Exception", "",
+                "```",
+                "".join(traceback.format_exception(exception)).rstrip(),
+                "```",
+            ]
+        if response is not None:
+            lines += [
+                "",
+                "## Provider diagnostics",
+                "",
+                f"- is_error: {response.is_error}",
+                f"- model: {response.model or '(unset)'}",
+                f"- input_tokens: {response.input_tokens}",
+                f"- output_tokens: {response.output_tokens}",
+            ]
+            if response.stderr:
+                lines += [
+                    "", "### stderr", "",
+                    "```", response.stderr.rstrip(), "```",
+                ]
+            if response.raw_stdout and response.raw_stdout != response.content:
+                lines += [
+                    "", "### Raw stdout", "",
+                    "```",
+                    response.raw_stdout[:20000].rstrip(),
+                    "```",
+                ]
+            lines += [
+                "", "## Content (parsed)", "",
+                "```",
+                (response.content or "(empty)")[:20000].rstrip(),
+                "```",
+            ]
+        if result.files_changed:
+            lines += [
+                "", "## Files changed", "",
+                *(f"- `{f}`" for f in result.files_changed),
+            ]
+        lines += ["", "## Prompt", "", "```", prompt[:20000].rstrip(), "```", ""]
+
+        path.write_text("\n".join(lines))
+        return path
+    except OSError:
+        # Persistence failure must not mask the execution result — log
+        # to stderr in the calling process but continue normally.
+        import logging
+        logging.getLogger(__name__).exception(
+            "Failed to write execution transcript (non-fatal)",
+        )
+        return None
+
+
 BUILD_PROMPT = """\
 You are executing this work item for the {project_name} project.
 
@@ -104,18 +199,30 @@ class Coder:
     async def execute(
         self, work_item: WorkItem, project_path: str,
     ) -> ExecutionResult:
-        """Execute a work item via the coder provider's agentic mode."""
+        """Execute a work item via the coder provider's agentic mode.
+
+        Every attempt writes a Markdown transcript to
+        `.sentinel/executions/` — on success, failure, or exception —
+        so no failure is silent. The transcript captures the prompt,
+        the provider's stderr + stdout, and the final status.
+        """
         start = time.time()
         result = ExecutionResult(
             work_item_id=work_item.id,
             status="failed",
         )
+        prompt = ""
+        response = None
 
         provider = self.router.get_provider("coder")
         if not provider.capabilities.agentic_code:
             result.error = (
                 f"Provider {provider.name} doesn't support agentic code execution. "
                 f"Assign coder role to claude or openai in .sentinel/config.toml."
+            )
+            result.duration_ms = int((time.time() - start) * 1000)
+            _write_execution_transcript(
+                project_path, work_item, prompt, response, result,
             )
             return result
 
@@ -125,7 +232,14 @@ class Coder:
 
         co_result = _run_git(["checkout", "-b", branch_name], project_path)
         if co_result.returncode != 0 and "already exists" not in co_result.stderr:
-            result.error = f"Could not create branch {branch_name}: {co_result.stderr.strip()}"
+            result.error = (
+                f"Could not create branch {branch_name}: "
+                f"{co_result.stderr.strip()}"
+            )
+            result.duration_ms = int((time.time() - start) * 1000)
+            _write_execution_transcript(
+                project_path, work_item, prompt, response, result,
+            )
             return result
 
         # Build the prompt
@@ -149,14 +263,27 @@ class Coder:
         except (OSError, subprocess.SubprocessError) as e:
             result.error = f"Coder execution failed: {e}"
             result.duration_ms = int((time.time() - start) * 1000)
+            _write_execution_transcript(
+                project_path, work_item, prompt, response, result, exception=e,
+            )
             return result
 
         result.raw_output = response.content
         result.cost_usd = response.cost_usd
 
-        if response.content.startswith("Error:"):
-            result.error = response.content
+        if response.is_error or response.content.startswith("Error:"):
+            # Surface stderr + stdout when the CLI's `content` is uninformative
+            # (e.g. bare "Error: ") — silent failures are the worst kind.
+            detail = response.content or "(empty content)"
+            if response.stderr and response.stderr.strip() not in detail:
+                detail += f"\n--- stderr ---\n{response.stderr.strip()}"
+            if not detail.strip() or detail == "Error: ":
+                detail = "Coder returned empty error — see transcript for stdout/stderr"
+            result.error = detail
             result.duration_ms = int((time.time() - start) * 1000)
+            _write_execution_transcript(
+                project_path, work_item, prompt, response, result,
+            )
             return result
 
         # Check what files actually changed
@@ -165,8 +292,14 @@ class Coder:
 
         if not changed:
             result.status = "failed"
-            result.error = "Coder produced no file changes"
+            result.error = (
+                "Coder produced no file changes. See transcript for the "
+                "full provider response."
+            )
             result.duration_ms = int((time.time() - start) * 1000)
+            _write_execution_transcript(
+                project_path, work_item, prompt, response, result,
+            )
             return result
 
         # Run tests to verify
@@ -188,4 +321,7 @@ class Coder:
 
         result.status = "success" if result.tests_passing else "partial"
         result.duration_ms = int((time.time() - start) * 1000)
+        _write_execution_transcript(
+            project_path, work_item, prompt, response, result,
+        )
         return result

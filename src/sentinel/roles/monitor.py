@@ -374,8 +374,20 @@ CRITICAL: Every recommended action must be classified as `refine` or `expand`.
 Rule of thumb: does this change what the system CAN do, or does it improve
 what it ALREADY does? If "can do" → expand. If "already does" → refine.
 
+**Scope check — framework-level work is `expand` regardless of intent.**
+The Coder role executes each action in a single Claude Code session with
+a ~20-turn cap. Anything that looks like "implement and enforce X across
+all components", "develop a centralized framework for Y", "design a
+comprehensive Z system", or touches more than ~5 unrelated files MUST be
+classified as `expand` — not because of what it does, but because the
+Coder cannot finish it in one session. Users should split these into
+smaller refinements themselves, or approve the expansion as a research
+task that produces a plan, not an implementation. A "refine" that the
+Coder quits halfway is worse than an "expand" the user rejects.
+
 When unsure, classify as `expand`. Unapproved refinement is fine.
-Unapproved expansion is scope creep.
+Unapproved expansion is scope creep. Half-finished refinement is the worst
+of both — it leaves commits nobody asked for on branches nobody reviews.
 """
 
 

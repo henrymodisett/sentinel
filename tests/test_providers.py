@@ -63,3 +63,57 @@ class TestProviderNames:
 
     def test_local_name(self) -> None:
         assert LocalProvider.name == ProviderName.LOCAL
+
+
+class TestClaudeCodeSurfacesStderr:
+    """Regression: Claude CLI failures used to collapse to `content='Error: '`
+    with empty stderr on the returned ChatResponse — the one thing you need
+    to debug the failure was thrown away."""
+
+    def test_code_response_populates_stderr_on_failure(self) -> None:
+        import asyncio
+        import subprocess
+        from unittest.mock import AsyncMock, patch
+
+        provider = ClaudeProvider()
+        fake_result = subprocess.CompletedProcess(
+            args=["claude"], returncode=1,
+            stdout="", stderr="auth token missing — run `claude auth login`",
+        )
+        with patch(
+            "sentinel.providers.claude.run_cli_async",
+            new=AsyncMock(return_value=fake_result),
+        ):
+            response = asyncio.run(provider.code("hi"))
+
+        assert response.is_error is True
+        assert "auth token missing" in response.stderr
+        assert "auth token missing" in response.content  # still in the rollup
+
+    def test_code_response_populates_raw_stdout_on_is_error_payload(self) -> None:
+        """When Claude returns is_error=true with empty result, the raw
+        JSON payload must survive in raw_stdout so transcripts show
+        what happened."""
+        import asyncio
+        import subprocess
+        from unittest.mock import AsyncMock, patch
+
+        provider = ClaudeProvider()
+        payload = (
+            '{"type":"result","is_error":true,"result":"",'
+            '"num_turns":20,"duration_ms":240000}'
+        )
+        fake_result = subprocess.CompletedProcess(
+            args=["claude"], returncode=0, stdout=payload, stderr="",
+        )
+        with patch(
+            "sentinel.providers.claude.run_cli_async",
+            new=AsyncMock(return_value=fake_result),
+        ):
+            response = asyncio.run(provider.code("hi"))
+
+        assert response.is_error is True
+        assert '"num_turns":20' in response.raw_stdout
+        # And the content says SOMETHING useful, not just "Error: "
+        assert response.content.startswith("Error:")
+        assert response.content != "Error: "

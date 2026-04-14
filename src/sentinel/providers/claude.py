@@ -93,7 +93,12 @@ class ClaudeProvider(Provider):
     # based enforcement + parse_json_safe (works reliably).
 
     async def code(self, prompt: str, working_directory: str = ".") -> ChatResponse:
-        """Full agentic Claude Code — file editing, terminal, tests."""
+        """Full agentic Claude Code — file editing, terminal, tests.
+
+        Always populates stderr + raw_stdout on the returned ChatResponse
+        so the Coder can persist a debuggable transcript, even on the
+        error paths where `content` used to be the only surviving signal.
+        """
         args = [
             "claude", "-p", prompt,
             "--output-format", "json",
@@ -109,20 +114,49 @@ class ClaudeProvider(Provider):
             return ChatResponse(
                 content=f"Error: Claude CLI timed out after {self.timeout_sec}s",
                 provider=self.name,
-            )
-        if result.returncode != 0:
-            return ChatResponse(
-                content=f"Error: {result.stderr.strip()}", provider=self.name,
+                is_error=True,
+                stderr=f"(timeout after {self.timeout_sec}s — no stderr captured)",
             )
 
-        data = parse_json_safe(result.stdout)
+        stderr = result.stderr or ""
+        stdout = result.stdout or ""
+
+        if result.returncode != 0:
+            # Fall back to stdout when stderr is empty — some Claude CLI
+            # error paths write the diagnostic to stdout as JSON.
+            detail = stderr.strip() or stdout.strip() or (
+                f"claude exited {result.returncode} with no output"
+            )
+            return ChatResponse(
+                content=f"Error: {detail}",
+                provider=self.name,
+                is_error=True,
+                stderr=stderr,
+                raw_stdout=stdout,
+            )
+
+        data = parse_json_safe(stdout)
         if not data:
-            return ChatResponse(content=result.stdout, provider=self.name)
+            return ChatResponse(
+                content=stdout,
+                provider=self.name,
+                stderr=stderr,
+                raw_stdout=stdout,
+            )
 
         if data.get("is_error"):
+            # Pass through the full JSON payload in raw_stdout so Coder
+            # transcripts keep the turn history even when result is empty
+            detail = (
+                data.get("result")
+                or "claude returned is_error=true with no result"
+            )
             return ChatResponse(
-                content=f"Error: {data.get('result', 'unknown error')}",
+                content=f"Error: {detail}",
                 provider=self.name,
+                is_error=True,
+                stderr=stderr,
+                raw_stdout=stdout,
             )
 
         usage = data.get("usage", {})
@@ -135,6 +169,8 @@ class ClaudeProvider(Provider):
             cost_usd=data.get("total_cost_usd", 0.0),
             duration_ms=data.get("duration_ms", 0),
             session_id=data.get("session_id"),
+            stderr=stderr,
+            raw_stdout=stdout,
         )
 
     def detect(self) -> ProviderStatus:
