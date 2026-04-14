@@ -55,6 +55,30 @@ TEMPLATE_MARKERS = [
 ]
 
 
+def _parse_interval(interval: str) -> int:
+    """Parse interval like '10m', '1h', '30s' to seconds."""
+    m = re.match(r"^(\d+)\s*([smh])$", interval.strip())
+    if not m:
+        import click as _click
+        raise _click.BadParameter(
+            f"Invalid interval '{interval}'. Use e.g. '30s', '10m', '1h'.",
+        )
+    n = int(m.group(1))
+    unit = m.group(2)
+    return {"s": n, "m": n * 60, "h": n * 3600}[unit]
+
+
+def _format_duration(seconds: float) -> str:
+    """Human-friendly duration."""
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m {s % 60}s"
+    h = s // 3600
+    return f"{h}h {(s % 3600) // 60}m"
+
+
 def _parse_budget(budget_str: str | None) -> tuple[float | None, int | None]:
     """Parse --budget string. Returns (money_usd, time_seconds).
 
@@ -135,8 +159,30 @@ async def run_work(
     budget_str: str | None = None,
     dry_run: bool = False,
     auto: bool = False,
+    every: str | None = None,
 ) -> None:
-    """The one command. Keep working until something stops us."""
+    """The one command.
+
+    Single mode (default): runs one cycle of work and exits.
+    Loop mode (--every): keeps running cycles with sleep between, until
+    Ctrl-C, budget hit, or max cycles.
+    """
+    if every is None:
+        # Single cycle — just run it and return
+        await _run_single_cycle(project_path, budget_str, dry_run, auto)
+        return
+
+    # Loop mode
+    await _run_loop(project_path, budget_str, dry_run, auto, every)
+
+
+async def _run_single_cycle(
+    project_path: str | None = None,
+    budget_str: str | None = None,
+    dry_run: bool = False,
+    auto: bool = False,
+) -> None:
+    """Run exactly one cycle of work and return."""
     project = Path(project_path or os.getcwd()).resolve()
     money_budget, time_budget_sec = _parse_budget(budget_str)
     start_time = time.time()
@@ -410,3 +456,97 @@ async def _execute_and_review(
     if review.verdict == "changes-requested":
         return "changes"
     return "rejected"
+
+
+async def _run_loop(
+    project_path: str | None,
+    budget_str: str | None,
+    dry_run: bool,
+    auto: bool,
+    every: str,
+) -> None:
+    """Run cycles continuously until stopped."""
+    import asyncio
+
+    project = Path(project_path or os.getcwd()).resolve()
+    interval_sec = _parse_interval(every)
+    money_budget, time_budget_sec = _parse_budget(budget_str)
+
+    # Pre-flight: need config to check session spend
+    config = _load_config(project)
+    if not config and (project / ".sentinel" / "config.toml").exists():
+        return
+
+    session_start = time.time()
+    session_spend_start = 0.0
+    if config:
+        session_spend_start = check_budget(
+            project, config.budget.daily_limit_usd, config.budget.warn_at_usd,
+        ).today_spent_usd
+
+    cycles = 0
+    console.print("\n[bold]Sentinel Work[/bold] — loop mode")
+    console.print(f"  Cadence: every {every}")
+    if budget_str:
+        console.print(f"  Session budget: {budget_str}")
+    console.print("  [dim]Ctrl-C to stop[/dim]")
+
+    try:
+        while True:
+            cycles += 1
+            console.print(
+                f"\n[bold cyan]─── Cycle {cycles} "
+                f"({datetime.now().strftime('%H:%M:%S')}) ───[/bold cyan]"
+            )
+
+            await _run_single_cycle(
+                project_path=str(project),
+                budget_str=None,  # session budget is tracked outside
+                dry_run=dry_run,
+                auto=True,  # loop mode bypasses confirmation
+            )
+
+            # Session bounds check
+            elapsed = time.time() - session_start
+            if time_budget_sec is not None and elapsed >= time_budget_sec:
+                console.print(
+                    f"\n[yellow]Stopping: session time budget "
+                    f"{_format_duration(elapsed)} reached[/yellow]"
+                )
+                break
+
+            if money_budget is not None and config:
+                current = check_budget(
+                    project, config.budget.daily_limit_usd, config.budget.warn_at_usd,
+                )
+                session_spent = current.today_spent_usd - session_spend_start
+                if session_spent >= money_budget:
+                    console.print(
+                        f"\n[yellow]Stopping: session spend "
+                        f"${session_spent:.2f} hit cap "
+                        f"${money_budget:.2f}[/yellow]"
+                    )
+                    break
+
+            console.print(
+                f"\n[dim]Next cycle in {every}... (Ctrl-C to stop)[/dim]"
+            )
+            try:
+                await asyncio.sleep(interval_sec)
+            except asyncio.CancelledError:
+                raise
+    except KeyboardInterrupt:
+        console.print("\n\n[yellow]Stopped by user.[/yellow]")
+
+    elapsed = time.time() - session_start
+    console.print()
+    console.print("[bold]Session summary[/bold]")
+    console.print(f"  Cycles: {cycles}")
+    console.print(f"  Duration: {_format_duration(elapsed)}")
+    if config:
+        final = check_budget(
+            project, config.budget.daily_limit_usd, config.budget.warn_at_usd,
+        )
+        session_spent = final.today_spent_usd - session_spend_start
+        console.print(f"  Session spend: ${session_spent:.4f}")
+    console.print()

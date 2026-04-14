@@ -45,6 +45,11 @@ def main() -> None:
     help="Budget cap. Money ($5, 10.50) or time (10m, 1h, 30s).",
 )
 @click.option(
+    "--every", "-e",
+    default=None,
+    help="Loop mode — run continuously, sleep between cycles (e.g. 10m, 1h).",
+)
+@click.option(
     "--dry-run", is_flag=True,
     help="Scan and plan but stop before execution.",
 )
@@ -52,11 +57,19 @@ def main() -> None:
     "--auto", is_flag=True,
     help="Skip the confirmation prompt before executing.",
 )
-def work(budget: str | None, dry_run: bool, auto: bool) -> None:
-    """Work on this project. Init/scan/plan/execute as needed."""
+def work(budget: str | None, every: str | None, dry_run: bool, auto: bool) -> None:
+    """Work on this project. One cycle, or loop with --every.
+
+    Examples:
+      sentinel work                      one cycle and exit
+      sentinel work --every 10m          loop, 10 min between cycles
+      sentinel work --every 1h -b $20    loop with $20 session cap
+    """
     from sentinel.cli.work_cmd import run_work
 
-    asyncio.run(run_work(budget_str=budget, dry_run=dry_run, auto=auto))
+    asyncio.run(
+        run_work(budget_str=budget, dry_run=dry_run, auto=auto, every=every),
+    )
 
 
 @main.command()
