@@ -60,12 +60,41 @@ class ProviderStatus:
 
 
 def run_cli(args: list[str], timeout: int = 300) -> subprocess.CompletedProcess[str]:
-    """Run a CLI command and return the result."""
+    """Run a CLI command and return the result (blocking)."""
     return subprocess.run(
         args,
         capture_output=True,
         text=True,
         timeout=timeout,
+    )
+
+
+async def run_cli_async(
+    args: list[str], timeout: int = 300,
+) -> subprocess.CompletedProcess[str]:
+    """Run a CLI command asynchronously — enables true parallelism via asyncio.gather()."""
+    import asyncio as _asyncio
+
+    process = await _asyncio.create_subprocess_exec(
+        *args,
+        stdout=_asyncio.subprocess.PIPE,
+        stderr=_asyncio.subprocess.PIPE,
+    )
+
+    try:
+        stdout_bytes, stderr_bytes = await _asyncio.wait_for(
+            process.communicate(), timeout=timeout,
+        )
+    except TimeoutError as e:
+        process.kill()
+        await process.wait()
+        raise subprocess.TimeoutExpired(args, timeout) from e
+
+    return subprocess.CompletedProcess(
+        args=args,
+        returncode=process.returncode or 0,
+        stdout=stdout_bytes.decode("utf-8", errors="replace"),
+        stderr=stderr_bytes.decode("utf-8", errors="replace"),
     )
 
 
