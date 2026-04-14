@@ -43,15 +43,14 @@ class TestCLIBasics:
         result = runner.invoke(main, ["cycle", "--help"])
         assert result.exit_code == 0
 
+    def test_cost_help(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(main, ["cost", "--help"])
+        assert result.exit_code == 0
+
 
 class TestUnimplementedCommandsFailLoudly:
     """Unimplemented commands must fail loudly, not silently."""
-
-    def test_cycle_exits_with_error(self) -> None:
-        runner = CliRunner()
-        result = runner.invoke(main, ["cycle"])
-        assert result.exit_code == 1
-        assert "Not yet implemented" in result.output
 
     def test_status_exits_with_error(self) -> None:
         runner = CliRunner()

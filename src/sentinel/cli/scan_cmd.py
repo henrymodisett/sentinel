@@ -149,6 +149,28 @@ async def run_scan(
     if not config:
         return
 
+    # Budget check before starting
+    from sentinel.budget import check_budget, record_spend
+
+    budget = check_budget(
+        project, config.budget.daily_limit_usd, config.budget.warn_at_usd,
+    )
+    if budget.over_limit:
+        console.print(
+            f"[red]Daily budget exceeded: ${budget.today_spent_usd:.2f} / "
+            f"${budget.daily_limit_usd:.2f}[/red]"
+        )
+        console.print(
+            "[red]Refusing to scan. Edit .sentinel/config.toml to raise the limit.[/red]"
+        )
+        return
+    if budget.warning:
+        console.print(
+            f"[yellow]  Budget warning: "
+            f"${budget.today_spent_usd:.2f} spent today "
+            f"(limit: ${budget.daily_limit_usd:.2f})[/yellow]"
+        )
+
     router = Router(config)
     monitor = Monitor(router)
     provider = router.get_provider("monitor")
@@ -196,6 +218,13 @@ async def run_scan(
 
     result = await monitor.assess(state, on_progress=on_progress)
     elapsed = time.time() - start
+
+    # Record spend regardless of success/failure (we paid for the tokens)
+    if result.total_cost_usd > 0:
+        record_spend(
+            project, result.total_cost_usd, "scan",
+            f"model={result.model}",
+        )
 
     if not result.ok:
         console.print()

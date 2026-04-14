@@ -51,11 +51,27 @@ def plan(sync_github: bool) -> None:
 
 
 @main.command()
-def cycle() -> None:
+@click.option(
+    "--max-items", "-n", type=int, default=3,
+    help="Max work items to execute in this cycle",
+)
+@click.option(
+    "--dry-run", is_flag=True,
+    help="Scan and plan but stop before execution",
+)
+def cycle(max_items: int, dry_run: bool) -> None:
     """Autonomous loop: scan → plan → execute → review."""
-    click.echo(f"{NOT_YET}")
-    click.echo("  Run `sentinel scan` then `sentinel plan` manually for now.")
-    sys.exit(1)
+    from sentinel.cli.cycle_cmd import run_cycle
+
+    asyncio.run(run_cycle(max_items=max_items, dry_run=dry_run))
+
+
+@main.command()
+def cost() -> None:
+    """Show spend history and budget status."""
+    from sentinel.cli.cost_cmd import run_cost
+
+    run_cost()
 
 
 @main.command()
