@@ -1,0 +1,160 @@
+"""Tests for the strategic-docs discovery module.
+
+Sigint dogfood was the motivating failure: files like
+INVESTMENT_THESIS.md, SYSTEM_ARCHITECTURE.md, and ANTI_CHASE_PLAN.md
+were never read by Monitor because only CLAUDE.md + README were
+hard-coded. These tests assert the discovery heuristic finds and
+ranks those correctly without requiring a live LLM.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path  # noqa: TC003 — runtime use in _make_project
+
+from sentinel.docs import (
+    DOC_EXTENSIONS,
+    discover_project_docs,
+    rank_docs,
+)
+
+
+def _make_project(tmp_path: Path, files: dict[str, str]) -> Path:
+    """Drop a dict of {relative_path: content} into tmp_path."""
+    for rel, content in files.items():
+        target = tmp_path / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content)
+    return tmp_path
+
+
+class TestRanking:
+    def test_thesis_ranks_above_license(self, tmp_path: Path) -> None:
+        _make_project(tmp_path, {
+            "INVESTMENT_THESIS.md": "# Thesis\nOur edge is...",
+            "LICENSE.md": "MIT License...",
+        })
+        ranked = rank_docs(tmp_path)
+        assert ranked, "should find at least the thesis"
+        assert ranked[0][0].name == "INVESTMENT_THESIS.md"
+        # LICENSE filtered out entirely by DENY_FILENAMES
+        assert not any("LICENSE" in str(p) for p, _ in ranked)
+
+    def test_architecture_doc_ranks_high(self, tmp_path: Path) -> None:
+        _make_project(tmp_path, {
+            "agent/SYSTEM_ARCHITECTURE.md": "# Architecture\n...",
+            "misc/notes.md": "random notes",
+        })
+        ranked = rank_docs(tmp_path)
+        top_name = ranked[0][0].name
+        assert "ARCHITECTURE" in top_name.upper()
+
+    def test_denylist_excludes_changelog(self, tmp_path: Path) -> None:
+        _make_project(tmp_path, {
+            "CHANGELOG.md": "v1.0\n",
+            "ROADMAP.md": "# Roadmap\n",
+        })
+        ranked = rank_docs(tmp_path)
+        names = [p.name for p, _ in ranked]
+        assert "CHANGELOG.md" not in names
+        assert "ROADMAP.md" in names
+
+    def test_respects_max_docs(self, tmp_path: Path) -> None:
+        _make_project(tmp_path, {
+            f"docs/plan_{i}.md": f"# Plan {i}" for i in range(20)
+        })
+        ranked = rank_docs(tmp_path, max_docs=5)
+        assert len(ranked) == 5
+
+    def test_skips_node_modules_and_venv(self, tmp_path: Path) -> None:
+        _make_project(tmp_path, {
+            "node_modules/some_pkg/README.md": "junk",
+            ".venv/pkg/README.md": "junk",
+            "README.md": "# Real README",
+        })
+        ranked = rank_docs(tmp_path)
+        # Check path components relative to tmp_path — the pytest temp
+        # dir name itself can contain "node_modules" as a substring.
+        rel_parts = [p.relative_to(tmp_path).parts for p, _ in ranked]
+        assert not any("node_modules" in parts for parts in rel_parts), rel_parts
+        assert not any(".venv" in parts for parts in rel_parts), rel_parts
+        assert any(p.name == "README.md" for p, _ in ranked)
+
+    def test_respects_depth_limit(self, tmp_path: Path) -> None:
+        """Docs buried 5 levels deep are likely vendored, not strategic."""
+        _make_project(tmp_path, {
+            "a/b/c/d/e/DEEPLY_NESTED_THESIS.md": "# Thesis\n",
+            "THESIS.md": "# Top-level thesis\n",
+        })
+        ranked = rank_docs(tmp_path)
+        names = [p.name for p, _ in ranked]
+        assert "THESIS.md" in names
+        assert "DEEPLY_NESTED_THESIS.md" not in names
+
+
+class TestExcerptFormatting:
+    def test_empty_project_returns_empty_string(self, tmp_path: Path) -> None:
+        assert discover_project_docs(tmp_path) == ""
+
+    def test_output_includes_rel_path_headers(self, tmp_path: Path) -> None:
+        _make_project(tmp_path, {
+            "agent/INVESTMENT_THESIS.md": "# Thesis\nEdge description.\n",
+        })
+        output = discover_project_docs(tmp_path)
+        assert "### agent/INVESTMENT_THESIS.md" in output
+        assert "Edge description" in output
+
+    def test_truncates_long_docs(self, tmp_path: Path) -> None:
+        long_body = "x" * 5000
+        _make_project(tmp_path, {
+            "PLAN.md": f"# Plan\n{long_body}",
+        })
+        output = discover_project_docs(tmp_path, max_chars_per_doc=200)
+        # Doc body capped — total output shouldn't include most of long_body
+        assert output.count("x") < 300
+
+    def test_strips_code_blocks(self, tmp_path: Path) -> None:
+        """Long fenced blocks of code/data shouldn't dominate the
+        excerpt — we want prose signal."""
+        body = (
+            "# Architecture\n"
+            "Core principle: no silent failures.\n\n"
+            "```python\n"
+            + "\n".join(f"def long_func_{i}(): pass" for i in range(50))
+            + "\n```\n\n"
+            "Second principle: derive, don't persist.\n"
+        )
+        _make_project(tmp_path, {"ARCHITECTURE.md": body})
+        output = discover_project_docs(tmp_path, max_chars_per_doc=800)
+        assert "no silent failures" in output
+        # Code block replaced with placeholder
+        assert "code block omitted" in output
+        assert "long_func_0" not in output
+
+
+class TestIntegrationWithState:
+    """End-to-end: gather_state should populate project_docs."""
+
+    def test_gather_state_populates_project_docs(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        import subprocess
+        _make_project(tmp_path, {
+            "AGENTS.md": "# Agents\n",
+            "CLAUDE.md": "# Claude\n",  # doubles as a git-init seed
+        })
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+        subprocess.run(
+            ["git", "-c", "user.email=a@b", "-c", "user.name=t",
+             "commit", "--allow-empty", "-m", "init", "-q"],
+            cwd=tmp_path, check=True,
+        )
+
+        from sentinel.state import gather_state
+        state = gather_state(tmp_path)
+        assert "AGENTS.md" in state.project_docs
+
+
+def test_doc_extensions_is_tuple() -> None:
+    """Guardrail: DOC_EXTENSIONS must stay a tuple so it's immutable
+    and hashable for set operations downstream."""
+    assert isinstance(DOC_EXTENSIONS, tuple)

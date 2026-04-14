@@ -274,6 +274,13 @@ Lens rules:
 {readme}
 ```
 
+### Strategic project documentation
+These are the project's own planning, architecture, and vision docs
+(INVESTMENT_THESIS, SYSTEM_ARCHITECTURE, *_PLAN.md, etc.). Read them
+to understand what the project IS and what it's trying to BECOME —
+they usually encode more signal about priorities than the code does.
+{project_docs}
+
 ### Recent commits
 ```
 {recent_commits}
@@ -417,6 +424,7 @@ def _build_explore_prompt(state: ProjectState) -> str:
         goals_md=state.goals_md[:2000] if state.goals_md else "(no goals.md set)",
         claude_md=state.claude_md[:3000],
         readme=state.readme[:2000],
+        project_docs=state.project_docs or "(no strategic docs discovered)",
         recent_commits=state.recent_commits,
         file_tree=state.file_tree[:2000],
         branch=state.branch,

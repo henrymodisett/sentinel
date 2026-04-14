@@ -48,6 +48,11 @@ class ProjectState:
     # Ops tooling discovered on PATH (rendered for the lens-gen prompt)
     installed_tools: str = ""
 
+    # Short excerpts from discovered project-level documentation (strategy
+    # docs, architecture notes, thesis files) — formatted for the explore
+    # prompt. Separate from claude_md/readme which are always included.
+    project_docs: str = ""
+
     # Errors encountered during gathering
     errors: list[str] = field(default_factory=list)
 
@@ -317,6 +322,16 @@ def gather_state(project_path: Path) -> ProjectState:
     # Ops CLIs available for the Coder to invoke during execution
     from sentinel.tools import discover_installed_tools, format_tools_for_prompt
     state.installed_tools = format_tools_for_prompt(discover_installed_tools())
+
+    # Strategic project docs — INVESTMENT_THESIS, ARCHITECTURE, plans,
+    # etc. Goes into EXPLORE_PROMPT so lens generation sees the vision,
+    # not just CLAUDE.md + README. See sentinel.docs for the ranking.
+    from sentinel.docs import discover_project_docs
+    try:
+        state.project_docs = discover_project_docs(project_path)
+    except OSError as e:
+        state.errors.append(f"doc discovery failed: {e}")
+        logger.warning("doc discovery failed: %s", e)
 
     if state.errors:
         logger.info("State gathering completed with %d errors", len(state.errors))
