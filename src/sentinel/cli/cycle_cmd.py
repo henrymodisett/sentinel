@@ -123,6 +123,18 @@ async def run_cycle(
         console.print("[dim]  (dry run — will plan but not execute)[/dim]")
     console.print()
 
+    # Same guard as `sentinel work`: refuse to start on a dirty tree
+    # because between-item resets would silently wipe user work.
+    from sentinel.cli.work_cmd import _working_tree_clean
+    if not _working_tree_clean(project):
+        console.print(
+            "[red]  Working tree has uncommitted changes.[/red]\n"
+            "  sentinel resets the tree between items; running on a "
+            "dirty tree would destroy your work.\n"
+            "  Commit, stash, or discard your changes, then run again."
+        )
+        return
+
     # Budget check before starting
     budget = check_budget(
         project, config.budget.daily_limit_usd, config.budget.warn_at_usd,
@@ -254,11 +266,15 @@ async def run_cycle(
         console.print(f"\n  [bold]({i}/{max_items}) {work_item.title}[/bold]")
         console.print(f"  [dim]lens: {action.get('lens', '')}[/dim]")
 
-        # Return to original branch before each item (parallel-able later)
-        subprocess.run(
-            ["git", "checkout", original_branch],
-            capture_output=True, cwd=project, timeout=30,
-        )
+        # Return to original branch before each item. Reset first so
+        # a dirty tree from a failed prior item doesn't silently block
+        # checkout and cause items to stack (sigint dogfood finding).
+        from sentinel.cli.work_cmd import _reset_and_checkout
+        if not _reset_and_checkout(str(project), original_branch):
+            console.print(
+                "  [red]Cannot return to original branch — aborting cycle.[/red]"
+            )
+            break
 
         t0 = time.time()
         exec_result = await coder.execute(work_item, str(project))
@@ -306,11 +322,9 @@ async def run_cycle(
             for issue in review.blocking_issues[:3]:
                 console.print(f"      • {issue}")
 
-    # Return to original branch
-    subprocess.run(
-        ["git", "checkout", original_branch],
-        capture_output=True, cwd=project, timeout=30,
-    )
+    # Return to original branch with a clean tree — see _reset_and_checkout
+    from sentinel.cli.work_cmd import _reset_and_checkout
+    _reset_and_checkout(str(project), original_branch)
 
     # --- SUMMARY ---
     console.print()

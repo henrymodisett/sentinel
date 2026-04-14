@@ -55,6 +55,88 @@ TEMPLATE_MARKERS = [
 ]
 
 
+def _working_tree_clean(project: Path | str) -> bool:
+    """True iff the project has no user-owned dirty state.
+
+    Used at cycle start so we never wipe user work. Covers:
+    - tracked modifications + staged changes (reset --hard would wipe)
+    - untracked files OUTSIDE sentinel's own directories (git clean -fd
+      between items would wipe)
+
+    Sentinel's own artifacts (.sentinel/, .claude/) don't count — the
+    between-item clean excludes them explicitly, and init commits the
+    .gitignore entries immediately.
+    """
+    result = subprocess.run(
+        ["git", "status", "--porcelain"],
+        capture_output=True, text=True, cwd=project, timeout=10,
+    )
+    if result.returncode != 0:
+        # Not a git repo or git missing — let the caller proceed; other
+        # git calls will surface the real error downstream.
+        return True
+    for line in result.stdout.splitlines():
+        if len(line) < 4:
+            continue
+        filename = line[3:]
+        # Skip sentinel's own artifacts — excluded from clean anyway
+        if filename.startswith(".sentinel/") or filename.startswith(".claude/"):
+            continue
+        # Anything else is user state we can't risk clobbering
+        return False
+    return True
+
+
+def _reset_and_checkout(project: str, branch: str) -> bool:
+    """Reset the working tree and checkout a branch.
+
+    `git checkout` fails silently on dirty trees, which causes each
+    work item's edits to stack on the previous. After Coder commits
+    its real work to its own feature branch, anything lingering in the
+    tree here is a failed attempt (pre-commit hook rejection, Claude
+    error mid-edit, etc.) and should be discarded before we move on.
+
+    We preserve .sentinel/ and .claude/ from untracked-cleanup scope —
+    those are sentinel's own artifacts, never part of an item.
+
+    Returns True if the sequence landed us on `branch` with a clean
+    tree. Callers must abort the loop on False — silently proceeding
+    on the wrong branch is how we got the sigint commingling bug.
+    """
+    reset = subprocess.run(
+        ["git", "reset", "--hard", "HEAD"],
+        capture_output=True, text=True, cwd=project, timeout=30,
+    )
+    if reset.returncode != 0:
+        console.print(
+            f"  [red]git reset --hard failed:[/red] {reset.stderr.strip()}"
+        )
+        return False
+
+    clean = subprocess.run(
+        ["git", "clean", "-fd",
+         "--exclude=.sentinel/", "--exclude=.claude/"],
+        capture_output=True, text=True, cwd=project, timeout=30,
+    )
+    if clean.returncode != 0:
+        console.print(
+            f"  [red]git clean failed:[/red] {clean.stderr.strip()}"
+        )
+        return False
+
+    co = subprocess.run(
+        ["git", "checkout", branch],
+        capture_output=True, text=True, cwd=project, timeout=30,
+    )
+    if co.returncode != 0:
+        console.print(
+            f"  [red]git checkout {branch} failed:[/red] {co.stderr.strip()}"
+        )
+        return False
+
+    return True
+
+
 def _parse_interval(interval: str) -> int:
     """Parse interval like '10m', '1h', '30s' to seconds."""
     m = re.match(r"^(\d+)\s*([smh])$", interval.strip())
@@ -202,6 +284,19 @@ async def _run_single_cycle(
     if dry_run:
         console.print("  [yellow]Dry run — no execution[/yellow]")
     console.print()
+
+    # Refuse to start if the user has pending uncommitted work. Between
+    # items we own the working tree and reset freely; at cycle start
+    # that state is the user's, and silently wiping it would destroy
+    # hours of someone's work.
+    if not _working_tree_clean(project):
+        console.print(
+            "[red]  Working tree has uncommitted changes.[/red]\n"
+            "  sentinel resets the tree between work items; running on a "
+            "dirty tree would destroy your changes.\n"
+            "  Commit, stash, or discard your changes, then run again."
+        )
+        return
 
     # --- 1. Initialize if needed ---
     if not (project / ".sentinel" / "config.toml").exists():
@@ -355,11 +450,9 @@ async def _run_single_cycle(
         console.print("\n\n[yellow]  Interrupted. Cleaning up...[/yellow]")
 
     finally:
-        # Return to original branch
-        subprocess.run(
-            ["git", "checkout", original_branch],
-            capture_output=True, cwd=project, timeout=30,
-        )
+        # Return to original branch — reset first so a failed final
+        # item doesn't leave the user stranded on a dirty feature branch
+        _reset_and_checkout(str(project), original_branch)
 
     # --- Summary ---
     elapsed = time.time() - start_time
@@ -434,11 +527,17 @@ async def _execute_and_review(
     console.print(f"[bold cyan]→ Executing[/bold cyan] {work_item.title}")
     console.print(f"  [dim]lens: {action.get('lens', '')}[/dim]")
 
-    # Reset to original branch before each item
-    subprocess.run(
-        ["git", "checkout", original_branch],
-        capture_output=True, cwd=project, timeout=30,
-    )
+    # Reset to original branch before each item. `git checkout` fails
+    # silently when the working tree is dirty, which used to cause each
+    # item's edits to stack on the previous — sigint dogfood showed 3
+    # "successful" runs commingling into one diff. Reset first, then
+    # checkout — the Coder commits its own work, so anything still in
+    # the tree here is a failed attempt we shouldn't carry forward.
+    if not _reset_and_checkout(str(project), original_branch):
+        console.print(
+            "  [red]✗ Cannot return to original branch — aborting item.[/red]"
+        )
+        return "failed"
 
     t0 = time.time()
     exec_result = await coder.execute(work_item, str(project))

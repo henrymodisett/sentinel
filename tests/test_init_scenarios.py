@@ -282,6 +282,127 @@ class TestPresets:
 
 # ---------- Goals.md nudge (not a blocker) ----------
 
+class TestAutoGitignore:
+    """sentinel init appends .sentinel/ and .claude/ to the target's
+    .gitignore so every open-pr.sh / git status doesn't warn about
+    untracked sentinel artifacts."""
+
+    def test_creates_gitignore_when_absent(self, fake_cli_env, isolated_home):
+        fake_cli_env(claude=True)
+        CliRunner().invoke(main, ["init", "--yes"])
+        gitignore = (isolated_home / ".gitignore").read_text()
+        assert ".sentinel/" in gitignore
+        assert ".claude/" in gitignore
+
+    def test_appends_to_existing_gitignore(self, fake_cli_env, isolated_home):
+        fake_cli_env(claude=True)
+        (isolated_home / ".gitignore").write_text("node_modules/\n")
+        CliRunner().invoke(main, ["init", "--yes"])
+        gitignore = (isolated_home / ".gitignore").read_text()
+        # Existing entries preserved
+        assert "node_modules/" in gitignore
+        # New sentinel entries added
+        assert ".sentinel/" in gitignore
+
+    def test_idempotent_on_reinit(self, fake_cli_env, isolated_home):
+        """Running init twice must not duplicate the sentinel block."""
+        fake_cli_env(claude=True)
+        CliRunner().invoke(main, ["init", "--yes"])
+        first = (isolated_home / ".gitignore").read_text()
+        CliRunner().invoke(main, ["init", "--yes"])
+        second = (isolated_home / ".gitignore").read_text()
+        assert first == second, "gitignore must not grow on re-init"
+        # Marker appears exactly once
+        assert second.count("# sentinel artifacts") == 1
+
+    def test_gitignore_change_is_committed_in_git_repo(
+        self, fake_cli_env, isolated_home,
+    ):
+        """Regression: .gitignore was being reset-away by
+        _reset_and_checkout between items because init wrote it but
+        never committed. In a git repo, init must commit the change
+        so it survives sentinel work's between-item resets."""
+        import subprocess as _sp
+
+        fake_cli_env(claude=True)
+        _sp.run(
+            ["git", "init", "-q", "-b", "main"],
+            cwd=isolated_home, check=True,
+        )
+        _sp.run(
+            ["git", "-c", "user.email=a@b", "-c", "user.name=t",
+             "commit", "--allow-empty", "-m", "init", "-q"],
+            cwd=isolated_home, check=True,
+        )
+
+        CliRunner().invoke(main, ["init", "--yes"])
+
+        log = _sp.run(
+            ["git", "log", "--oneline"],
+            capture_output=True, text=True, cwd=isolated_home,
+        ).stdout
+        assert "gitignore sentinel artifacts" in log, (
+            f"init must commit .gitignore in a git repo; log was:\n{log}"
+        )
+        # Working tree must be clean on .gitignore
+        status = _sp.run(
+            ["git", "status", "--porcelain", ".gitignore"],
+            capture_output=True, text=True, cwd=isolated_home,
+        ).stdout
+        assert not status, f"expected clean .gitignore, got: {status!r}"
+
+    def test_no_commit_when_not_in_git_repo(
+        self, fake_cli_env, isolated_home,
+    ):
+        """Outside a git repo, init still writes .gitignore but must
+        not explode trying to commit it."""
+        fake_cli_env(claude=True)
+        result = CliRunner().invoke(main, ["init", "--yes"])
+        assert result.exit_code == 0
+        assert (isolated_home / ".gitignore").exists()
+
+    def test_gitignore_commit_ignores_prestaged_files(
+        self, fake_cli_env, isolated_home,
+    ):
+        """Regression: init's `git commit -m ...` without a pathspec
+        used to sweep in anything pre-staged in the user's index. Now
+        uses `git commit -- .gitignore` so only .gitignore lands."""
+        import subprocess as _sp
+
+        fake_cli_env(claude=True)
+        _sp.run(
+            ["git", "init", "-q", "-b", "main"],
+            cwd=isolated_home, check=True,
+        )
+        _sp.run(
+            ["git", "-c", "user.email=a@b", "-c", "user.name=t",
+             "commit", "--allow-empty", "-m", "init", "-q"],
+            cwd=isolated_home, check=True,
+        )
+        # User has a file staged BEFORE running sentinel init
+        (isolated_home / "my_work.py").write_text("print('work in progress')\n")
+        _sp.run(["git", "add", "my_work.py"], cwd=isolated_home, check=True)
+
+        CliRunner().invoke(main, ["init", "--yes"])
+
+        # User's staged file must still be staged (not committed)
+        staged = _sp.run(
+            ["git", "diff", "--cached", "--name-only"],
+            capture_output=True, text=True, cwd=isolated_home,
+        ).stdout.strip()
+        assert "my_work.py" in staged, (
+            "init must not commit user's pre-staged files; "
+            f"staged after init: {staged!r}"
+        )
+        # And the gitignore commit must NOT include my_work.py
+        latest_files = _sp.run(
+            ["git", "show", "--name-only", "--pretty=format:", "HEAD"],
+            capture_output=True, text=True, cwd=isolated_home,
+        ).stdout.strip()
+        assert "my_work.py" not in latest_files
+        assert ".gitignore" in latest_files
+
+
 class TestGoalsNudge:
     """Goals.md template should warn, not block — work still proceeds."""
 

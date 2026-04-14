@@ -198,6 +198,334 @@ class TestFilesChangedIgnoresSentinelArtifacts:
             )
 
 
+class TestCoderCommitsToFeatureBranch:
+    """Before this PR, Coder created a branch, edited files, ran tests,
+    and returned status=success — but never committed. The diff lived
+    in the working tree only, and the next item's checkout silently
+    failed on the dirty tree, commingling edits. Sigint dogfood showed
+    4 branches with 0 commits each. Fix verified by this test."""
+
+    @pytest.mark.asyncio
+    async def test_successful_execution_commits_to_branch(self) -> None:
+        """Claude writes a file, tests pass → Coder commits it. The
+        feature branch now has a real commit pointing at the diff."""
+        import subprocess as _sp
+
+        # Mock provider that pretends Claude wrote a file to the tree
+        # in the caller's cwd. We run the test with cwd=tmpdir so the
+        # effect is scoped.
+        class FileWritingMock(MockProvider):
+            async def code(self, prompt, options=None, **kwargs):
+                self.code_calls.append(prompt)
+                # Simulate Claude editing a file in the target repo
+                wd = kwargs.get("working_directory", ".")
+                (Path(wd) / "fixed.py").write_text("print('fixed')\n")
+                return ChatResponse(
+                    content="done", provider=self.name, cost_usd=0.01,
+                )
+
+        provider = FileWritingMock()
+        provider.capabilities = ProviderCapabilities(
+            chat=True, agentic_code=True,
+        )
+        router = _mock_router(provider)
+        coder = Coder(router)
+
+        work_item = WorkItem(
+            id="cycle-1", title="fix the thing", description="it was broken",
+            type="fix", priority="high", complexity=1,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _sp.run(["git", "init", "-q", "-b", "main"], cwd=tmpdir, check=True)
+            _sp.run(
+                ["git", "-c", "user.email=a@b", "-c", "user.name=t",
+                 "commit", "--allow-empty", "-m", "init", "-q"],
+                cwd=tmpdir, check=True,
+            )
+            init_sha = _sp.run(
+                ["git", "rev-parse", "HEAD"],
+                capture_output=True, text=True, cwd=tmpdir,
+            ).stdout.strip()
+
+            result = await coder.execute(work_item, tmpdir)
+
+            assert result.status in ("success", "partial")
+            # The fix: an actual commit exists on the feature branch
+            assert result.commit_sha, "Coder must record a commit SHA"
+            assert result.commit_sha != init_sha, (
+                "commit_sha must point at a new commit, not the init commit"
+            )
+            log = _sp.run(
+                ["git", "log", "--oneline", result.branch],
+                capture_output=True, text=True, cwd=tmpdir,
+            )
+            assert "fix the thing" in log.stdout, (
+                f"expected commit on feature branch, got: {log.stdout!r}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_commits_even_when_tests_fail(self) -> None:
+        """Partial success (coded but tests fail) must still commit —
+        reviewer needs a real diff to give useful changes-requested
+        feedback. A vaporized diff is worse than a failing one."""
+        import subprocess as _sp
+
+        class FileWritingMock(MockProvider):
+            async def code(self, prompt, options=None, **kwargs):
+                wd = kwargs.get("working_directory", ".")
+                (Path(wd) / "partial.py").write_text("broken = 1\n")
+                return ChatResponse(
+                    content="done", provider=self.name, cost_usd=0.01,
+                )
+
+        provider = FileWritingMock()
+        provider.capabilities = ProviderCapabilities(
+            chat=True, agentic_code=True,
+        )
+        router = _mock_router(provider)
+        coder = Coder(router)
+
+        work_item = WorkItem(
+            id="2", title="attempt fix", description="",
+            type="fix", priority="low", complexity=1,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _sp.run(["git", "init", "-q", "-b", "main"], cwd=tmpdir, check=True)
+            _sp.run(
+                ["git", "-c", "user.email=a@b", "-c", "user.name=t",
+                 "commit", "--allow-empty", "-m", "init", "-q"],
+                cwd=tmpdir, check=True,
+            )
+            # Configure a toolkit test_command that always fails
+            (Path(tmpdir) / ".toolkit-config").write_text(
+                "test_command=false\n",
+            )
+            result = await coder.execute(work_item, tmpdir)
+
+            # Partial = code landed but tests failed
+            assert result.status == "partial"
+            assert result.commit_sha, (
+                "must commit even on test-fail so reviewer has real diff"
+            )
+
+
+class TestCoderCommitPathspecIsolation:
+    """Codex review caught: _commit_files() ran `git add` + `git commit -m`
+    without a pathspec, so anything in the user's staged index got
+    swept into the sentinel commit. Now we use `git commit -- files`
+    which commits only those paths regardless of index state."""
+
+    @pytest.mark.asyncio
+    async def test_does_not_include_pre_staged_unrelated_files(self) -> None:
+        """Scenario: Claude writes a fix, but something else is already
+        staged in the index (e.g. from a prior partial operation).
+        The sentinel commit must NOT include those pre-staged files."""
+        import subprocess as _sp
+
+        class FileWritingMock(MockProvider):
+            async def code(self, prompt, options=None, **kwargs):
+                wd = kwargs.get("working_directory", ".")
+                (Path(wd) / "fixed.py").write_text("fixed\n")
+                return ChatResponse(
+                    content="done", provider=self.name, cost_usd=0.0,
+                )
+
+        provider = FileWritingMock()
+        provider.capabilities = ProviderCapabilities(
+            chat=True, agentic_code=True,
+        )
+        router = _mock_router(provider)
+        coder = Coder(router)
+        work_item = WorkItem(
+            id="1", title="isolate the commit", description="",
+            type="fix", priority="low", complexity=1,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _sp.run(["git", "init", "-q", "-b", "main"], cwd=tmpdir, check=True)
+            _sp.run(
+                ["git", "-c", "user.email=a@b", "-c", "user.name=t",
+                 "commit", "--allow-empty", "-m", "init", "-q"],
+                cwd=tmpdir, check=True,
+            )
+            # Pre-stage an unrelated file — simulates user's in-progress
+            # work or stray coder-agent staging outside our filter.
+            (Path(tmpdir) / "unrelated_staged.py").write_text("staged\n")
+            _sp.run(
+                ["git", "add", "unrelated_staged.py"],
+                cwd=tmpdir, check=True,
+            )
+
+            result = await coder.execute(work_item, tmpdir)
+
+            # Commit landed
+            assert result.commit_sha
+            # But only contains fixed.py — the pre-staged file is absent
+            show = _sp.run(
+                ["git", "show", "--name-only", "--pretty=format:", result.commit_sha],
+                capture_output=True, text=True, cwd=tmpdir,
+            ).stdout.strip()
+            assert "fixed.py" in show
+            assert "unrelated_staged.py" not in show, (
+                f"sentinel commit must not sweep pre-staged files; got:\n{show}"
+            )
+
+
+class TestWorkingTreeGuard:
+    """Codex review caught: work_cmd ran _reset_and_checkout before
+    the first item, wiping any user-uncommitted changes. Now we
+    refuse to start on a dirty tree."""
+
+    def test_detects_dirty_tree(self, tmp_path) -> None:
+        import subprocess as _sp
+
+        from sentinel.cli.work_cmd import _working_tree_clean
+
+        _sp.run(["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True)
+        _sp.run(
+            ["git", "-c", "user.email=a@b", "-c", "user.name=t",
+             "commit", "--allow-empty", "-m", "init", "-q"],
+            cwd=tmp_path, check=True,
+        )
+        assert _working_tree_clean(tmp_path) is True
+
+        # Add a tracked-file modification
+        (tmp_path / "file.py").write_text("x\n")
+        _sp.run(["git", "add", "file.py"], cwd=tmp_path, check=True)
+        _sp.run(
+            ["git", "-c", "user.email=a@b", "-c", "user.name=t",
+             "commit", "-m", "add", "-q"],
+            cwd=tmp_path, check=True,
+        )
+        (tmp_path / "file.py").write_text("x\nmodified\n")
+        assert _working_tree_clean(tmp_path) is False
+
+    def test_rejects_user_untracked_files(self, tmp_path) -> None:
+        """Codex round 3: untracked files outside .sentinel/ and
+        .claude/ must count as dirty, because `git clean -fd` between
+        items would wipe them."""
+        import subprocess as _sp
+
+        from sentinel.cli.work_cmd import _working_tree_clean
+
+        _sp.run(["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True)
+        _sp.run(
+            ["git", "-c", "user.email=a@b", "-c", "user.name=t",
+             "commit", "--allow-empty", "-m", "init", "-q"],
+            cwd=tmp_path, check=True,
+        )
+        (tmp_path / "user_wip.md").write_text("user scratch\n")
+        assert _working_tree_clean(tmp_path) is False, (
+            "user's untracked files must block start — clean -fd would wipe them"
+        )
+
+    def test_allows_sentinel_artifacts_as_untracked(self, tmp_path) -> None:
+        """Sentinel's own artifacts (.sentinel/, .claude/) don't count
+        as dirty — clean -fd excludes them, they're sentinel's own."""
+        import subprocess as _sp
+
+        from sentinel.cli.work_cmd import _working_tree_clean
+
+        _sp.run(["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True)
+        _sp.run(
+            ["git", "-c", "user.email=a@b", "-c", "user.name=t",
+             "commit", "--allow-empty", "-m", "init", "-q"],
+            cwd=tmp_path, check=True,
+        )
+        (tmp_path / ".sentinel").mkdir()
+        (tmp_path / ".sentinel" / "config.toml").write_text("x\n")
+        (tmp_path / ".claude").mkdir()
+        (tmp_path / ".claude" / "agent.md").write_text("x\n")
+        assert _working_tree_clean(tmp_path) is True
+
+
+class TestResetAndCheckoutReturnCodes:
+    """Codex review caught: `_reset_and_checkout()` ignored return
+    codes. A failed checkout would silently leave the loop running
+    on the wrong branch — exactly the bug this PR is supposed to fix."""
+
+    def test_returns_false_when_checkout_fails(self, tmp_path) -> None:
+        from sentinel.cli.work_cmd import _reset_and_checkout
+
+        # Not a git repo — checkout will fail
+        assert _reset_and_checkout(str(tmp_path), "nonexistent-branch") is False
+
+    def test_returns_true_on_clean_success(self, tmp_path) -> None:
+        import subprocess as _sp
+
+        from sentinel.cli.work_cmd import _reset_and_checkout
+
+        _sp.run(["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True)
+        _sp.run(
+            ["git", "-c", "user.email=a@b", "-c", "user.name=t",
+             "commit", "--allow-empty", "-m", "init", "-q"],
+            cwd=tmp_path, check=True,
+        )
+        assert _reset_and_checkout(str(tmp_path), "main") is True
+
+
+class TestCoderExistingBranchCheckout:
+    """Codex review caught: when the feature branch already exists
+    (e.g. from a prior partial run), `git checkout -b` failed with
+    'already exists' and we skipped the error path — BUT we didn't
+    actually check the branch out. Claude ran + the commit landed on
+    the original branch instead of the feature branch."""
+
+    @pytest.mark.asyncio
+    async def test_checks_out_existing_branch_instead_of_original(self) -> None:
+        import subprocess as _sp
+
+        class FileWritingMock(MockProvider):
+            async def code(self, prompt, options=None, **kwargs):
+                wd = kwargs.get("working_directory", ".")
+                (Path(wd) / "fixed.py").write_text("ok\n")
+                return ChatResponse(
+                    content="done", provider=self.name, cost_usd=0.0,
+                )
+
+        provider = FileWritingMock()
+        provider.capabilities = ProviderCapabilities(
+            chat=True, agentic_code=True,
+        )
+        router = _mock_router(provider)
+        coder = Coder(router)
+        work_item = WorkItem(
+            id="1", title="reuse branch", description="",
+            type="fix", priority="low", complexity=1,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _sp.run(["git", "init", "-q", "-b", "main"], cwd=tmpdir, check=True)
+            _sp.run(
+                ["git", "-c", "user.email=a@b", "-c", "user.name=t",
+                 "commit", "--allow-empty", "-m", "init", "-q"],
+                cwd=tmpdir, check=True,
+            )
+            # Pre-create the branch the Coder will try to create
+            branch = f"sentinel/{work_item.type}/{_slug(work_item.title)}"
+            _sp.run(["git", "branch", branch], cwd=tmpdir, check=True)
+
+            await coder.execute(work_item, tmpdir)
+
+            # The commit must land on the feature branch, not main
+            current = _sp.run(
+                ["git", "branch", "--show-current"],
+                capture_output=True, text=True, cwd=tmpdir,
+            ).stdout.strip()
+            assert current == branch, (
+                f"coder must switch to existing feature branch, got {current!r}"
+            )
+            main_log = _sp.run(
+                ["git", "log", "--oneline", "main"],
+                capture_output=True, text=True, cwd=tmpdir,
+            )
+            assert "reuse branch" not in main_log.stdout, (
+                "commit must NOT land on main when feature branch exists"
+            )
+
+
 class TestCoderPersistsTranscripts:
     """Every execution attempt — success, failure, or exception —
     must leave a debuggable record behind. Before this PR, bare
