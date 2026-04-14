@@ -200,8 +200,20 @@ SYNTHESIZE_SCHEMA = {
                     "files": {"type": "array", "items": {"type": "string"}},
                     "impact": {"type": "string"},
                     "lens": {"type": "string", "description": "Which lens surfaced this"},
+                    "kind": {
+                        "type": "string",
+                        "enum": ["refine", "expand"],
+                        "description": (
+                            "'refine' = improves what exists (bug fix, test, "
+                            "performance, refactor, docs, security hardening). "
+                            "ALWAYS safe to execute autonomously. "
+                            "'expand' = adds new capability/scope (new feature, "
+                            "new endpoint, new config surface, new integration). "
+                            "Requires user approval before execution."
+                        ),
+                    },
                 },
-                "required": ["title", "why", "impact", "lens"],
+                "required": ["title", "why", "impact", "lens", "kind"],
                 "additionalProperties": False,
             },
             "description": "Top 5 recommended actions, prioritized by impact",
@@ -331,6 +343,32 @@ Synthesize into a final report. Prioritize by business impact to THIS project,
 not by code neatness. A silent failure in a trading loop matters more than a
 long function. A missing test for a revenue-critical path matters more than
 test coverage percentage.
+
+## Classifying actions: refine vs expand
+
+CRITICAL: Every recommended action must be classified as `refine` or `expand`.
+
+**refine** (safe to execute autonomously):
+- Fixing bugs, silent failures, race conditions
+- Adding tests, improving coverage, docs
+- Refactoring for clarity without changing behavior
+- Performance improvements to existing code paths
+- Security hardening of existing surfaces
+- Making timeouts/limits configurable without changing defaults
+- Removing dead code, unused deps, debug prints
+
+**expand** (requires user approval — sentinel will NOT auto-execute these):
+- Adding new features, endpoints, or user-facing capabilities
+- Adding new CLI commands or flags that weren't requested
+- New integrations with external services (Linear, Slack, etc.)
+- New modules/packages that change the project's scope
+- New configuration surfaces that expose new behavior
+
+Rule of thumb: does this change what the system CAN do, or does it improve
+what it ALREADY does? If "can do" → expand. If "already does" → refine.
+
+When unsure, classify as `expand`. Unapproved refinement is fine.
+Unapproved expansion is scope creep.
 """
 
 

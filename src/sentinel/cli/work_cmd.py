@@ -142,16 +142,25 @@ def _backlog_stale(project: Path) -> bool:
 
 
 def _remaining_backlog_items(project: Path) -> list[dict]:
-    """Parse backlog and return items still marked todo."""
+    """Parse backlog + approved proposals and return executable items.
+
+    Order: refinements first (from scan), then approved expansions
+    (from proposals). Skips pending/rejected proposals.
+    """
+    from sentinel.cli.cycle_cmd import _load_approved_proposals
+
     backlog = project / ".sentinel" / "backlog.md"
     if not backlog.exists():
         return []
     scan = _find_latest_scan(project)
     if not scan:
         return []
-    items = _parse_actions_from_scan(scan)
-    # TODO: filter out items that are already executed (have a branch)
-    return items
+
+    actions = _parse_actions_from_scan(scan)
+    refinements = [a for a in actions if a.get("kind", "refine") == "refine"]
+    approved = _load_approved_proposals(project)
+
+    return refinements + approved
 
 
 async def run_work(

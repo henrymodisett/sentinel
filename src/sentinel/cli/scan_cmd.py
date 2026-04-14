@@ -140,6 +140,8 @@ def _persist_scan(project_path: Path, result: ScanResult) -> Path:
     for i, a in enumerate(result.top_actions, 1):
         lines.append(f"### {i}. {a.get('title', '')}")
         lines.append("")
+        kind = a.get("kind", "unknown")
+        lines.append(f"**Kind:** {kind}")
         lines.append(f"**Lens:** {a.get('lens', '')}")
         lines.append(f"**Why:** {a.get('why', '')}")
         if a.get("files"):
@@ -294,11 +296,33 @@ async def run_scan(
 
     if result.top_actions:
         console.print()
-        console.print("[bold]Top Actions[/bold]")
-        for i, a in enumerate(result.top_actions, 1):
-            console.print(f"  [bold]{i}. {a.get('title', '')}[/bold]")
-            console.print(f"     [dim]{a.get('lens', '')} — {a.get('impact', '')}[/dim]")
-            console.print(f"     {a.get('why', '')}")
+        refine_actions = [a for a in result.top_actions if a.get("kind") == "refine"]
+        expand_actions = [a for a in result.top_actions if a.get("kind") == "expand"]
+
+        if refine_actions:
+            console.print(
+                "[bold green]Refinements[/bold green] "
+                "[dim](sentinel can execute autonomously)[/dim]"
+            )
+            for i, a in enumerate(refine_actions, 1):
+                console.print(f"  [bold]{i}. {a.get('title', '')}[/bold]")
+                console.print(
+                    f"     [dim]{a.get('lens', '')} — {a.get('impact', '')}[/dim]"
+                )
+                console.print(f"     {a.get('why', '')}")
+
+        if expand_actions:
+            console.print()
+            console.print(
+                "[bold yellow]Expansions[/bold yellow] "
+                "[dim](require your approval — see .sentinel/proposals/)[/dim]"
+            )
+            for i, a in enumerate(expand_actions, 1):
+                console.print(f"  [bold]{i}. {a.get('title', '')}[/bold]")
+                console.print(
+                    f"     [dim]{a.get('lens', '')} — {a.get('impact', '')}[/dim]"
+                )
+                console.print(f"     {a.get('why', '')}")
 
     # Persist
     try:
