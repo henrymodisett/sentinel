@@ -56,6 +56,57 @@ def _current_branch(project_path: str) -> str:
     return result.stdout.strip()
 
 
+def _load_approved_proposals(project_path: Path) -> list[dict]:
+    """Read .sentinel/proposals/*.md and return approved ones as actions.
+
+    Proposals are approved by the user editing the file and changing
+    'Status: pending' to 'Status: approved'.
+    """
+    import re
+
+    proposals_dir = project_path / ".sentinel" / "proposals"
+    if not proposals_dir.exists():
+        return []
+
+    approved: list[dict] = []
+    for path in sorted(proposals_dir.glob("*.md")):
+        content = path.read_text()
+        status_match = re.search(
+            r"^\*\*Status:\*\*\s*(\w+)", content, re.MULTILINE,
+        )
+        if not status_match or status_match.group(1).lower() != "approved":
+            continue
+
+        # Parse the rest
+        title_match = re.search(r"^# Proposal:\s*(.+)$", content, re.MULTILINE)
+        lens_match = re.search(r"^\*\*Lens:\*\*\s*(.+)$", content, re.MULTILINE)
+        impact_match = re.search(r"^\*\*Impact:\*\*\s*(.+)$", content, re.MULTILINE)
+        why_match = re.search(
+            r"## Why\s*\n\s*\n(.+?)(?=\n##|\Z)", content, re.DOTALL,
+        )
+        files_match = re.search(
+            r"## Files likely to be touched\s*\n\s*\n((?:- .+\n?)+)", content,
+        )
+        files = []
+        if files_match:
+            files = [
+                line[2:].strip() for line in files_match.group(1).splitlines()
+                if line.startswith("- ")
+            ]
+
+        approved.append({
+            "title": title_match.group(1).strip() if title_match else path.stem,
+            "lens": lens_match.group(1).strip() if lens_match else "",
+            "impact": impact_match.group(1).strip() if impact_match else "",
+            "why": why_match.group(1).strip() if why_match else "",
+            "files": files,
+            "kind": "expand",
+            "proposal_path": str(path),
+        })
+
+    return approved
+
+
 async def run_cycle(
     project_path: str | None = None,
     max_items: int = 3,
@@ -124,25 +175,55 @@ async def run_cycle(
         return
     actions = _parse_actions_from_scan(scan_file)
     _write_backlog(project, actions, scan_file)
+    from sentinel.cli.plan_cmd import _write_proposals
+    proposals = _write_proposals(project, actions, scan_file)
+
+    refinements = [a for a in actions if a.get("kind", "refine") == "refine"]
+    expansions = [a for a in actions if a.get("kind") == "expand"]
+    approved = _load_approved_proposals(project)
+
+    # Execution queue: refinements + approved proposals
+    exec_queue = refinements + approved
+
     console.print(
-        f"  [green]✓[/green] {len(actions)} work items in backlog\n"
+        f"  [green]✓[/green] {len(refinements)} refinements, "
+        f"{len(expansions)} expansion proposals, "
+        f"{len(approved)} approved to execute\n"
     )
 
     if dry_run:
         console.print("[yellow]Dry run — stopping before execution[/yellow]\n")
-        console.print("[bold]Would execute:[/bold]")
-        for i, action in enumerate(actions[:max_items], 1):
-            console.print(f"  {i}. {action['title']}")
+        if exec_queue:
+            console.print("[bold]Would execute:[/bold]")
+            for i, action in enumerate(exec_queue[:max_items], 1):
+                kind = action.get("kind", "refine")
+                console.print(f"  {i}. [{kind}] {action['title']}")
+        if expansions and not approved:
+            console.print("\n[yellow]Pending your review:[/yellow]")
+            for p in proposals:
+                console.print(f"  • {p.relative_to(project)}")
         console.print()
+        return
+
+    if not exec_queue:
+        console.print(
+            "[green]Nothing to execute — no refinements or approved expansions.[/green]"
+        )
+        if expansions:
+            console.print(
+                f"[dim]{len(expansions)} expansion proposals pending your review "
+                f"in .sentinel/proposals/[/dim]"
+            )
         return
 
     # Confirm before executing
     console.print(
-        f"[bold]Phase 3 will execute top {min(max_items, len(actions))} "
+        f"[bold]Phase 3 will execute top {min(max_items, len(exec_queue))} "
         f"items on feature branches.[/bold]"
     )
-    for i, action in enumerate(actions[:max_items], 1):
-        console.print(f"  {i}. {action['title']}")
+    for i, action in enumerate(exec_queue[:max_items], 1):
+        kind = action.get("kind", "refine")
+        console.print(f"  {i}. [{kind}] {action['title']}")
     console.print()
     if not click.confirm("  Proceed with autonomous execution?", default=False):
         console.print("[yellow]Stopped before execution.[/yellow]")
@@ -157,7 +238,7 @@ async def run_cycle(
     executions = []
     reviews = []
 
-    for i, action in enumerate(actions[:max_items], 1):
+    for i, action in enumerate(exec_queue[:max_items], 1):
         # Re-check budget before each execution
         budget = check_budget(
             project, config.budget.daily_limit_usd, config.budget.warn_at_usd,
