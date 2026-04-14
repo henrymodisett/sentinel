@@ -258,7 +258,11 @@ async def run_cycle(
         # a dirty tree from a failed prior item doesn't silently block
         # checkout and cause items to stack (sigint dogfood finding).
         from sentinel.cli.work_cmd import _reset_and_checkout
-        _reset_and_checkout(str(project), original_branch)
+        if not _reset_and_checkout(str(project), original_branch):
+            console.print(
+                "  [red]Cannot return to original branch — aborting cycle.[/red]"
+            )
+            break
 
         t0 = time.time()
         exec_result = await coder.execute(work_item, str(project))

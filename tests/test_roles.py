@@ -311,6 +311,91 @@ class TestCoderCommitsToFeatureBranch:
             )
 
 
+class TestResetAndCheckoutReturnCodes:
+    """Codex review caught: `_reset_and_checkout()` ignored return
+    codes. A failed checkout would silently leave the loop running
+    on the wrong branch — exactly the bug this PR is supposed to fix."""
+
+    def test_returns_false_when_checkout_fails(self, tmp_path) -> None:
+        from sentinel.cli.work_cmd import _reset_and_checkout
+
+        # Not a git repo — checkout will fail
+        assert _reset_and_checkout(str(tmp_path), "nonexistent-branch") is False
+
+    def test_returns_true_on_clean_success(self, tmp_path) -> None:
+        import subprocess as _sp
+
+        from sentinel.cli.work_cmd import _reset_and_checkout
+
+        _sp.run(["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True)
+        _sp.run(
+            ["git", "-c", "user.email=a@b", "-c", "user.name=t",
+             "commit", "--allow-empty", "-m", "init", "-q"],
+            cwd=tmp_path, check=True,
+        )
+        assert _reset_and_checkout(str(tmp_path), "main") is True
+
+
+class TestCoderExistingBranchCheckout:
+    """Codex review caught: when the feature branch already exists
+    (e.g. from a prior partial run), `git checkout -b` failed with
+    'already exists' and we skipped the error path — BUT we didn't
+    actually check the branch out. Claude ran + the commit landed on
+    the original branch instead of the feature branch."""
+
+    @pytest.mark.asyncio
+    async def test_checks_out_existing_branch_instead_of_original(self) -> None:
+        import subprocess as _sp
+
+        class FileWritingMock(MockProvider):
+            async def code(self, prompt, options=None, **kwargs):
+                wd = kwargs.get("working_directory", ".")
+                (Path(wd) / "fixed.py").write_text("ok\n")
+                return ChatResponse(
+                    content="done", provider=self.name, cost_usd=0.0,
+                )
+
+        provider = FileWritingMock()
+        provider.capabilities = ProviderCapabilities(
+            chat=True, agentic_code=True,
+        )
+        router = _mock_router(provider)
+        coder = Coder(router)
+        work_item = WorkItem(
+            id="1", title="reuse branch", description="",
+            type="fix", priority="low", complexity=1,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _sp.run(["git", "init", "-q", "-b", "main"], cwd=tmpdir, check=True)
+            _sp.run(
+                ["git", "-c", "user.email=a@b", "-c", "user.name=t",
+                 "commit", "--allow-empty", "-m", "init", "-q"],
+                cwd=tmpdir, check=True,
+            )
+            # Pre-create the branch the Coder will try to create
+            branch = f"sentinel/{work_item.type}/{_slug(work_item.title)}"
+            _sp.run(["git", "branch", branch], cwd=tmpdir, check=True)
+
+            await coder.execute(work_item, tmpdir)
+
+            # The commit must land on the feature branch, not main
+            current = _sp.run(
+                ["git", "branch", "--show-current"],
+                capture_output=True, text=True, cwd=tmpdir,
+            ).stdout.strip()
+            assert current == branch, (
+                f"coder must switch to existing feature branch, got {current!r}"
+            )
+            main_log = _sp.run(
+                ["git", "log", "--oneline", "main"],
+                capture_output=True, text=True, cwd=tmpdir,
+            )
+            assert "reuse branch" not in main_log.stdout, (
+                "commit must NOT land on main when feature branch exists"
+            )
+
+
 class TestCoderPersistsTranscripts:
     """Every execution attempt — success, failure, or exception —
     must leave a debuggable record behind. Before this PR, bare

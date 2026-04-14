@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -420,6 +421,10 @@ def _ensure_gitignore_entries(project: Path) -> None:
     uncommitted .sentinel/ and .claude/ files — friction that makes
     users either ignore warnings (bad) or commit the artifacts (worse).
     Idempotent: checks for our marker comment before appending.
+
+    Commits the .gitignore change if we're inside a git repo, because
+    otherwise `sentinel work`'s `_reset_and_checkout` would wipe the
+    change on its first reset --hard between items.
     """
     gitignore = project / ".gitignore"
     existing = gitignore.read_text() if gitignore.exists() else ""
@@ -435,3 +440,61 @@ def _ensure_gitignore_entries(project: Path) -> None:
     console.print(
         f"  [green]✓[/green] {action} .gitignore with sentinel/claude entries",
     )
+
+    _commit_gitignore_if_in_repo(project)
+
+
+def _commit_gitignore_if_in_repo(project: Path) -> None:
+    """Commit .gitignore change when the project is a git repo.
+
+    We do this explicitly so `sentinel work`'s between-item reset
+    doesn't discard the gitignore edit. The commit is a single
+    .gitignore change with a descriptive message the user can revert
+    with `git revert` if they don't want it.
+
+    Silent noop when: not a git repo, no changes staged, pre-commit
+    hook rejects — sentinel init should never hard-fail on gitignore
+    housekeeping.
+    """
+    try:
+        check = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            capture_output=True, text=True, cwd=project, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return
+    if check.returncode != 0 or check.stdout.strip() != "true":
+        return
+
+    subprocess.run(
+        ["git", "add", ".gitignore"],
+        capture_output=True, cwd=project, timeout=10,
+    )
+    diff_check = subprocess.run(
+        ["git", "diff", "--cached", "--quiet", "--", ".gitignore"],
+        capture_output=True, cwd=project, timeout=10,
+    )
+    if diff_check.returncode == 0:
+        # Nothing actually staged (pre-existing ignore match or similar)
+        return
+
+    commit = subprocess.run(
+        ["git", "commit", "-m",
+         "chore: gitignore sentinel artifacts (.sentinel/, .claude/)"],
+        capture_output=True, text=True, cwd=project, timeout=30,
+    )
+    if commit.returncode == 0:
+        console.print(
+            "  [dim]→ Committed .gitignore change so sentinel work "
+            "resets don't discard it.[/dim]",
+        )
+    else:
+        # Don't fail init — just warn. User can commit manually.
+        console.print(
+            "  [yellow]! Could not commit .gitignore change:[/yellow] "
+            f"{commit.stderr.strip() or commit.stdout.strip()}"
+        )
+        console.print(
+            "  [dim]  Commit it manually before `sentinel work` or "
+            "the between-item reset will revert it.[/dim]",
+        )

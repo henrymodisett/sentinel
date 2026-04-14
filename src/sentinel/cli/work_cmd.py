@@ -55,7 +55,7 @@ TEMPLATE_MARKERS = [
 ]
 
 
-def _reset_and_checkout(project: str, branch: str) -> None:
+def _reset_and_checkout(project: str, branch: str) -> bool:
     """Reset the working tree and checkout a branch.
 
     `git checkout` fails silently on dirty trees, which causes each
@@ -64,25 +64,45 @@ def _reset_and_checkout(project: str, branch: str) -> None:
     tree here is a failed attempt (pre-commit hook rejection, Claude
     error mid-edit, etc.) and should be discarded before we move on.
 
-    We clean transcripts/config in .sentinel/ from untracked-cleanup
-    scope — those are sentinel's own artifacts, never part of an item.
+    We preserve .sentinel/ and .claude/ from untracked-cleanup scope —
+    those are sentinel's own artifacts, never part of an item.
+
+    Returns True if the sequence landed us on `branch` with a clean
+    tree. Callers must abort the loop on False — silently proceeding
+    on the wrong branch is how we got the sigint commingling bug.
     """
-    subprocess.run(
+    reset = subprocess.run(
         ["git", "reset", "--hard", "HEAD"],
-        capture_output=True, cwd=project, timeout=30,
+        capture_output=True, text=True, cwd=project, timeout=30,
     )
-    # Remove untracked files from the Coder's attempted work — but
-    # preserve .sentinel/ (transcripts, proposals) and .claude/ (agent
-    # templates installed by init).
-    subprocess.run(
+    if reset.returncode != 0:
+        console.print(
+            f"  [red]git reset --hard failed:[/red] {reset.stderr.strip()}"
+        )
+        return False
+
+    clean = subprocess.run(
         ["git", "clean", "-fd",
          "--exclude=.sentinel/", "--exclude=.claude/"],
-        capture_output=True, cwd=project, timeout=30,
+        capture_output=True, text=True, cwd=project, timeout=30,
     )
-    subprocess.run(
+    if clean.returncode != 0:
+        console.print(
+            f"  [red]git clean failed:[/red] {clean.stderr.strip()}"
+        )
+        return False
+
+    co = subprocess.run(
         ["git", "checkout", branch],
-        capture_output=True, cwd=project, timeout=30,
+        capture_output=True, text=True, cwd=project, timeout=30,
     )
+    if co.returncode != 0:
+        console.print(
+            f"  [red]git checkout {branch} failed:[/red] {co.stderr.strip()}"
+        )
+        return False
+
+    return True
 
 
 def _parse_interval(interval: str) -> int:
@@ -468,7 +488,11 @@ async def _execute_and_review(
     # "successful" runs commingling into one diff. Reset first, then
     # checkout — the Coder commits its own work, so anything still in
     # the tree here is a failed attempt we shouldn't carry forward.
-    _reset_and_checkout(str(project), original_branch)
+    if not _reset_and_checkout(str(project), original_branch):
+        console.print(
+            "  [red]✗ Cannot return to original branch — aborting item.[/red]"
+        )
+        return "failed"
 
     t0 = time.time()
     exec_result = await coder.execute(work_item, str(project))

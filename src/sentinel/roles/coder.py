@@ -299,16 +299,34 @@ class Coder:
         result.branch = branch_name
 
         co_result = _run_git(["checkout", "-b", branch_name], project_path)
-        if co_result.returncode != 0 and "already exists" not in co_result.stderr:
-            result.error = (
-                f"Could not create branch {branch_name}: "
-                f"{co_result.stderr.strip()}"
-            )
-            result.duration_ms = int((time.time() - start) * 1000)
-            _write_execution_transcript(
-                project_path, work_item, prompt, response, result,
-            )
-            return result
+        if co_result.returncode != 0:
+            if "already exists" in co_result.stderr:
+                # Branch already exists — check it out explicitly so
+                # Claude and the commit both land there, not on the
+                # original branch we stayed on when -b failed.
+                switch_result = _run_git(
+                    ["checkout", branch_name], project_path,
+                )
+                if switch_result.returncode != 0:
+                    result.error = (
+                        f"Branch {branch_name} exists but checkout failed: "
+                        f"{switch_result.stderr.strip()}"
+                    )
+                    result.duration_ms = int((time.time() - start) * 1000)
+                    _write_execution_transcript(
+                        project_path, work_item, prompt, response, result,
+                    )
+                    return result
+            else:
+                result.error = (
+                    f"Could not create branch {branch_name}: "
+                    f"{co_result.stderr.strip()}"
+                )
+                result.duration_ms = int((time.time() - start) * 1000)
+                _write_execution_transcript(
+                    project_path, work_item, prompt, response, result,
+                )
+                return result
 
         # Build the prompt
         criteria = "\n".join(f"- {c}" for c in work_item.acceptance_criteria) or "(none)"

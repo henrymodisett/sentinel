@@ -315,6 +315,52 @@ class TestAutoGitignore:
         # Marker appears exactly once
         assert second.count("# sentinel artifacts") == 1
 
+    def test_gitignore_change_is_committed_in_git_repo(
+        self, fake_cli_env, isolated_home,
+    ):
+        """Regression: .gitignore was being reset-away by
+        _reset_and_checkout between items because init wrote it but
+        never committed. In a git repo, init must commit the change
+        so it survives sentinel work's between-item resets."""
+        import subprocess as _sp
+
+        fake_cli_env(claude=True)
+        _sp.run(
+            ["git", "init", "-q", "-b", "main"],
+            cwd=isolated_home, check=True,
+        )
+        _sp.run(
+            ["git", "-c", "user.email=a@b", "-c", "user.name=t",
+             "commit", "--allow-empty", "-m", "init", "-q"],
+            cwd=isolated_home, check=True,
+        )
+
+        CliRunner().invoke(main, ["init", "--yes"])
+
+        log = _sp.run(
+            ["git", "log", "--oneline"],
+            capture_output=True, text=True, cwd=isolated_home,
+        ).stdout
+        assert "gitignore sentinel artifacts" in log, (
+            f"init must commit .gitignore in a git repo; log was:\n{log}"
+        )
+        # Working tree must be clean on .gitignore
+        status = _sp.run(
+            ["git", "status", "--porcelain", ".gitignore"],
+            capture_output=True, text=True, cwd=isolated_home,
+        ).stdout
+        assert not status, f"expected clean .gitignore, got: {status!r}"
+
+    def test_no_commit_when_not_in_git_repo(
+        self, fake_cli_env, isolated_home,
+    ):
+        """Outside a git repo, init still writes .gitignore but must
+        not explode trying to commit it."""
+        fake_cli_env(claude=True)
+        result = CliRunner().invoke(main, ["init", "--yes"])
+        assert result.exit_code == 0
+        assert (isolated_home / ".gitignore").exists()
+
 
 class TestGoalsNudge:
     """Goals.md template should warn, not block — work still proceeds."""
