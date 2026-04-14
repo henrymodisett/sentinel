@@ -72,17 +72,49 @@ def _detect_project_type(project: Path) -> str:
     return "generic"
 
 
+def _pick_local_model(available_models: list[str]) -> str:
+    """Pick the best local model from what's actually pulled in Ollama.
+
+    Preference order, by how well they perform for code analysis:
+    1. qwen2.5-coder (any size, larger > smaller — best code model)
+    2. deepseek-r1 (strong reasoning)
+    3. deepseek-coder (decent code model)
+    4. llama3.3 (general-purpose)
+    5. Any model as a last resort
+    """
+    if not available_models:
+        # Nothing pulled — recommend a good default (user still needs to pull)
+        return "qwen2.5-coder:14b"
+
+    def _size(model: str) -> int:
+        """Extract size from 'qwen2.5-coder:14b' -> 14. Defaults to 0."""
+        import re
+        m = re.search(r":(\d+)b", model)
+        return int(m.group(1)) if m else 0
+
+    families = ["qwen2.5-coder", "deepseek-r1", "deepseek-coder", "llama3.3"]
+    for family in families:
+        candidates = [m for m in available_models if m.startswith(family)]
+        if candidates:
+            # Pick largest variant pulled
+            return max(candidates, key=_size)
+
+    # Fallback: use the first available model
+    return available_models[0]
+
+
 def _pick_monitor_provider(
     available: set[ProviderName],
+    ollama_models: list[str] | None = None,
 ) -> tuple[ProviderName, str]:
     """Pick the best monitor provider — prefer cheap/fast over expensive.
 
-    Based on dogfood findings: Gemini Flash is 6x faster than Claude Sonnet
-    for the monitor role with comparable quality. Prefer it when available.
+    Based on dogfood findings: local Ollama (if 14B+) is fast, free, private.
+    Gemini Flash is 6x faster than Claude Sonnet, effectively free.
+    Prefer local > gemini > openai > claude.
     """
-    # Preference order: local > gemini-flash > gpt-5.4-mini > claude-sonnet
     if ProviderName.LOCAL in available:
-        return ProviderName.LOCAL, "qwen2.5-coder:14b"
+        return ProviderName.LOCAL, _pick_local_model(ollama_models or [])
     if ProviderName.GEMINI in available:
         return ProviderName.GEMINI, "gemini-2.5-flash"
     if ProviderName.OPENAI in available:
@@ -196,6 +228,10 @@ def run_init(project_path: str | None = None, auto_yes: bool = False) -> None:
     }
     available_set = {provider_map[p] for p in available_providers if p in provider_map}
 
+    # Collect pulled Ollama models (for picking a monitor model that exists)
+    ollama_models = statuses.get("ollama", None)
+    ollama_model_names = ollama_models.models if ollama_models else []
+
     # Smart defaults based on provider availability
     role_assignments: dict[RoleName, tuple[ProviderName, str]] = {}
 
@@ -203,7 +239,9 @@ def run_init(project_path: str | None = None, auto_yes: bool = False) -> None:
         default = ROLE_DEFAULTS[role]
         # Monitor role — use our smart picker (prefers cheap/fast)
         if role == RoleName.MONITOR:
-            role_assignments[role] = _pick_monitor_provider(available_set)
+            role_assignments[role] = _pick_monitor_provider(
+                available_set, ollama_models=ollama_model_names,
+            )
             continue
 
         if default.provider in available_set:
