@@ -53,6 +53,15 @@ class ProjectState:
     # prompt. Separate from claude_md/readme which are always included.
     project_docs: str = ""
 
+    # Project type label (python, typescript, swift, rust, etc.) — used
+    # by the domain-brief researcher to frame the web query.
+    project_type: str = "generic"
+
+    # Domain-expertise brief produced by the Researcher role pre-scan.
+    # Populated by Monitor when it calls researcher.domain_brief. Empty
+    # string when research failed or was skipped (offline, no provider).
+    domain_brief: str = ""
+
     # Errors encountered during gathering
     errors: list[str] = field(default_factory=list)
 
@@ -332,6 +341,13 @@ def gather_state(project_path: Path) -> ProjectState:
     except OSError as e:
         state.errors.append(f"doc discovery failed: {e}")
         logger.warning("doc discovery failed: %s", e)
+
+    # Project type — needed for the domain brief
+    try:
+        state.project_type = detect_project_type(project_path)["type"]
+    except OSError as e:
+        state.errors.append(f"project type detection failed: {e}")
+        state.project_type = "generic"
 
     if state.errors:
         logger.info("State gathering completed with %d errors", len(state.errors))
