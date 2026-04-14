@@ -137,7 +137,16 @@ class Researcher:
                 confidence="low",
             )
 
-        if response.is_error or not response.content.strip():
+        # Treat Error-prefixed content as failure too — not every
+        # provider sets is_error=True on CLI failure; some return
+        # `content="Error: ..."` with is_error=False, which would
+        # otherwise get cached as a legit brief for 7 days.
+        content = response.content.strip()
+        if (
+            response.is_error
+            or not content
+            or content.startswith("Error:")
+        ):
             logger.warning(
                 "Domain research returned empty/error — proceeding without brief",
             )
@@ -152,7 +161,7 @@ class Researcher:
         brief = ResearchBrief(
             question="domain identification",
             mode="domain",
-            synthesis=response.content.strip(),
+            synthesis=content,
             confidence="medium",
             cost_usd=response.cost_usd,
         )

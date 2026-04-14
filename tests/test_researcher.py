@@ -139,6 +139,38 @@ class TestDomainBriefResearch:
         assert "second" in result.synthesis
 
     @pytest.mark.asyncio
+    async def test_error_prefixed_content_does_not_get_cached(
+        self, tmp_path: Path,
+    ) -> None:
+        """Regression (Codex): some providers return
+        content='Error: foo' with is_error=False on CLI failure.
+        Without treating that as a failure, the error string would
+        be cached as a legit brief for 7 days and injected into
+        every explore prompt."""
+        router, provider = _mock_router()
+        provider.chat = AsyncMock(return_value=ChatResponse(
+            content="Error: gemini CLI timed out after 600s",
+            provider=ProviderName.GEMINI,
+            is_error=False,  # <-- the dangerous combination
+            cost_usd=0.0,
+        ))
+        researcher = Researcher(router)
+        (tmp_path / ".sentinel").mkdir()
+
+        result = await researcher.domain_brief(
+            project_path=str(tmp_path), project_type="python",
+            project_name="demo", readme_excerpt="", docs_excerpt="",
+        )
+        # Must treat as failure, not cache the error string
+        assert result.synthesis == ""
+        assert result.confidence == "low"
+        # Cache file must NOT contain the error message
+        cache = tmp_path / DOMAIN_BRIEF_FILENAME
+        if cache.exists():
+            body = cache.read_text(encoding="utf-8")
+            assert "Error: gemini CLI timed out" not in body
+
+    @pytest.mark.asyncio
     async def test_research_failure_returns_empty_brief(
         self, tmp_path: Path,
     ) -> None:
