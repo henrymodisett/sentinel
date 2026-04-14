@@ -136,7 +136,7 @@ these. Example: "Don't suggest adding tests for deprecated modules" -->
     return goals_path
 
 
-def run_init(project_path: str | None = None) -> None:
+def run_init(project_path: str | None = None, auto_yes: bool = False) -> None:
     """Run the interactive init wizard."""
     project = Path(project_path or os.getcwd()).resolve()
     console.print(f"\n[bold]Sentinel Setup[/bold] — {project.name}\n")
@@ -272,7 +272,14 @@ def run_init(project_path: str | None = None) -> None:
         for item in preview_items:
             console.print(f"  [green]+[/green] {item}")
         console.print()
-        if not click.confirm("  Proceed?", default=True):
+
+        # Auto-proceed if running non-interactively or auto_yes passed
+        import sys as _sys
+        is_tty = _sys.stdin.isatty()
+        if auto_yes or not is_tty:
+            if not is_tty:
+                console.print("  [dim](non-interactive — proceeding)[/dim]")
+        elif not click.confirm("  Proceed?", default=True):
             console.print("[yellow]Cancelled.[/yellow]")
             return
         console.print()

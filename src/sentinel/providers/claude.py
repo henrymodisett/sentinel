@@ -51,10 +51,11 @@ class ClaudeProvider(Provider):
             args.extend(["--system-prompt", system_prompt])
 
         try:
-            result = await run_cli_async(args, timeout=600)
+            result = await run_cli_async(args, timeout=self.timeout_sec)
         except subprocess.TimeoutExpired:
             return ChatResponse(
-                content="Error: Claude CLI timed out after 600s", provider=self.name,
+                content=f"Error: Claude CLI timed out after {self.timeout_sec}s",
+                provider=self.name,
             )
         if result.returncode != 0:
             return ChatResponse(
@@ -98,10 +99,11 @@ class ClaudeProvider(Provider):
             "--no-session-persistence",
         ]
         try:
-            result = await run_cli_async(args, timeout=600)
+            result = await run_cli_async(args, timeout=self.timeout_sec)
         except subprocess.TimeoutExpired:
             return ChatResponse(
-                content="Error: Claude CLI timed out after 600s", provider=self.name,
+                content=f"Error: Claude CLI timed out after {self.timeout_sec}s",
+                provider=self.name,
             )
         if result.returncode != 0:
             return ChatResponse(

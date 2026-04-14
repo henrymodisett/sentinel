@@ -18,3 +18,10 @@ Goals are derived from CLAUDE.md, README, and GitHub issues — not stored separ
 """
 
 __version__ = "0.1.0"
+
+# Silence the sentinel logger by default — errors are captured in
+# ProjectState.errors / ScanResult.error and surfaced via the CLI.
+# Users who want verbose output can configure logging themselves.
+import logging as _logging
+
+_logging.getLogger("sentinel").addHandler(_logging.NullHandler())

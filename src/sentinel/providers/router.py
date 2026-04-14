@@ -48,9 +48,12 @@ class Router:
         for role_name, role_config in roles.items():
             key = f"{role_config.provider.value}:{role_config.model}"
             if key not in self._providers:
-                self._providers[key] = _create_provider(
-                    role_config.provider.value, role_config.model, config
+                provider = _create_provider(
+                    role_config.provider.value, role_config.model, config,
                 )
+                # Apply configured timeout from [scan] section
+                provider.timeout_sec = config.scan.provider_timeout_sec
+                self._providers[key] = provider
             self._role_map[role_name] = self._providers[key]
 
     def get_provider(self, role: RoleName) -> Provider:

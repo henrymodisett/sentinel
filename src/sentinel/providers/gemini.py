@@ -45,21 +45,23 @@ class GeminiProvider(Provider):
         if system_prompt:
             full_prompt = f"{system_prompt}\n\n{prompt}"
 
-        # Use --approval-mode default (requires approval for file writes/edits)
-        # -e "" disables all extensions (no tool use — pure chat)
+        # --approval-mode plan = read-only (no file writes, no edits).
+        # Critical for scan safety — without this, Gemini CLI will write
+        # files into the target project during lens evaluation.
         args = [
             "gemini", "-p", full_prompt, "-o", "json",
-            "--approval-mode", "default",
+            "--approval-mode", "plan",
         ]
         # Only pass -m if not the default auto model
         if self.model and self.model != "auto":
             args.extend(["-m", self.model])
 
         try:
-            result = await run_cli_async(args, timeout=300)
+            result = await run_cli_async(args, timeout=self.timeout_sec)
         except subprocess.TimeoutExpired:
             return ChatResponse(
-                content="Error: Gemini CLI timed out after 300s", provider=self.name,
+                content=f"Error: Gemini CLI timed out after {self.timeout_sec}s",
+                provider=self.name,
             )
         if result.returncode != 0:
             return ChatResponse(

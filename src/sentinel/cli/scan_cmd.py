@@ -205,9 +205,13 @@ async def run_scan(
         elif event == "lens_done":
             name = data["lens_name"]
             score = data["score"]
+            running = data.get("running_cost_usd", 0.0)
             color = "green" if score >= 75 else "yellow" if score >= 50 else "red"
+            cost_str = (
+                f" [dim](running: ${running:.4f})[/dim]" if running > 0 else ""
+            )
             console.print(
-                f"  [green]✓[/green] {name}: [{color}]{score}/100[/{color}]"
+                f"  [green]✓[/green] {name}: [{color}]{score}/100[/{color}]{cost_str}"
             )
         elif event == "lens_failed":
             console.print(

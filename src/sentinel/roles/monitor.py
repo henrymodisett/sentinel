@@ -444,6 +444,7 @@ class Monitor:
             emit("lens_done", {
                 "lens_name": lens.name,
                 "score": evaluation.score,
+                "running_cost_usd": result.total_cost_usd,
             })
             return evaluation
 

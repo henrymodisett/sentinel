@@ -133,6 +133,10 @@ class Provider(ABC):
     capabilities: ProviderCapabilities
     cli_command: str  # the CLI binary name
 
+    # Per-call timeout (seconds). Set by Router from config.scan.provider_timeout_sec.
+    # Can be overridden per provider-instance. Default kept high for safety.
+    timeout_sec: int = 600
+
     @abstractmethod
     async def chat(self, prompt: str, system_prompt: str | None = None) -> ChatResponse:
         """Send a prompt, get a response."""

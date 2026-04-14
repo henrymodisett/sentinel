@@ -70,11 +70,12 @@ def status() -> None:
 # --- ADVANCED / GRANULAR ---
 
 @main.command(hidden=True)
-def init() -> None:
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+def init(yes: bool) -> None:
     """Initialize Sentinel in the current project (usually auto-run by work)."""
     from sentinel.cli.init_cmd import run_init
 
-    run_init()
+    run_init(auto_yes=yes)
 
 
 @main.command(hidden=True)

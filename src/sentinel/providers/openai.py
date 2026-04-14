@@ -60,12 +60,17 @@ class OpenAIProvider(Provider):
     async def chat(
         self, prompt: str, system_prompt: str | None = None,
     ) -> ChatResponse:
-        args = ["codex", "exec", prompt, "--json", "--ephemeral"]
+        # Codex CLI has no --system-prompt flag; prepend to user prompt
+        full_prompt = prompt
+        if system_prompt:
+            full_prompt = f"{system_prompt}\n\n{prompt}"
+        args = ["codex", "exec", full_prompt, "--json", "--ephemeral"]
         try:
-            result = await run_cli_async(args, timeout=300)
+            result = await run_cli_async(args, timeout=self.timeout_sec)
         except subprocess.TimeoutExpired:
             return ChatResponse(
-                content="Error: Codex CLI timed out after 300s", provider=self.name,
+                content=f"Error: Codex CLI timed out after {self.timeout_sec}s",
+                provider=self.name,
             )
         if result.returncode != 0:
             return ChatResponse(
@@ -90,10 +95,11 @@ class OpenAIProvider(Provider):
             "-C", working_directory,
         ]
         try:
-            result = await run_cli_async(args, timeout=600)
+            result = await run_cli_async(args, timeout=self.timeout_sec)
         except subprocess.TimeoutExpired:
             return ChatResponse(
-                content="Error: Codex CLI timed out after 600s", provider=self.name,
+                content=f"Error: Codex CLI timed out after {self.timeout_sec}s",
+                provider=self.name,
             )
         if result.returncode != 0:
             return ChatResponse(

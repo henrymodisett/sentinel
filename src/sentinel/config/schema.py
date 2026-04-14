@@ -83,6 +83,8 @@ class ScanConfig(BaseModel):
     """Configuration for the scan pipeline."""
     max_lenses: int = 10  # max lenses to generate per scan
     evaluate_per_lens: bool = True  # if False, skip individual evaluation step
+    # per-LLM-call timeout (raise for large projects / slow networks)
+    provider_timeout_sec: int = 600
 
 
 class RolesConfig(BaseModel):
