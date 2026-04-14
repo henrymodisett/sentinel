@@ -80,13 +80,19 @@ def run_cli(args: list[str], timeout: int = 300) -> subprocess.CompletedProcess[
 
 
 async def run_cli_async(
-    args: list[str], timeout: int = 300, env: dict | None = None,
+    args: list[str],
+    timeout: int = 300,
+    env: dict | None = None,
+    cwd: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a CLI command asynchronously.
 
     env: optional environment dict. If None, inherits parent env (most CLIs
     need this for auth tokens in macOS keychain/config dirs). Providers
     should pass a minimal env to reduce secret leakage into prompts.
+    cwd: optional working directory. If None, inherits the caller's cwd.
+    The Coder path MUST pass the target project path here so Claude Code
+    edits land in the target, not in the sentinel process cwd.
     """
     import asyncio as _asyncio
 
@@ -95,6 +101,7 @@ async def run_cli_async(
         stdout=_asyncio.subprocess.PIPE,
         stderr=_asyncio.subprocess.PIPE,
         env=env,  # None means inherit
+        cwd=cwd,  # None means inherit
     )
 
     try:

@@ -116,7 +116,10 @@ class ClaudeProvider(Provider):
         ]
         try:
             result = await run_cli_async(
-                args, timeout=self.timeout_sec, env=minimal_provider_env(),
+                args,
+                timeout=self.timeout_sec,
+                env=minimal_provider_env(),
+                cwd=working_directory,
             )
         except subprocess.TimeoutExpired:
             return ChatResponse(
@@ -131,7 +134,30 @@ class ClaudeProvider(Provider):
 
         if result.returncode != 0:
             # Fall back to stdout when stderr is empty — some Claude CLI
-            # error paths write the diagnostic to stdout as JSON.
+            # error paths write the diagnostic to stdout as JSON. Parse
+            # the stdout JSON first so usage/cost data survives for
+            # budget tracking even on non-zero exits.
+            parsed_stdout = parse_json_safe(stdout)
+            if parsed_stdout:
+                usage = parsed_stdout.get("usage", {})
+                detail = (
+                    parsed_stdout.get("result")
+                    or stderr.strip()
+                    or f"claude exited {result.returncode}"
+                )
+                return ChatResponse(
+                    content=f"Error: {detail}",
+                    model=self.model,
+                    provider=self.name,
+                    input_tokens=usage.get("input_tokens", 0),
+                    output_tokens=usage.get("output_tokens", 0),
+                    cost_usd=parsed_stdout.get("total_cost_usd", 0.0),
+                    duration_ms=parsed_stdout.get("duration_ms", 0),
+                    session_id=parsed_stdout.get("session_id"),
+                    is_error=True,
+                    stderr=stderr,
+                    raw_stdout=stdout,
+                )
             detail = stderr.strip() or stdout.strip() or (
                 f"claude exited {result.returncode} with no output"
             )

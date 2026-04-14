@@ -166,6 +166,52 @@ class TestClaudeCodeSurfacesStderr:
         assert response.content.startswith("Error:")
         assert response.content != "Error: "
 
+    def test_code_passes_working_directory_as_cwd(self) -> None:
+        """Claude must run inside the target project, not the caller's
+        cwd. Otherwise `sentinel work --project /other` edits land in
+        the wrong tree."""
+        import asyncio
+        import subprocess
+        from unittest.mock import AsyncMock, patch
+
+        provider = ClaudeProvider()
+        fake_result = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout='{"result":"ok","is_error":false,"usage":{}}',
+            stderr="",
+        )
+        mock_run = AsyncMock(return_value=fake_result)
+        with patch("sentinel.providers.claude.run_cli_async", new=mock_run):
+            asyncio.run(provider.code("hi", working_directory="/tmp/target"))
+
+        assert mock_run.call_args.kwargs["cwd"] == "/tmp/target"
+
+    def test_code_records_cost_on_nonzero_exit_with_json_payload(self) -> None:
+        """Regression: non-zero exit paths used to return before parsing
+        stdout, so a JSON is_error payload on stdout dropped its
+        total_cost_usd silently."""
+        import asyncio
+        import subprocess
+        from unittest.mock import AsyncMock, patch
+
+        provider = ClaudeProvider()
+        payload = (
+            '{"is_error":true,"result":"auth failed",'
+            '"total_cost_usd":0.12,"usage":{"input_tokens":5,"output_tokens":2}}'
+        )
+        fake_result = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout=payload, stderr="",
+        )
+        with patch(
+            "sentinel.providers.claude.run_cli_async",
+            new=AsyncMock(return_value=fake_result),
+        ):
+            response = asyncio.run(provider.code("hi"))
+
+        assert response.is_error is True
+        assert response.cost_usd == 0.12
+        assert response.input_tokens == 5
+
     def test_code_records_cost_on_is_error_paths(self) -> None:
         """Sigint run: Claude burned $2.07 on max-turns-out runs but
         sentinel reported $0 because is_error paths dropped total_cost_usd.
