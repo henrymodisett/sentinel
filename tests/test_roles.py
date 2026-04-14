@@ -88,6 +88,27 @@ class TestMonitorSchema:
         assert "what_to_look_for" in required
 
 
+class TestExplorePromptBuilder:
+    """Regression: the locked-lens code path used to format EXPLORE_PROMPT
+    with a stale argument set and raise KeyError the moment a new template
+    field was added."""
+
+    def test_populates_installed_tools_field(self) -> None:
+        from sentinel.roles.monitor import _build_explore_prompt
+        state = ProjectState(path="/tmp/fake", name="fake")
+        state.installed_tools = "vcs: gh, git"
+        rendered = _build_explore_prompt(state)
+        assert "Available tools" in rendered
+        assert "vcs: gh, git" in rendered
+
+    def test_handles_missing_installed_tools(self) -> None:
+        """Empty installed_tools should render the fallback sentinel, not raise."""
+        from sentinel.roles.monitor import _build_explore_prompt
+        state = ProjectState(path="/tmp/fake", name="fake")
+        rendered = _build_explore_prompt(state)
+        assert "not probed" in rendered
+
+
 class TestMonitorFailsLoudly:
     @pytest.mark.asyncio
     async def test_fails_when_no_lenses_generated(self) -> None:
