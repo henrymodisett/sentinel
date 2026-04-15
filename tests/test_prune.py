@@ -131,6 +131,35 @@ class TestPruneRuns:
         (outside / "important.md").unlink()
         outside.rmdir()
 
+    def test_runs_symlink_to_in_project_dir_is_refused(
+        self, tmp_path: Path,
+    ) -> None:
+        """If `.sentinel/runs/` is a symlink to ANOTHER directory inside
+        the project (e.g. ../src), prune must still refuse. A naive
+        'is the target inside the project' containment check would
+        let this through and prune happily nuke source files. The
+        equality-against-expected-path check refuses any redirect."""
+        # In-project source dir we must not touch
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "important.py").write_text("must not be deleted")
+        past = time.time() - 100 * 86400
+        os.utime(src / "important.py", (past, past))
+
+        # .sentinel/runs/ symlinked to src/
+        sentinel_dir = tmp_path / ".sentinel"
+        sentinel_dir.mkdir()
+        (sentinel_dir / "runs").symlink_to(src)
+
+        removed = prune_runs(tmp_path, retention_days=30)
+
+        assert removed == 0, (
+            "prune must refuse when runs/ symlinks to another in-project dir"
+        )
+        assert (src / "important.py").exists(), (
+            "in-project source files must NOT be deleted by a redirected runs/"
+        )
+
     def test_dot_sentinel_as_symlink_is_refused(self, tmp_path: Path) -> None:
         """If `.sentinel/` itself is a symlink pointing outside the
         project, walking `.sentinel/runs/` would still escape. The

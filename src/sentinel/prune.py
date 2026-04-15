@@ -45,25 +45,27 @@ def prune_runs(project_path: Path, retention_days: int) -> int:
     if not runs_dir.exists():
         return 0
 
-    # Containment check — the universal symlink-escape guard. Any
-    # component along the path (project_path, .sentinel/, runs/, or
-    # anything we haven't thought of yet) could be a symlink. Per-
-    # component is_symlink() checks become a game of whack-a-mole.
-    # Instead: resolve runs_dir to its real path and verify it sits
-    # inside the resolved project root. If the symlink chain escapes
-    # the project, the relative_to() call raises ValueError and we
-    # refuse. This catches the entire class regardless of how many
-    # symlink layers are in play.
+    # Symlink-escape guard. The truly safe rule: the resolved path of
+    # `.sentinel/runs/` must equal the resolved path we'd compute from
+    # scratch starting at the resolved project root. Any symlink
+    # anywhere in the chain that changes the destination — escaping
+    # the project, or redirecting WITHIN the project (e.g. `runs/ →
+    # src/`, which `relative_to(project)` would happily allow) —
+    # produces a mismatch and we refuse to walk.
     try:
         real_project = project_path.resolve(strict=True)
         real_runs = runs_dir.resolve(strict=True)
-        real_runs.relative_to(real_project)
-    except (OSError, ValueError):
+    except OSError:
+        return 0
+
+    expected_runs = real_project / ".sentinel" / RUNS_DIRNAME
+    if real_runs != expected_runs:
         logger.warning(
-            "prune: %s resolves outside project %s — refusing to walk. "
-            "If you've symlinked .sentinel/ or .sentinel/runs/ outside "
-            "the project, prune the target manually.",
-            runs_dir, project_path,
+            "prune: %s resolves to %s, not the expected %s — refusing. "
+            "Some component of the path is a symlink that redirects the "
+            "target. Remove the symlink or prune the actual target dir "
+            "manually.",
+            runs_dir, real_runs, expected_runs,
         )
         return 0
 
