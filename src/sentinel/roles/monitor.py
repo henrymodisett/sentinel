@@ -784,6 +784,19 @@ class Monitor:
             lens_evaluations=evals_text[:10000],
         )
 
+        # Compute overall_score from successful lens evaluations BEFORE
+        # the synthesis call, so partial scans (where synthesis fails but
+        # lenses succeeded) still carry a meaningful top-line number. The
+        # LLM synthesis also returns a score but we've always overridden
+        # it with this average — more robust and matches user expectations.
+        successful = [e for e in result.evaluations if not e.error]
+        n_failed = len(result.evaluations) - len(successful)
+        if successful:
+            result.overall_score = round(
+                sum(e.score for e in successful) / len(successful),
+            )
+        result.n_lenses_failed = n_failed
+
         parsed_synth, synth_resp = await provider.chat_json(
             synth_prompt, SYNTHESIZE_SCHEMA,
         )
@@ -792,29 +805,26 @@ class Monitor:
         result.total_cost_usd += synth_resp.cost_usd
 
         if not parsed_synth:
+            # Synthesis failed but lens evaluations are already populated
+            # in result.evaluations. Leave result.ok False so callers know
+            # the scan is partial, but preserve everything we computed so
+            # _persist_scan can still write a useful file (overall_score,
+            # all lens findings, recommended tasks per lens). The caller
+            # decides whether to persist and whether to exit non-zero.
             result.error = f"Synthesis failed: {synth_resp.content[:200]}"
             logger.error(result.error)
             return result
 
-        # Overall score excludes failed lens evaluations so the top-line
-        # number isn't dragged down by parsing bugs. The LLM synthesis gives
-        # a suggested weighted score but we override with our own average
-        # over successful lenses only — more robust and matches what users expect.
-        successful = [e for e in result.evaluations if not e.error]
-        n_failed = len(result.evaluations) - len(successful)
-        if successful:
-            result.overall_score = round(
-                sum(e.score for e in successful) / len(successful),
-            )
-        else:
-            # All lenses failed — fall back to the LLM's synthesis score
+        # Synthesis-only field for truly-all-failed scans: if every lens
+        # errored, fall back to the LLM's synthesis score so the top-line
+        # isn't a flat 0.
+        if not successful:
             result.overall_score = parsed_synth.get("overall_score", 0)
 
         result.strengths = parsed_synth.get("strengths", [])
         result.critical_risks = parsed_synth.get("critical_risks", [])
         result.top_actions = parsed_synth.get("top_actions", [])
         result.raw_report = parsed_synth.get("summary", "")
-        result.n_lenses_failed = n_failed
         result.ok = True
 
         emit("step_done", {
