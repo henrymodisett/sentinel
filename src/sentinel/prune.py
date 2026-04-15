@@ -45,18 +45,25 @@ def prune_runs(project_path: Path, retention_days: int) -> int:
     if not runs_dir.exists():
         return 0
 
-    # The runs/ root itself can be a symlink — e.g., a user pointing
-    # .sentinel/runs/ at /tmp/sentinel-runs to keep journals out of
-    # backups. If we walked it, we'd recursively prune whatever the
-    # symlink targets, which could be anywhere. Skip pruning entirely
-    # in that case and surface a warning so the user knows. They can
-    # prune the target manually if they want, or remove the symlink.
-    if runs_dir.is_symlink():
+    # Containment check — the universal symlink-escape guard. Any
+    # component along the path (project_path, .sentinel/, runs/, or
+    # anything we haven't thought of yet) could be a symlink. Per-
+    # component is_symlink() checks become a game of whack-a-mole.
+    # Instead: resolve runs_dir to its real path and verify it sits
+    # inside the resolved project root. If the symlink chain escapes
+    # the project, the relative_to() call raises ValueError and we
+    # refuse. This catches the entire class regardless of how many
+    # symlink layers are in play.
+    try:
+        real_project = project_path.resolve(strict=True)
+        real_runs = runs_dir.resolve(strict=True)
+        real_runs.relative_to(real_project)
+    except (OSError, ValueError):
         logger.warning(
-            "prune: %s is a symlink; refusing to prune (would touch "
-            "files outside .sentinel/). Remove the symlink or prune "
-            "the target manually.",
-            runs_dir,
+            "prune: %s resolves outside project %s — refusing to walk. "
+            "If you've symlinked .sentinel/ or .sentinel/runs/ outside "
+            "the project, prune the target manually.",
+            runs_dir, project_path,
         )
         return 0
 

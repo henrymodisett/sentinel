@@ -104,18 +104,15 @@ class TestPruneRuns:
         assert (runs / "c.md").exists()
 
     def test_runs_root_as_symlink_is_refused(self, tmp_path: Path) -> None:
-        """If `.sentinel/runs/` itself is a symlink to somewhere else,
-        prune must refuse to walk it. Otherwise an old external target
-        tree gets recursively pruned — same outside-scope deletion class
-        as the per-entry symlink case, just at the directory boundary."""
-        # Outside-scope dir with files we must not touch
-        outside = tmp_path / "external-runs"
+        """If `.sentinel/runs/` itself is a symlink pointing outside
+        the project, prune must refuse to walk it. Caught by the
+        resolve+containment check."""
+        outside = tmp_path.parent / "external-runs"
         outside.mkdir()
         (outside / "important.md").write_text("must not be deleted")
         past = time.time() - 100 * 86400
         os.utime(outside / "important.md", (past, past))
 
-        # .sentinel/runs/ is a symlink to that dir
         sentinel_dir = tmp_path / ".sentinel"
         sentinel_dir.mkdir()
         (sentinel_dir / "runs").symlink_to(outside)
@@ -123,13 +120,45 @@ class TestPruneRuns:
         removed = prune_runs(tmp_path, retention_days=30)
 
         assert removed == 0, (
-            "prune must skip a symlinked runs/ root entirely"
+            "prune must skip a symlinked runs/ root that escapes the project"
         )
         assert (outside / "important.md").exists(), (
             "files inside the symlink target must NOT be touched"
         )
-        # The symlink itself stays — we don't replace user choices
         assert (sentinel_dir / "runs").is_symlink()
+
+        # cleanup outside-scope dir we created (test isolation)
+        (outside / "important.md").unlink()
+        outside.rmdir()
+
+    def test_dot_sentinel_as_symlink_is_refused(self, tmp_path: Path) -> None:
+        """If `.sentinel/` itself is a symlink pointing outside the
+        project, walking `.sentinel/runs/` would still escape. The
+        resolve+containment check catches this layer too — it doesn't
+        matter which component of the path is the symlink."""
+        outside_sentinel = tmp_path.parent / "external-sentinel"
+        outside_runs = outside_sentinel / "runs"
+        outside_runs.mkdir(parents=True)
+        (outside_runs / "old-journal.md").write_text("must not be deleted")
+        past = time.time() - 100 * 86400
+        os.utime(outside_runs / "old-journal.md", (past, past))
+
+        # .sentinel/ → external-sentinel/
+        (tmp_path / ".sentinel").symlink_to(outside_sentinel)
+
+        removed = prune_runs(tmp_path, retention_days=30)
+
+        assert removed == 0, (
+            "prune must refuse when .sentinel/ symlinks outside the project"
+        )
+        assert (outside_runs / "old-journal.md").exists(), (
+            "files in the external sentinel target must NOT be touched"
+        )
+
+        # cleanup
+        (outside_runs / "old-journal.md").unlink()
+        outside_runs.rmdir()
+        outside_sentinel.rmdir()
 
     def test_symlinked_entry_is_unlinked_not_followed(
         self, tmp_path: Path,
