@@ -337,6 +337,33 @@ async def run_cycle(
             for issue in review.blocking_issues[:3]:
                 console.print(f"      • {issue}")
 
+        # --- PHASE 4b: VERIFY (per item) ---
+        # Same independent objective signal as `sentinel work` runs.
+        # Without this, the legacy `sentinel cycle` alias quietly skips
+        # verification and produces inconsistent behavior between the
+        # two commands.
+        from sentinel.verify import persist_verification, verify_work_item
+        verification = verify_work_item(
+            project_path=project,
+            work_item_id=str(work_item.id),
+            work_item_title=work_item.title,
+            branch=exec_result.branch,
+        )
+        try:
+            persist_verification(project, verification)
+        except OSError as e:
+            console.print(
+                f"      [yellow]Could not persist verification: {e}[/yellow]"
+            )
+        verifier_icon = {
+            "verified": "[green]✅[/green]",
+            "not_verified": "[red]❌[/red]",
+            "no_check_defined": "[dim]—[/dim]",
+        }.get(verification.overall, "?")
+        console.print(
+            f"    Verifier: {verifier_icon} {verification.overall}"
+        )
+
     # Return to original branch with a clean tree — see _reset_and_checkout
     from sentinel.cli.work_cmd import _reset_and_checkout
     _reset_and_checkout(str(project), original_branch)

@@ -40,16 +40,16 @@ class TestRunCheck:
         result = run_check("lint", "/usr/bin/false", tmp_path)
         assert result.verdict == "fail"
 
-    def test_nonexistent_command_returns_no_check_defined(
-        self, tmp_path: Path,
-    ) -> None:
-        """If the configured command isn't on PATH, that's a config
-        problem on the user side — record it as no_check_defined with
-        evidence rather than silently passing or failing."""
+    def test_nonexistent_command_returns_fail(self, tmp_path: Path) -> None:
+        """A configured command that can't start (binary missing,
+        permission denied, etc.) is a misconfiguration — fail so it
+        rolls up to not_verified and the broken config surfaces.
+        no_check_defined is reserved for 'project never configured
+        a command at all' (covered separately above)."""
         result = run_check(
             "lint", "/no/such/command/at/all", tmp_path,
         )
-        assert result.verdict == "no_check_defined"
+        assert result.verdict == "fail"
         assert "not runnable" in result.evidence
 
     def test_evidence_is_truncated(self, tmp_path: Path) -> None:
@@ -126,6 +126,26 @@ class TestVerifyWorkItem:
         )
         result = verify_work_item(tmp_path, "wi-4", "Half-checked")
         assert result.overall == "verified"
+
+    def test_unrunnable_check_rolls_up_to_not_verified(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """A project with one passing check + one configured-but-missing
+        binary must end up not_verified, not verified. The previous
+        bug: missing binary returned no_check_defined which doesn't
+        roll up to fail, so a half-broken project read as 'verified'."""
+        monkeypatch.setattr(
+            "sentinel.verify.discover_checks",
+            lambda _: {
+                "lint": "/usr/bin/true",  # passes
+                "test": "/no/such/command",  # configured but missing
+            },
+        )
+        result = verify_work_item(tmp_path, "wi-x", "Half-broken")
+        assert result.overall == "not_verified", (
+            "configured-but-unrunnable command must propagate as fail, "
+            "not get masked by another passing check"
+        )
 
     def test_records_metadata(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.setattr(

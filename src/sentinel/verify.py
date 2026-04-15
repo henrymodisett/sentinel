@@ -123,8 +123,16 @@ def run_check(
             evidence=f"(timed out after {timeout_s}s)",
         )
     except (OSError, FileNotFoundError) as e:
+        # Command was configured but couldn't start (binary missing,
+        # permission denied, etc.). This is a misconfiguration, NOT a
+        # "no check defined" — the project asked us to run something
+        # and we couldn't. Treat it as fail so it rolls up to
+        # not_verified and the broken config surfaces in the journal.
+        # The "no_check_defined" verdict is reserved for the case
+        # where the project never configured a command at all
+        # (handled at the top of this function).
         return CheckResult(
-            name=name, command=command, verdict="no_check_defined",
+            name=name, command=command, verdict="fail",
             duration_s=time.perf_counter() - started,
             evidence=f"command not runnable: {e}",
         )
