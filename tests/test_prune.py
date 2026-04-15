@@ -103,6 +103,34 @@ class TestPruneRuns:
         assert (runs / "b.md").exists()
         assert (runs / "c.md").exists()
 
+    def test_runs_root_as_symlink_is_refused(self, tmp_path: Path) -> None:
+        """If `.sentinel/runs/` itself is a symlink to somewhere else,
+        prune must refuse to walk it. Otherwise an old external target
+        tree gets recursively pruned — same outside-scope deletion class
+        as the per-entry symlink case, just at the directory boundary."""
+        # Outside-scope dir with files we must not touch
+        outside = tmp_path / "external-runs"
+        outside.mkdir()
+        (outside / "important.md").write_text("must not be deleted")
+        past = time.time() - 100 * 86400
+        os.utime(outside / "important.md", (past, past))
+
+        # .sentinel/runs/ is a symlink to that dir
+        sentinel_dir = tmp_path / ".sentinel"
+        sentinel_dir.mkdir()
+        (sentinel_dir / "runs").symlink_to(outside)
+
+        removed = prune_runs(tmp_path, retention_days=30)
+
+        assert removed == 0, (
+            "prune must skip a symlinked runs/ root entirely"
+        )
+        assert (outside / "important.md").exists(), (
+            "files inside the symlink target must NOT be touched"
+        )
+        # The symlink itself stays — we don't replace user choices
+        assert (sentinel_dir / "runs").is_symlink()
+
     def test_symlinked_entry_is_unlinked_not_followed(
         self, tmp_path: Path,
     ) -> None:

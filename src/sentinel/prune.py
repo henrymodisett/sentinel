@@ -45,6 +45,21 @@ def prune_runs(project_path: Path, retention_days: int) -> int:
     if not runs_dir.exists():
         return 0
 
+    # The runs/ root itself can be a symlink — e.g., a user pointing
+    # .sentinel/runs/ at /tmp/sentinel-runs to keep journals out of
+    # backups. If we walked it, we'd recursively prune whatever the
+    # symlink targets, which could be anywhere. Skip pruning entirely
+    # in that case and surface a warning so the user knows. They can
+    # prune the target manually if they want, or remove the symlink.
+    if runs_dir.is_symlink():
+        logger.warning(
+            "prune: %s is a symlink; refusing to prune (would touch "
+            "files outside .sentinel/). Remove the symlink or prune "
+            "the target manually.",
+            runs_dir,
+        )
+        return 0
+
     cutoff = time.time() - (retention_days * 86400)
     removed = 0
 
