@@ -93,8 +93,16 @@ async def run_cli_async(
     cwd: optional working directory. If None, inherits the caller's cwd.
     The Coder path MUST pass the target project path here so Claude Code
     edits land in the target, not in the sentinel process cwd.
+
+    timeout is clamped against the current cycle deadline (see
+    sentinel.budget_ctx). A `--budget 10m` cycle can't have a single sub-call
+    that runs 600s when only 60s of budget remain — the clamped timeout
+    keeps provider CLIs bounded by the budget the user actually set.
     """
     import asyncio as _asyncio
+
+    from sentinel.budget_ctx import clamp_timeout
+    effective_timeout = clamp_timeout(timeout)
 
     process = await _asyncio.create_subprocess_exec(
         *args,
@@ -106,12 +114,12 @@ async def run_cli_async(
 
     try:
         stdout_bytes, stderr_bytes = await _asyncio.wait_for(
-            process.communicate(), timeout=timeout,
+            process.communicate(), timeout=effective_timeout,
         )
     except TimeoutError as e:
         process.kill()
         await process.wait()
-        raise subprocess.TimeoutExpired(args, timeout) from e
+        raise subprocess.TimeoutExpired(args, effective_timeout) from e
 
     return subprocess.CompletedProcess(
         args=args,

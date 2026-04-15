@@ -260,6 +260,13 @@ async def _run_single_cycle(
     money_budget, time_budget_sec = _parse_budget(budget_str)
     start_time = time.time()
 
+    # Set the cycle deadline so provider subprocess timeouts
+    # (run_cli_async) are clamped to the remaining budget. Without this a
+    # single slow LLM call can blow past `--budget 10m` by another 10
+    # minutes because each provider CLI still uses its own 600s timeout.
+    from sentinel.budget_ctx import set_cycle_deadline
+    set_cycle_deadline(time_budget_sec)
+
     console.print(f"\n[bold]Sentinel[/bold] — {project.name}")
     if budget_str:
         console.print(f"  Budget: {budget_str}")
