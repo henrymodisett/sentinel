@@ -74,14 +74,34 @@ class TestPersistPartialScan:
         assert "synthesis did not complete" in content.lower()
         assert "Gemini CLI timed out after 600s" in content
 
-    def test_no_banner_on_successful_scan(self, tmp_path: Path) -> None:
-        """Regression guard: the banner must not appear on complete scans."""
+    def test_partial_scans_go_to_partial_subdir(self, tmp_path: Path) -> None:
+        """Partial scans must NOT sit in .sentinel/scans/ alongside complete
+        scans. If they did, the next `sentinel work` would pick up the
+        partial as the latest scan, plan from its empty Top Actions, write
+        an empty backlog, and exit 0 — a new silent failure.
+        """
+        result = _failed_result_with_partial_lenses()
+        scan_file = _persist_scan(tmp_path, result)
+
+        assert scan_file.parent.name == "partial"
+        assert scan_file.parent.parent.name == "scans"
+
+        main_scans = list((tmp_path / ".sentinel" / "scans").glob("*.md"))
+        assert main_scans == [], (
+            "partial scan leaked into the main scans/ dir; "
+            "_find_latest_scan would pick it up as the latest scan"
+        )
+
+    def test_complete_scans_go_to_main_scans_dir(self, tmp_path: Path) -> None:
+        """Regression guard: complete scans still land in the main dir."""
         result = _failed_result_with_partial_lenses()
         result.ok = True
         result.error = None
         result.raw_report = "A normal summary."
         result.strengths = ["great design"]
         scan_file = _persist_scan(tmp_path, result)
+
+        assert scan_file.parent.name == "scans"
         content = scan_file.read_text()
         assert "Partial scan" not in content
 

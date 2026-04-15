@@ -107,16 +107,26 @@ def _print_state_summary(state: ProjectState) -> None:
 
 
 def _persist_scan(project_path: Path, result: ScanResult) -> Path:
-    """Write scan result to .sentinel/scans/YYYY-MM-DD-HHMM.md.
+    """Write scan result to disk.
 
-    Handles both complete and partial scans. If the scan failed mid-pipeline
-    (e.g. synthesis timed out but lens evaluations succeeded), the file is
-    still written with a prominent ⚠️ Partial banner, whatever overall score
-    we could compute from successful lenses, and every lens finding we have.
-    Losing that work on every failure is exactly what 'fail loudly, not
-    silently' is meant to prevent.
+    Complete scans go to `.sentinel/scans/YYYY-MM-DD-HHMM.md`.
+
+    Partial scans (result.ok is False but lens evaluations ran) go to
+    `.sentinel/scans/partial/YYYY-MM-DD-HHMM.md`. Keeping them out of
+    the main `scans/` glob means `_find_latest_scan` naturally ignores
+    them — so the next `sentinel work` treats the project as having no
+    recent scan and rescans, rather than planning from a scan with an
+    empty Top Actions section and writing an empty backlog. The partial
+    file still exists for operators to inspect; it just doesn't masquerade
+    as a successful scan.
+
+    Losing successful lens work on every synthesis failure is exactly the
+    silent-failure pattern the engineering principles forbid — but so is
+    quietly poisoning the next run with a failed scan.
     """
     scans_dir = project_path / ".sentinel" / "scans"
+    if not result.ok:
+        scans_dir = scans_dir / "partial"
     scans_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y-%m-%d-%H%M")
     scan_file = scans_dir / f"{timestamp}.md"
