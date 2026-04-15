@@ -120,6 +120,20 @@ async def run_cli_async(
         process.kill()
         await process.wait()
         raise subprocess.TimeoutExpired(args, effective_timeout) from e
+    except _asyncio.CancelledError:
+        # Outer cancellation (e.g., a parent asyncio.wait_for timed out,
+        # or the task was cancelled by KeyboardInterrupt handling). The
+        # subprocess does NOT die automatically — toolkit dogfood caught
+        # this as a process that kept running for 13+ minutes after its
+        # asyncio parent gave up. Kill it explicitly, then propagate the
+        # cancellation so the caller sees the expected CancelledError.
+        import contextlib
+        process.kill()
+        # wait() itself can be re-cancelled during shutdown; safe to
+        # suppress since we already sent SIGKILL above.
+        with contextlib.suppress(_asyncio.CancelledError):
+            await process.wait()
+        raise
 
     return subprocess.CompletedProcess(
         args=args,
