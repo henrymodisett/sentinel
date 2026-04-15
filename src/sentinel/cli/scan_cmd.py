@@ -12,6 +12,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import click
 from rich.console import Console
 from rich.panel import Panel
 
@@ -106,8 +107,26 @@ def _print_state_summary(state: ProjectState) -> None:
 
 
 def _persist_scan(project_path: Path, result: ScanResult) -> Path:
-    """Write scan result to .sentinel/scans/YYYY-MM-DD-HHMM.md"""
+    """Write scan result to disk.
+
+    Complete scans go to `.sentinel/scans/YYYY-MM-DD-HHMM.md`.
+
+    Partial scans (result.ok is False but lens evaluations ran) go to
+    `.sentinel/scans/partial/YYYY-MM-DD-HHMM.md`. Keeping them out of
+    the main `scans/` glob means `_find_latest_scan` naturally ignores
+    them — so the next `sentinel work` treats the project as having no
+    recent scan and rescans, rather than planning from a scan with an
+    empty Top Actions section and writing an empty backlog. The partial
+    file still exists for operators to inspect; it just doesn't masquerade
+    as a successful scan.
+
+    Losing successful lens work on every synthesis failure is exactly the
+    silent-failure pattern the engineering principles forbid — but so is
+    quietly poisoning the next run with a failed scan.
+    """
     scans_dir = project_path / ".sentinel" / "scans"
+    if not result.ok:
+        scans_dir = scans_dir / "partial"
     scans_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y-%m-%d-%H%M")
     scan_file = scans_dir / f"{timestamp}.md"
@@ -115,6 +134,17 @@ def _persist_scan(project_path: Path, result: ScanResult) -> Path:
     lines = [
         f"# Sentinel Scan — {timestamp}",
         "",
+    ]
+    if not result.ok:
+        lines += [
+            "> ⚠️  **Partial scan — synthesis did not complete.** Lens "
+            "evaluations below are still useful, but the top-line summary, "
+            "strengths, risks, and recommended actions are missing.",
+            "",
+            f"> **Reason:** {result.error or 'unknown failure'}",
+            "",
+        ]
+    lines += [
         f"**Overall score:** {result.overall_score}/100",
         f"**Provider:** {result.provider} | **Model:** {result.model}",
         f"**Cost:** ${result.total_cost_usd:.4f} | "
@@ -126,7 +156,7 @@ def _persist_scan(project_path: Path, result: ScanResult) -> Path:
         "",
         "## Summary",
         "",
-        result.raw_report,
+        result.raw_report or "_(synthesis did not complete — see lens evaluations below)_",
         "",
         "## Strengths",
         "",
@@ -246,6 +276,22 @@ async def run_scan(
                 border_style="red",
             )
         )
+        # Persist whatever lens work we managed before the failure. Losing
+        # 6/6 successful lens evaluations because synthesis timed out is
+        # the exact silent-failure pattern we're meant to prevent.
+        if result.evaluations:
+            try:
+                scan_file = _persist_scan(project, result)
+                console.print()
+                console.print(
+                    f"  [dim]Partial scan saved to: "
+                    f"{scan_file.relative_to(project)}[/dim]"
+                )
+            except (OSError, ValueError) as persist_err:
+                console.print(
+                    f"  [yellow]Could not persist partial scan: "
+                    f"{persist_err}[/yellow]"
+                )
         console.print()
         console.print(
             f"  [dim]Tokens: {result.total_input_tokens} in / "
@@ -254,7 +300,7 @@ async def run_scan(
         if result.total_cost_usd > 0:
             console.print(f"  [dim]Cost: ${result.total_cost_usd:.4f}[/dim]")
         console.print(f"  [dim]Time: {elapsed:.1f}s[/dim]")
-        return
+        raise click.exceptions.Exit(code=1)
 
     # Show project understanding
     console.print()

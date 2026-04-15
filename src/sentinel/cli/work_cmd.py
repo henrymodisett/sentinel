@@ -333,7 +333,23 @@ async def _run_single_cycle(
 
                 if not scan_result.ok:
                     console.print(f"  [red]Scan failed: {scan_result.error}[/red]")
-                    break
+                    # Persist whatever lens work completed before the failure.
+                    # Silently dropping successful lens evaluations on a
+                    # synthesis timeout is exactly the "no silent failures"
+                    # violation the engineering principles call out.
+                    if scan_result.evaluations:
+                        try:
+                            scan_file = _persist_scan(project, scan_result)
+                            console.print(
+                                f"  [dim]Partial scan saved to: "
+                                f"{scan_file.relative_to(project)}[/dim]"
+                            )
+                        except (OSError, ValueError) as persist_err:
+                            console.print(
+                                f"  [yellow]Could not persist partial scan: "
+                                f"{persist_err}[/yellow]"
+                            )
+                    raise click.exceptions.Exit(code=1)
 
                 _persist_scan(project, scan_result)
                 console.print(
