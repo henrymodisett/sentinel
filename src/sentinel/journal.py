@@ -72,7 +72,11 @@ class WorkItemRecord:
     title: str
     coder_status: str = "pending"  # pending | succeeded | failed
     coder_error: str | None = None
-    reviewer_verdict: str | None = None  # approved | changes_requested | None
+    reviewer_verdict: str | None = None  # approved | changes_requested | rejected | None
+    # Independent post-execute verifier verdict (project's own lint/test
+    # commands re-run against the new code). One of:
+    # verified | not_verified | no_check_defined | None (not yet run).
+    verification: str | None = None
 
 
 @dataclass
@@ -203,6 +207,17 @@ class Journal:
                 )
                 if wi.reviewer_verdict:
                     lines.append(f"  - Reviewer: {wi.reviewer_verdict}")
+                if wi.verification:
+                    # Visual marker so verified vs not_verified jumps out
+                    # when scanning the journal.
+                    icon = {
+                        "verified": "✅",
+                        "not_verified": "❌",
+                        "no_check_defined": "—",
+                    }.get(wi.verification, "?")
+                    lines.append(
+                        f"  - Verifier: {icon} {wi.verification}"
+                    )
             lines.append("")
 
         if self.provider_calls:

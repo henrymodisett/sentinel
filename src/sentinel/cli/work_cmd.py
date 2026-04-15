@@ -471,14 +471,14 @@ async def _run_single_cycle(
                 journal.exit_reason = "all_items_processed"
                 break
 
-            # Execute + review
+            # Execute + review + verify
             from sentinel.journal import WorkItemRecord
             wi_id = str(next_item.get("id", items_executed + 1))
             wi_title = next_item.get("title", "(untitled)")
             phase_label = f"execute:{wi_id}"
             set_current_phase("execute")
             journal.start_phase(phase_label)
-            success = await _execute_and_review(
+            success, verification_verdict = await _execute_and_review(
                 next_item, items_executed + 1,
                 project, original_branch,
                 coder, reviewer, config,
@@ -502,6 +502,7 @@ async def _run_single_cycle(
                 title=wi_title,
                 coder_status=wi_status,
                 reviewer_verdict=reviewer_verdict,
+                verification=verification_verdict,
             ))
 
             items_executed += 1
@@ -606,10 +607,14 @@ async def _execute_and_review(
     coder: Coder,
     reviewer: Reviewer,
     config: SentinelConfig,
-) -> str:
-    """Execute one work item and review it.
+) -> tuple[str, str | None]:
+    """Execute one work item, review it, and verify against project checks.
 
-    Returns 'approved', 'changes', 'rejected', or 'failed'.
+    Returns (verdict, verification_overall) where:
+      - verdict is one of 'approved', 'changes', 'rejected', 'failed'
+      - verification_overall is one of 'verified', 'not_verified',
+        'no_check_defined', or None when verification was skipped (e.g.
+        coder failed before producing a diff)
     """
     work_item = _action_to_work_item(action, index)
     console.print(f"[bold cyan]→ Executing[/bold cyan] {work_item.title}")
@@ -625,7 +630,7 @@ async def _execute_and_review(
         console.print(
             "  [red]✗ Cannot return to original branch — aborting item.[/red]"
         )
-        return "failed"
+        return "failed", None
 
     t0 = time.time()
     exec_result = await coder.execute(work_item, str(project))
@@ -639,7 +644,7 @@ async def _execute_and_review(
     elapsed = time.time() - t0
     if exec_result.status == "failed":
         console.print(f"  [red]✗ Execute failed:[/red] {exec_result.error}")
-        return "failed"
+        return "failed", None
 
     console.print(
         f"  [green]✓ Coded[/green] in {elapsed:.0f}s — "
@@ -670,11 +675,41 @@ async def _execute_and_review(
             console.print(f"    • {issue}")
     console.print()
 
+    # Verify against the project's own checks. Independent signal from
+    # the reviewer LLM — proves (or disproves) that the project's
+    # invariants still hold after the diff. Verdict is recorded
+    # regardless of reviewer outcome; downstream tooling decides what
+    # to do with not_verified items.
+    from sentinel.verify import persist_verification, verify_work_item
+    verification = verify_work_item(
+        project_path=project,
+        work_item_id=str(work_item.id),
+        work_item_title=work_item.title,
+        branch=exec_result.branch,
+    )
+    try:
+        persist_verification(project, verification)
+    except OSError as e:
+        console.print(
+            f"  [yellow]Could not persist verification: {e}[/yellow]"
+        )
+    verifier_icon = {
+        "verified": "[green]✅[/green]",
+        "not_verified": "[red]❌[/red]",
+        "no_check_defined": "[dim]—[/dim]",
+    }.get(verification.overall, "?")
+    console.print(
+        f"  Verifier: {verifier_icon} {verification.overall} "
+        f"[dim]({len([c for c in verification.checks if c.verdict == 'pass'])}"
+        f"/{len(verification.checks)} checks passed)[/dim]"
+    )
+    console.print()
+
     if review.verdict == "approved":
-        return "approved"
+        return "approved", verification.overall
     if review.verdict == "changes-requested":
-        return "changes"
-    return "rejected"
+        return "changes", verification.overall
+    return "rejected", verification.overall
 
 
 async def _run_loop(
