@@ -39,6 +39,10 @@ class ClaudeProvider(Provider):
         self.model = model
 
     async def chat(self, prompt: str, system_prompt: str | None = None) -> ChatResponse:
+        import time as _time
+
+        from sentinel.budget_ctx import clamp_timeout
+
         # chat() is read-only — no tools, no file writes, no terminal.
         # For agentic code execution with full tools, use code() instead.
         args = [
@@ -51,33 +55,43 @@ class ClaudeProvider(Provider):
         if system_prompt:
             args.extend(["--system-prompt", system_prompt])
 
+        was_clamped = clamp_timeout(self.timeout_sec) < self.timeout_sec
+        started = _time.perf_counter()
         try:
             result = await run_cli_async(
                 args, timeout=self.timeout_sec, env=minimal_provider_env(),
             )
         except subprocess.TimeoutExpired:
-            return ChatResponse(
+            response = ChatResponse(
                 content=f"Error: Claude CLI timed out after {self.timeout_sec}s",
                 provider=self.name,
             )
+            self._journal_call(started, response, was_clamped, error="timeout")
+            return response
         if result.returncode != 0:
-            return ChatResponse(
+            response = ChatResponse(
                 content=f"Error: {result.stderr.strip()}", provider=self.name,
             )
+            self._journal_call(started, response, was_clamped, error="non-zero exit")
+            return response
 
         data = parse_json_safe(result.stdout)
         if not data:
-            return ChatResponse(content=result.stdout, provider=self.name)
+            response = ChatResponse(content=result.stdout, provider=self.name)
+            self._journal_call(started, response, was_clamped, error="parse failure")
+            return response
 
         # Claude CLI returns is_error=true for auth failures etc.
         if data.get("is_error"):
-            return ChatResponse(
+            response = ChatResponse(
                 content=f"Error: {data.get('result', 'unknown error')}",
                 provider=self.name,
             )
+            self._journal_call(started, response, was_clamped, error="cli is_error")
+            return response
 
         usage = data.get("usage", {})
-        return ChatResponse(
+        response = ChatResponse(
             content=data.get("result", ""),
             model=self.model,
             provider=self.name,
@@ -87,6 +101,8 @@ class ClaudeProvider(Provider):
             duration_ms=data.get("duration_ms", 0),
             session_id=data.get("session_id"),
         )
+        self._journal_call(started, response, was_clamped)
+        return response
 
     # Note: we tried Claude CLI's --json-schema flag but it hangs indefinitely
     # at 0% CPU. Falling back to base Provider.chat_json() which uses prompt-
@@ -99,6 +115,10 @@ class ClaudeProvider(Provider):
         so the Coder can persist a debuggable transcript, even on the
         error paths where `content` used to be the only surviving signal.
         """
+        import time as _time
+
+        from sentinel.budget_ctx import clamp_timeout
+
         # `-p` (print) mode blocks Edit/Write/Bash by default, which
         # surfaces as permission_denials in the JSON output and an
         # immediate max_turns exit after 20 retried edits. Coder is
@@ -114,6 +134,16 @@ class ClaudeProvider(Provider):
             "--dangerously-skip-permissions",
             "--no-session-persistence",
         ]
+        was_clamped = clamp_timeout(self.timeout_sec) < self.timeout_sec
+        started = _time.perf_counter()
+
+        # Many early-return paths below — wrap _journal_call to keep
+        # bookkeeping consistent without a try/finally that would obscure
+        # the existing error-handling structure.
+        def _finalize(response: ChatResponse, error: str | None = None) -> ChatResponse:
+            self._journal_call(started, response, was_clamped, error=error)
+            return response
+
         try:
             result = await run_cli_async(
                 args,
@@ -122,11 +152,14 @@ class ClaudeProvider(Provider):
                 cwd=working_directory,
             )
         except subprocess.TimeoutExpired:
-            return ChatResponse(
-                content=f"Error: Claude CLI timed out after {self.timeout_sec}s",
-                provider=self.name,
-                is_error=True,
-                stderr=f"(timeout after {self.timeout_sec}s — no stderr captured)",
+            return _finalize(
+                ChatResponse(
+                    content=f"Error: Claude CLI timed out after {self.timeout_sec}s",
+                    provider=self.name,
+                    is_error=True,
+                    stderr=f"(timeout after {self.timeout_sec}s — no stderr captured)",
+                ),
+                error="timeout",
             )
 
         stderr = result.stderr or ""
@@ -145,37 +178,46 @@ class ClaudeProvider(Provider):
                     or stderr.strip()
                     or f"claude exited {result.returncode}"
                 )
-                return ChatResponse(
-                    content=f"Error: {detail}",
-                    model=self.model,
-                    provider=self.name,
-                    input_tokens=usage.get("input_tokens", 0),
-                    output_tokens=usage.get("output_tokens", 0),
-                    cost_usd=parsed_stdout.get("total_cost_usd", 0.0),
-                    duration_ms=parsed_stdout.get("duration_ms", 0),
-                    session_id=parsed_stdout.get("session_id"),
-                    is_error=True,
-                    stderr=stderr,
-                    raw_stdout=stdout,
+                return _finalize(
+                    ChatResponse(
+                        content=f"Error: {detail}",
+                        model=self.model,
+                        provider=self.name,
+                        input_tokens=usage.get("input_tokens", 0),
+                        output_tokens=usage.get("output_tokens", 0),
+                        cost_usd=parsed_stdout.get("total_cost_usd", 0.0),
+                        duration_ms=parsed_stdout.get("duration_ms", 0),
+                        session_id=parsed_stdout.get("session_id"),
+                        is_error=True,
+                        stderr=stderr,
+                        raw_stdout=stdout,
+                    ),
+                    error="non-zero exit",
                 )
             detail = stderr.strip() or stdout.strip() or (
                 f"claude exited {result.returncode} with no output"
             )
-            return ChatResponse(
-                content=f"Error: {detail}",
-                provider=self.name,
-                is_error=True,
-                stderr=stderr,
-                raw_stdout=stdout,
+            return _finalize(
+                ChatResponse(
+                    content=f"Error: {detail}",
+                    provider=self.name,
+                    is_error=True,
+                    stderr=stderr,
+                    raw_stdout=stdout,
+                ),
+                error="non-zero exit",
             )
 
         data = parse_json_safe(stdout)
         if not data:
-            return ChatResponse(
-                content=stdout,
-                provider=self.name,
-                stderr=stderr,
-                raw_stdout=stdout,
+            return _finalize(
+                ChatResponse(
+                    content=stdout,
+                    provider=self.name,
+                    stderr=stderr,
+                    raw_stdout=stdout,
+                ),
+                error="parse failure",
             )
 
         if data.get("is_error"):
@@ -189,22 +231,25 @@ class ClaudeProvider(Provider):
                 or "claude returned is_error=true with no result"
             )
             usage = data.get("usage", {})
-            return ChatResponse(
-                content=f"Error: {detail}",
-                model=self.model,
-                provider=self.name,
-                input_tokens=usage.get("input_tokens", 0),
-                output_tokens=usage.get("output_tokens", 0),
-                cost_usd=data.get("total_cost_usd", 0.0),
-                duration_ms=data.get("duration_ms", 0),
-                session_id=data.get("session_id"),
-                is_error=True,
-                stderr=stderr,
-                raw_stdout=stdout,
+            return _finalize(
+                ChatResponse(
+                    content=f"Error: {detail}",
+                    model=self.model,
+                    provider=self.name,
+                    input_tokens=usage.get("input_tokens", 0),
+                    output_tokens=usage.get("output_tokens", 0),
+                    cost_usd=data.get("total_cost_usd", 0.0),
+                    duration_ms=data.get("duration_ms", 0),
+                    session_id=data.get("session_id"),
+                    is_error=True,
+                    stderr=stderr,
+                    raw_stdout=stdout,
+                ),
+                error="cli is_error",
             )
 
         usage = data.get("usage", {})
-        return ChatResponse(
+        return _finalize(ChatResponse(
             content=data.get("result", ""),
             model=self.model,
             provider=self.name,
@@ -215,7 +260,7 @@ class ClaudeProvider(Provider):
             session_id=data.get("session_id"),
             stderr=stderr,
             raw_stdout=stdout,
-        )
+        ))
 
     def detect(self) -> ProviderStatus:
         path = shutil.which("claude")

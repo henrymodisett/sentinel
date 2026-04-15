@@ -205,6 +205,40 @@ class Provider(ABC):
     async def chat(self, prompt: str, system_prompt: str | None = None) -> ChatResponse:
         """Send a prompt, get a response."""
 
+    def _journal_call(
+        self,
+        started_at: float,
+        response: ChatResponse,
+        was_clamped: bool,
+        error: str | None = None,
+    ) -> None:
+        """Append this call to the cycle's run journal (no-op outside a
+        cycle). Subclasses call this once at the end of every chat() /
+        code() path so the journal sees latency, tokens, cost, and
+        clamp status.
+
+        `was_clamped` MUST be captured BEFORE the call (typically at
+        the same time as `started_at`). Computing it here would race:
+        by the time the call returns, more time has elapsed against
+        the cycle deadline, so an unclamped call could appear clamped
+        because the remaining budget shrank during the call itself.
+        """
+        import time as _time
+
+        from sentinel.journal import record_provider_call
+
+        latency_ms = int((_time.perf_counter() - started_at) * 1000)
+        record_provider_call(
+            provider=str(self.name),
+            model=response.model or getattr(self, "model", "") or "",
+            latency_ms=latency_ms,
+            input_tokens=response.input_tokens,
+            output_tokens=response.output_tokens,
+            cost_usd=response.cost_usd,
+            was_clamped=was_clamped,
+            error=error,
+        )
+
     async def chat_json(
         self, prompt: str, schema: dict, system_prompt: str | None = None,
     ) -> tuple[dict | None, ChatResponse]:

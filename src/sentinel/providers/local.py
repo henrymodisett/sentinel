@@ -39,6 +39,8 @@ class LocalProvider(Provider):
         self.endpoint = endpoint
 
     async def chat(self, prompt: str, system_prompt: str | None = None) -> ChatResponse:
+        import time as _time
+
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
@@ -50,12 +52,14 @@ class LocalProvider(Provider):
         # though the CLI providers (Claude/Gemini/Codex) are bounded.
         from sentinel.budget_ctx import clamp_timeout
         http_timeout = clamp_timeout(self.timeout_sec)
+        was_clamped = http_timeout < self.timeout_sec
 
         # Return an error ChatResponse on timeout/connection error rather
         # than raising. The CLI providers all do this (TimeoutExpired →
         # error ChatResponse) so scan-failure + partial-persist handling
         # works uniformly; without it, an Ollama timeout would raise a
         # traceback out of Monitor.assess and bypass _persist_scan.
+        started = _time.perf_counter()
         try:
             async with httpx.AsyncClient(timeout=http_timeout) as client:
                 resp = await client.post(
@@ -67,27 +71,33 @@ class LocalProvider(Provider):
                     },
                 )
         except httpx.TimeoutException:
-            return ChatResponse(
+            response = ChatResponse(
                 content=(
                     f"Error: Ollama HTTP call timed out after "
                     f"{http_timeout}s"
                 ),
                 provider=self.name,
             )
+            self._journal_call(started, response, was_clamped, error="timeout")
+            return response
         except httpx.RequestError as e:
-            return ChatResponse(
+            response = ChatResponse(
                 content=f"Error: Ollama HTTP call failed: {e}",
                 provider=self.name,
             )
+            self._journal_call(started, response, was_clamped, error="request error")
+            return response
 
         if resp.status_code != 200:
-            return ChatResponse(
+            response = ChatResponse(
                 content=f"Error: Ollama returned {resp.status_code}", provider=self.name,
             )
+            self._journal_call(started, response, was_clamped, error=f"http {resp.status_code}")
+            return response
 
         data = resp.json()
         message = data.get("message", {})
-        return ChatResponse(
+        response = ChatResponse(
             content=message.get("content", ""),
             model=self.model,
             provider=self.name,
@@ -95,6 +105,8 @@ class LocalProvider(Provider):
             output_tokens=data.get("eval_count", 0),
             duration_ms=data.get("total_duration", 0) // 1_000_000,  # nanoseconds → ms
         )
+        self._journal_call(started, response, was_clamped)
+        return response
 
     def detect(self) -> ProviderStatus:
         path = shutil.which("ollama")
