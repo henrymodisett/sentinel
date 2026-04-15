@@ -460,20 +460,43 @@ class TestAutoGitignore:
         assert ".gitignore" in latest_files
 
 
-class TestGoalsNudge:
-    """Goals.md template should warn, not block — work still proceeds."""
+class TestNoGoalsTemplate:
+    """Sentinel reads whatever project docs exist — no dedicated goals file."""
 
-    def test_work_proceeds_when_goals_is_template(
+    def test_init_does_not_create_goals_md(
         self, fake_cli_env, isolated_home,
     ):
-        """A fresh init leaves goals.md as a template — work should still run."""
+        """Fresh init must not write .sentinel/goals.md.
+
+        Project context is discovered from README/CLAUDE.md/docs via the
+        LEARN phase. Creating a required-looking template file misleads
+        users into thinking it's the source of truth.
+        """
         fake_cli_env(claude=True, gemini=True)
         CliRunner().invoke(main, ["init", "--yes"])
 
-        # Goals.md is still the default template at this point
-        from sentinel.cli.work_cmd import _goals_filled
-        assert not _goals_filled(isolated_home), (
-            "test setup: goals.md should still be a template after fresh init"
+        goals_path = isolated_home / ".sentinel" / "goals.md"
+        assert not goals_path.exists(), (
+            f"init should not create goals.md, but it exists at {goals_path}"
+        )
+
+    def test_work_does_not_nag_about_goals_md(
+        self, fake_cli_env, isolated_home,
+    ):
+        """`sentinel work` must not print a 'fill in goals.md' warning.
+
+        Before the dogfood cleanup, work printed a yellow 'Heads up:
+        goals.md still has the default template' line on every run. That
+        nag is gone — docs discovery handles project context.
+        """
+        fake_cli_env(claude=True, gemini=True)
+        CliRunner().invoke(main, ["init", "--yes"])
+
+        result = CliRunner().invoke(main, ["work", "--dry-run"])
+        combined = (result.output or "") + (result.stderr or "")
+        assert "goals.md" not in combined, (
+            "work output should not mention goals.md at all; got:\n"
+            + combined
         )
 
 
@@ -498,7 +521,10 @@ class TestReinit:
         # Marker should still be there
         assert "# user-edited" in config_path.read_text()
 
-    def test_skips_existing_goals(self, fake_cli_env, isolated_home):
+    def test_reinit_preserves_user_created_goals(self, fake_cli_env, isolated_home):
+        """If a user manually created .sentinel/goals.md, re-running init
+        must not touch it. Init doesn't create this file itself, but if
+        present it's user-owned content we must leave alone."""
         fake_cli_env(claude=True)
         CliRunner().invoke(main, ["init", "--yes"])
 

@@ -9,11 +9,10 @@ Figures out what the project needs and does it, until:
 
 State machine:
   1. Not initialized? Run init.
-  2. No goals.md or goals.md is empty template? Prompt user to fill in and stop.
-  3. No recent scan (older than 1 hour, or none)? Run scan.
-  4. No backlog or backlog stale (older than the latest scan)? Run plan.
-  5. Backlog has items? Execute top item, review, commit to feature branch.
-  6. Repeat from step 3 if budget remains.
+  2. No recent scan (older than 1 hour, or none)? Run scan.
+  3. No backlog or backlog stale (older than the latest scan)? Run plan.
+  4. Backlog has items? Execute top item, review, commit to feature branch.
+  5. Repeat from step 2 if budget remains.
 """
 
 from __future__ import annotations
@@ -46,13 +45,6 @@ from sentinel.roles.reviewer import Reviewer
 from sentinel.state import gather_state
 
 console = Console()
-
-# Template markers that indicate goals.md hasn't been filled in
-TEMPLATE_MARKERS = [
-    "<!-- One paragraph: what it does",
-    "<!-- 2-5 bullet points",
-    "<!-- Things sentinel should know",
-]
 
 
 def _working_tree_clean(project: Path | str) -> bool:
@@ -195,16 +187,6 @@ def _parse_budget(budget_str: str | None) -> tuple[float | None, int | None]:
     )
 
 
-def _goals_filled(project: Path) -> bool:
-    """Check if goals.md has been edited beyond the template."""
-    goals = project / ".sentinel" / "goals.md"
-    if not goals.exists():
-        return False
-    content = goals.read_text()
-    # If any template comment markers are still present, treat as unfilled
-    return not any(marker in content for marker in TEMPLATE_MARKERS)
-
-
 def _latest_scan_age(project: Path) -> timedelta | None:
     """Age of the most recent scan, or None if no scans exist."""
     scan = _find_latest_scan(project)
@@ -307,15 +289,6 @@ async def _run_single_cycle(
     config = _load_config(project)
     if not config:
         return
-
-    # --- 2. Nudge (don't block) if goals.md is still the template ---
-    if not _goals_filled(project):
-        console.print(
-            "[yellow]  Heads up:[/yellow] [cyan].sentinel/goals.md[/cyan] "
-            "still has the default template.\n"
-            "  Scans will run, but lens generation is much sharper once you "
-            "describe the project there.\n"
-        )
 
     # --- Main work loop ---
     router = Router(config)

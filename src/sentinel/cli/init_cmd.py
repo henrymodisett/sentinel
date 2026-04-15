@@ -88,49 +88,6 @@ def _detect_project_type(project: Path) -> str:
     return "generic"
 
 
-def _write_goals_template(project: Path, project_type: str) -> Path:
-    goals_path = project / ".sentinel" / "goals.md"
-    if goals_path.exists():
-        return goals_path
-
-    template = f"""# Project Goals — {project.name}
-
-*Sentinel reads this file during scans to generate project-specific lenses. \
-Keep it short (under 100 lines).*
-
-## What is this project?
-
-<!-- One paragraph: what it does, who it's for, why it exists -->
-
-## Current stage
-
-<!-- One of: prototype, pre-launch, v1, growing, mature, maintenance -->
-
-## What matters most right now?
-
-<!-- 2-5 bullet points on the priorities sentinel should weight highest -->
-
--
--
--
-
-## Constraints
-
-<!-- Tech debt we're living with, migrations in flight, decisions already made -->
-
-## Explicit non-goals
-
-<!-- Things sentinel should NOT recommend — we've considered and rejected these -->
-
----
-
-*Detected project type: {project_type}. Edit freely — sentinel re-reads on every scan.*
-"""
-    goals_path.parent.mkdir(parents=True, exist_ok=True)
-    goals_path.write_text(template)
-    return goals_path
-
-
 # ---------- Interactive Questions ----------
 
 
@@ -266,7 +223,6 @@ def run_init(
 
     # Write files
     _write_config(project, project_type, role_assignments, daily_budget)
-    _write_goals_template(project, project_type)
     _install_claude_templates(project)
     _ensure_gitignore_entries(project)
 
@@ -274,15 +230,11 @@ def run_init(
     console.print("\n[bold green]Done![/bold green]\n")
     console.print("  [bold]Next steps:[/bold]")
     console.print(
-        "    [dim]1.[/dim] Fill in [cyan].sentinel/goals.md[/cyan] "
-        "[dim](describe your project — sharpens lens generation)[/dim]"
-    )
-    console.print(
-        "    [dim]2.[/dim] Run [cyan]sentinel work[/cyan] "
+        "    [dim]1.[/dim] Run [cyan]sentinel work[/cyan] "
         "[dim](scans, plans, executes refinements; proposes expansions)[/dim]"
     )
     console.print(
-        "    [dim]3.[/dim] For continuous mode: [cyan]sentinel work --every 10m[/cyan]"
+        "    [dim]2.[/dim] For continuous mode: [cyan]sentinel work --every 10m[/cyan]"
     )
     console.print()
 
