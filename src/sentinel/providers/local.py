@@ -51,10 +51,33 @@ class LocalProvider(Provider):
         from sentinel.budget_ctx import clamp_timeout
         http_timeout = clamp_timeout(self.timeout_sec)
 
-        async with httpx.AsyncClient(timeout=http_timeout) as client:
-            resp = await client.post(
-                f"{self.endpoint}/api/chat",
-                json={"model": self.model, "messages": messages, "stream": False},
+        # Return an error ChatResponse on timeout/connection error rather
+        # than raising. The CLI providers all do this (TimeoutExpired →
+        # error ChatResponse) so scan-failure + partial-persist handling
+        # works uniformly; without it, an Ollama timeout would raise a
+        # traceback out of Monitor.assess and bypass _persist_scan.
+        try:
+            async with httpx.AsyncClient(timeout=http_timeout) as client:
+                resp = await client.post(
+                    f"{self.endpoint}/api/chat",
+                    json={
+                        "model": self.model,
+                        "messages": messages,
+                        "stream": False,
+                    },
+                )
+        except httpx.TimeoutException:
+            return ChatResponse(
+                content=(
+                    f"Error: Ollama HTTP call timed out after "
+                    f"{http_timeout}s"
+                ),
+                provider=self.name,
+            )
+        except httpx.RequestError as e:
+            return ChatResponse(
+                content=f"Error: Ollama HTTP call failed: {e}",
+                provider=self.name,
             )
 
         if resp.status_code != 200:

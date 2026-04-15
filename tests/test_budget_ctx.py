@@ -148,3 +148,44 @@ class TestLocalProviderHonorsBudget:
             f"LocalProvider HTTP timeout was {recorded['timeout']}s "
             f"on a 3s budget — clamp not applied"
         )
+
+    @pytest.mark.asyncio
+    async def test_local_provider_returns_error_on_timeout(
+        self, monkeypatch,
+    ) -> None:
+        """httpx timeouts must become error ChatResponses, not raise.
+
+        The CLI providers all translate timeouts into an error-content
+        ChatResponse so the scan-failure + partial-persist path can
+        handle them uniformly. If LocalProvider leaked httpx.TimeoutException
+        up through Monitor.assess, the partial scan writer would never run.
+        """
+        import httpx as _httpx
+
+        from sentinel.providers.local import LocalProvider
+
+        class TimingOutAsyncClient:
+            def __init__(self, **_: object) -> None:
+                pass
+
+            async def __aenter__(self) -> TimingOutAsyncClient:
+                return self
+
+            async def __aexit__(self, *_: object) -> None:
+                return None
+
+            async def post(self, *_: object, **__: object) -> object:
+                raise _httpx.ReadTimeout("simulated")
+
+        monkeypatch.setattr(
+            "sentinel.providers.local.httpx.AsyncClient", TimingOutAsyncClient,
+        )
+
+        provider = LocalProvider(model="fake-model")
+        set_cycle_deadline(1)
+        resp = await provider.chat("hi")
+
+        # Must not raise — must return a ChatResponse with an error marker.
+        assert "timed out" in resp.content.lower(), (
+            f"expected timeout error content, got: {resp.content!r}"
+        )
