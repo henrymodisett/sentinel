@@ -312,6 +312,18 @@ async def _run_single_cycle(
     except OSError as e:
         console.print(f"  [yellow]Prune skipped: {e}[/yellow]\n")
 
+    # Open the run journal. Providers and phase wrappers will record into
+    # this via ContextVar; the finally block writes it to disk regardless
+    # of how the cycle ends (success, exception, KeyboardInterrupt).
+    from sentinel.journal import Journal, set_current_journal, set_current_phase
+    journal = Journal(
+        project_path=project,
+        project_name=project.name,
+        branch=_current_branch(str(project)),
+        budget_str=budget_str,
+    )
+    set_current_journal(journal)
+
     # --- Main work loop ---
     router = Router(config)
     monitor = Monitor(router)
@@ -341,6 +353,8 @@ async def _run_single_cycle(
                     mins = int(scan_age.total_seconds() / 60)
                     console.print(f"  [dim]Last scan: {mins} min ago[/dim]")
 
+                set_current_phase("scan")
+                journal.start_phase("scan")
                 state = gather_state(project)
                 from sentinel.cli.scan_cmd import scan_progress_printer
                 scan_result = await monitor.assess(
@@ -354,6 +368,7 @@ async def _run_single_cycle(
                     )
 
                 if not scan_result.ok:
+                    journal.end_phase("scan", status="failed", error=scan_result.error)
                     console.print(f"  [red]Scan failed: {scan_result.error}[/red]")
                     # Persist whatever lens work completed before the failure.
                     # Silently dropping successful lens evaluations on a
@@ -374,6 +389,7 @@ async def _run_single_cycle(
                     raise click.exceptions.Exit(code=1)
 
                 _persist_scan(project, scan_result)
+                journal.end_phase("scan")
                 console.print(
                     f"  [green]✓[/green] Health: {scan_result.overall_score}/100 "
                     f"(${scan_result.total_cost_usd:.4f})\n"
@@ -382,8 +398,11 @@ async def _run_single_cycle(
             # --- 4. Plan if backlog stale ---
             if _backlog_stale(project):
                 console.print("[bold cyan]→ Planning[/bold cyan]")
+                set_current_phase("plan")
+                journal.start_phase("plan")
                 scan_file = _find_latest_scan(project)
                 if not scan_file:
+                    journal.end_phase("plan", status="failed", error="no scan")
                     console.print("  [red]No scan to plan from[/red]")
                     break
                 actions = _parse_actions_from_scan(scan_file)
@@ -401,6 +420,7 @@ async def _run_single_cycle(
                     f"  [green]✓[/green] {len(refinements)} refinements, "
                     f"{len(expansions)} expansion proposals"
                 )
+                journal.end_phase("plan")
                 if proposals:
                     console.print(
                         "  [dim]  New proposals in .sentinel/proposals/ — "
@@ -446,24 +466,49 @@ async def _run_single_cycle(
                 break
 
             # Execute + review
+            set_current_phase("execute")
+            journal.start_phase(f"execute:{next_item.get('id', items_executed + 1)}")
             success = await _execute_and_review(
                 next_item, items_executed + 1,
                 project, original_branch,
                 coder, reviewer, config,
+            )
+            journal.end_phase(
+                f"execute:{next_item.get('id', items_executed + 1)}",
+                status=success or "unknown",
             )
             items_executed += 1
             if success == "approved":
                 items_approved += 1
             elif success == "failed":
                 items_failed += 1
+        journal.exit_reason = "complete"
 
     except KeyboardInterrupt:
+        journal.exit_reason = "interrupted"
         console.print("\n\n[yellow]  Interrupted. Cleaning up...[/yellow]")
+    except click.exceptions.Exit:
+        journal.exit_reason = "scan_failed"
+        raise
+    except Exception as exc:
+        journal.exit_reason = f"error: {exc}"
+        raise
 
     finally:
         # Return to original branch — reset first so a failed final
         # item doesn't leave the user stranded on a dirty feature branch
         _reset_and_checkout(str(project), original_branch)
+        # Write the journal regardless of how the cycle ended. Best-
+        # effort: a write failure here is not worth crashing the cycle.
+        try:
+            journal_path = journal.write()
+            console.print(
+                f"  [dim]Run journal: "
+                f"{journal_path.relative_to(project)}[/dim]"
+            )
+        except OSError as e:
+            console.print(f"  [yellow]Could not write run journal: {e}[/yellow]")
+        set_current_journal(None)
 
     # --- Summary ---
     elapsed = time.time() - start_time

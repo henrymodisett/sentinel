@@ -41,6 +41,8 @@ class GeminiProvider(Provider):
     async def chat(
         self, prompt: str, system_prompt: str | None = None,
     ) -> ChatResponse:
+        import time as _time
+
         # Gemini CLI doesn't have a --system-prompt flag, so prepend it
         full_prompt = prompt
         if system_prompt:
@@ -57,26 +59,33 @@ class GeminiProvider(Provider):
         if self.model and self.model != "auto":
             args.extend(["-m", self.model])
 
+        started = _time.perf_counter()
         try:
             result = await run_cli_async(
                 args, timeout=self.timeout_sec, env=minimal_provider_env(),
             )
         except subprocess.TimeoutExpired:
-            return ChatResponse(
+            response = ChatResponse(
                 content=f"Error: Gemini CLI timed out after {self.timeout_sec}s",
                 provider=self.name,
             )
+            self._journal_call(started, response, error="timeout")
+            return response
         if result.returncode != 0:
-            return ChatResponse(
+            response = ChatResponse(
                 content=f"Error: {result.stderr.strip()}", provider=self.name,
             )
+            self._journal_call(started, response, error="non-zero exit")
+            return response
 
         data = parse_json_safe(result.stdout)
         if not data:
             # Gemini CLI sometimes outputs plain text
-            return ChatResponse(
+            response = ChatResponse(
                 content=result.stdout.strip(), provider=self.name, model=self.model,
             )
+            self._journal_call(started, response)
+            return response
 
         # Extract token counts from stats
         stats = data.get("stats", {})
@@ -87,7 +96,7 @@ class GeminiProvider(Provider):
             total_input += tokens.get("input", 0)
             total_output += tokens.get("candidates", 0)
 
-        return ChatResponse(
+        response = ChatResponse(
             content=data.get("response", ""),
             model=self.model,
             provider=self.name,
@@ -95,6 +104,8 @@ class GeminiProvider(Provider):
             output_tokens=total_output,
             session_id=data.get("session_id"),
         )
+        self._journal_call(started, response)
+        return response
 
     async def research(self, prompt: str) -> ChatResponse:
         """Gemini with Google Search grounding — activates automatically."""

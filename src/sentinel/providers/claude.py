@@ -39,6 +39,8 @@ class ClaudeProvider(Provider):
         self.model = model
 
     async def chat(self, prompt: str, system_prompt: str | None = None) -> ChatResponse:
+        import time as _time
+
         # chat() is read-only — no tools, no file writes, no terminal.
         # For agentic code execution with full tools, use code() instead.
         args = [
@@ -51,33 +53,42 @@ class ClaudeProvider(Provider):
         if system_prompt:
             args.extend(["--system-prompt", system_prompt])
 
+        started = _time.perf_counter()
         try:
             result = await run_cli_async(
                 args, timeout=self.timeout_sec, env=minimal_provider_env(),
             )
         except subprocess.TimeoutExpired:
-            return ChatResponse(
+            response = ChatResponse(
                 content=f"Error: Claude CLI timed out after {self.timeout_sec}s",
                 provider=self.name,
             )
+            self._journal_call(started, response, error="timeout")
+            return response
         if result.returncode != 0:
-            return ChatResponse(
+            response = ChatResponse(
                 content=f"Error: {result.stderr.strip()}", provider=self.name,
             )
+            self._journal_call(started, response, error="non-zero exit")
+            return response
 
         data = parse_json_safe(result.stdout)
         if not data:
-            return ChatResponse(content=result.stdout, provider=self.name)
+            response = ChatResponse(content=result.stdout, provider=self.name)
+            self._journal_call(started, response, error="parse failure")
+            return response
 
         # Claude CLI returns is_error=true for auth failures etc.
         if data.get("is_error"):
-            return ChatResponse(
+            response = ChatResponse(
                 content=f"Error: {data.get('result', 'unknown error')}",
                 provider=self.name,
             )
+            self._journal_call(started, response, error="cli is_error")
+            return response
 
         usage = data.get("usage", {})
-        return ChatResponse(
+        response = ChatResponse(
             content=data.get("result", ""),
             model=self.model,
             provider=self.name,
@@ -87,6 +98,8 @@ class ClaudeProvider(Provider):
             duration_ms=data.get("duration_ms", 0),
             session_id=data.get("session_id"),
         )
+        self._journal_call(started, response)
+        return response
 
     # Note: we tried Claude CLI's --json-schema flag but it hangs indefinitely
     # at 0% CPU. Falling back to base Provider.chat_json() which uses prompt-
