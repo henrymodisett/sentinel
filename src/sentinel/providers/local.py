@@ -44,7 +44,14 @@ class LocalProvider(Provider):
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
 
-        async with httpx.AsyncClient(timeout=300) as client:
+        # Ollama goes over HTTP, not run_cli_async, so it needs to consult
+        # the cycle deadline directly. Without this clamp, a slow local
+        # model call can blow past `sentinel work --budget 10m` even
+        # though the CLI providers (Claude/Gemini/Codex) are bounded.
+        from sentinel.budget_ctx import clamp_timeout
+        http_timeout = clamp_timeout(self.timeout_sec)
+
+        async with httpx.AsyncClient(timeout=http_timeout) as client:
             resp = await client.post(
                 f"{self.endpoint}/api/chat",
                 json={"model": self.model, "messages": messages, "stream": False},

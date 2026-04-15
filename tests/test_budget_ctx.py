@@ -94,3 +94,57 @@ class TestRunCliAsyncHonorsBudget:
 
         assert elapsed < 3.0  # should hit the 1s base timeout
         assert exc_info.value.timeout == 1
+
+
+class TestLocalProviderHonorsBudget:
+    """LocalProvider (Ollama) goes over HTTP, not run_cli_async. It must
+    consult the budget directly or cycle-scoped timeouts don't cover the
+    local monitor path — which is the default preset."""
+
+    @pytest.mark.asyncio
+    async def test_local_provider_clamps_http_timeout(
+        self, monkeypatch,
+    ) -> None:
+        """Patch httpx.AsyncClient to record the timeout it was built
+        with. Proves the budget contextvar was consulted instead of the
+        old hardcoded 300s value."""
+        from sentinel.providers.local import LocalProvider
+
+        set_cycle_deadline(3)  # 3 seconds remaining
+        recorded: dict[str, float] = {}
+
+        class FakeAsyncClient:
+            def __init__(self, timeout: float = 0, **_: object) -> None:
+                recorded["timeout"] = timeout
+
+            async def __aenter__(self) -> FakeAsyncClient:
+                return self
+
+            async def __aexit__(self, *_: object) -> None:
+                return None
+
+            async def post(self, *_: object, **__: object) -> object:
+                class R:
+                    status_code = 200
+                    @staticmethod
+                    def json() -> dict:
+                        return {
+                            "message": {"content": "hi"},
+                            "prompt_eval_count": 1,
+                            "eval_count": 1,
+                            "total_duration": 1_000_000,
+                        }
+                return R()
+
+        monkeypatch.setattr(
+            "sentinel.providers.local.httpx.AsyncClient", FakeAsyncClient,
+        )
+
+        provider = LocalProvider(model="fake-model")
+        await provider.chat("hi")
+
+        assert "timeout" in recorded, "httpx client was not constructed"
+        assert recorded["timeout"] <= 3, (
+            f"LocalProvider HTTP timeout was {recorded['timeout']}s "
+            f"on a 3s budget — clamp not applied"
+        )
