@@ -7,10 +7,11 @@ from sentinel.cli.main import main
 
 class TestCLIBasics:
     def test_version(self) -> None:
+        from sentinel import __version__
         runner = CliRunner()
         result = runner.invoke(main, ["--version"])
         assert result.exit_code == 0
-        assert "0.1.0" in result.output
+        assert __version__ in result.output
 
     def test_help(self) -> None:
         runner = CliRunner()

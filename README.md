@@ -52,7 +52,12 @@ Any role can use any provider, with one constraint: the **Coder** needs agentic-
 
 ## Quick start
 
-Install from source (not yet on PyPI or Homebrew):
+```bash
+brew tap henrymodisett/sentinel
+brew install sentinel
+```
+
+Or from source:
 
 ```bash
 git clone https://github.com/henrymodisett/sentinel ~/Repos/sentinel
@@ -142,12 +147,12 @@ Sentinel does the minimum `git` and `gh` operations it needs to ship a PR (push,
 ```bash
 # Recommended together
 brew install henrymodisett/toolkit/toolkit
-brew install henrymodisett/sentinel/sentinel  # coming soon
+brew install henrymodisett/sentinel/sentinel
 ```
 
 ## Status
 
-v0.1.0. Core loop shipped (scan, plan, execute, review). Dogfooding on sentinel and other projects. Not yet on PyPI or Homebrew — install from source.
+v0.2.0. Core loop shipped (scan, plan, execute, review). Autonomous PR factory wired (worktree + ship_pr). Available via Homebrew (`henrymodisett/sentinel` tap). PyPI release tracked separately.
 
 ## License
 

@@ -17,7 +17,7 @@ Each step is powered by a configurable LLM provider (CLI-based, no API keys stor
 Goals are derived from CLAUDE.md, README, and GitHub issues — not stored separately.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 # Silence the sentinel logger by default — errors are captured in
 # ProjectState.errors / ScanResult.error and surfaced via the CLI.
