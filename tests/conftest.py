@@ -131,19 +131,24 @@ def isolated_home(monkeypatch, tmp_path):
 
 @pytest.fixture(autouse=True)
 def _reset_budget_state():
-    """Reset both budget ContextVars (time deadline + money cap) around
-    every test.
+    """Reset budget + role ContextVars around every test.
 
-    set_cycle_deadline / set_cycle_money_cap write to module-level
-    ContextVars. Without an autouse reset, a test that exhausts either
-    dimension leaks that state into the next test in collection order —
+    set_cycle_deadline / set_cycle_money_cap / set_current_role write
+    to module-level ContextVars. Without an autouse reset, a test that
+    sets one leaks that state into the next test in collection order —
     so a provider's _abort_if_budget_exhausted short-circuits a call
-    that the next test expected to dispatch. Cheap to reset; impossible
-    to debug if you don't.
+    that the next test expected to dispatch, or a journal-recorded call
+    carries the wrong role. Cheap to reset; impossible to debug if you
+    don't.
     """
     from sentinel.budget_ctx import set_cycle_deadline, set_cycle_money_cap
+    from sentinel.journal import set_current_role, set_pending_routing_reason
     set_cycle_deadline(None)
     set_cycle_money_cap(None)
+    set_current_role("")
+    set_pending_routing_reason("")
     yield
     set_cycle_deadline(None)
     set_cycle_money_cap(None)
+    set_current_role("")
+    set_pending_routing_reason("")

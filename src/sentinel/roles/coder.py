@@ -288,15 +288,34 @@ class Coder:
         self.router = router
 
     async def execute(
-        self, work_item: WorkItem, project_path: str,
+        self,
+        work_item: WorkItem,
+        project_path: str,
+        *,
+        working_directory: str | None = None,
+        artifacts_directory: str | None = None,
+        branch: str | None = None,
     ) -> ExecutionResult:
         """Execute a work item via the coder provider's agentic mode.
 
+        Modes:
+          - **Worktree-managed (preferred)**: caller passes
+            `working_directory` (where the Coder edits, typically a
+            git worktree), `artifacts_directory` (where transcripts go,
+            typically the main project's `.sentinel/`), and `branch`
+            (already checked out by the caller). Coder runs on that
+            branch without creating one.
+          - **Legacy (deprecated, retained for tests)**: only
+            `project_path` is given. Coder creates its own
+            `sentinel/{type}/{slug}` branch in-place. To be removed
+            once all tests migrate to the worktree-managed mode.
+
         Every attempt writes a Markdown transcript to
-        `.sentinel/executions/` — on success, failure, or exception —
-        so no failure is silent. The transcript captures the prompt,
-        the provider's stderr + stdout, and the final status.
+        `<artifacts_directory>/executions/` — on success, failure,
+        or exception — so no failure is silent.
         """
+        from sentinel.journal import set_current_role
+        set_current_role("coder")
         start = time.time()
         result = ExecutionResult(
             work_item_id=work_item.id,
@@ -304,6 +323,12 @@ class Coder:
         )
         prompt = ""
         response = None
+
+        # Resolve the dual-mode paths. Worktree-managed callers pass
+        # all three; legacy callers pass only project_path and we fall
+        # back to using it for everything (single-tree behavior).
+        wd = working_directory or project_path
+        ad = artifacts_directory or project_path
 
         provider = self.router.get_provider("coder")
         if not provider.capabilities.agentic_code:
@@ -313,50 +338,50 @@ class Coder:
             )
             result.duration_ms = int((time.time() - start) * 1000)
             _write_execution_transcript(
-                project_path, work_item, prompt, response, result,
+                ad, work_item, prompt, response, result,
             )
             return result
 
-        # Create a feature branch before starting
-        branch_name = f"sentinel/{work_item.type}/{_slug(work_item.title)}"
-        result.branch = branch_name
+        if branch is not None:
+            # Worktree-managed: branch is already checked out by the
+            # caller. No checkout, no pre-snapshot — the worktree
+            # starts clean so anything in `git status` after the run
+            # IS the Coder's output.
+            result.branch = branch
+            pre_snapshot: set[str] = set()
+        else:
+            # Legacy: create the branch ourselves and snapshot dirty
+            # files so we can subtract them later. To be removed.
+            branch_name = f"sentinel/{work_item.type}/{_slug(work_item.title)}"
+            result.branch = branch_name
+            pre_snapshot = _git_status_snapshot(wd)
 
-        # Snapshot pre-existing dirty files so we can subtract them
-        # later. Anything already in `git status` is NOT the Coder's
-        # output and must never land in the sentinel commit — even if
-        # _working_tree_clean at cycle start prevents this in
-        # practice, keep the subtraction as defense in depth.
-        pre_snapshot = _git_status_snapshot(project_path)
-
-        co_result = _run_git(["checkout", "-b", branch_name], project_path)
-        if co_result.returncode != 0:
-            if "already exists" in co_result.stderr:
-                # Branch already exists — check it out explicitly so
-                # Claude and the commit both land there, not on the
-                # original branch we stayed on when -b failed.
-                switch_result = _run_git(
-                    ["checkout", branch_name], project_path,
-                )
-                if switch_result.returncode != 0:
+            co_result = _run_git(["checkout", "-b", branch_name], wd)
+            if co_result.returncode != 0:
+                if "already exists" in co_result.stderr:
+                    switch_result = _run_git(
+                        ["checkout", branch_name], wd,
+                    )
+                    if switch_result.returncode != 0:
+                        result.error = (
+                            f"Branch {branch_name} exists but checkout failed: "
+                            f"{switch_result.stderr.strip()}"
+                        )
+                        result.duration_ms = int((time.time() - start) * 1000)
+                        _write_execution_transcript(
+                            ad, work_item, prompt, response, result,
+                        )
+                        return result
+                else:
                     result.error = (
-                        f"Branch {branch_name} exists but checkout failed: "
-                        f"{switch_result.stderr.strip()}"
+                        f"Could not create branch {branch_name}: "
+                        f"{co_result.stderr.strip()}"
                     )
                     result.duration_ms = int((time.time() - start) * 1000)
                     _write_execution_transcript(
-                        project_path, work_item, prompt, response, result,
+                        ad, work_item, prompt, response, result,
                     )
                     return result
-            else:
-                result.error = (
-                    f"Could not create branch {branch_name}: "
-                    f"{co_result.stderr.strip()}"
-                )
-                result.duration_ms = int((time.time() - start) * 1000)
-                _write_execution_transcript(
-                    project_path, work_item, prompt, response, result,
-                )
-                return result
 
         # Build the prompt
         criteria = "\n".join(f"- {c}" for c in work_item.acceptance_criteria) or "(none)"
@@ -373,14 +398,16 @@ class Coder:
             risk=work_item.risk or "(none noted)",
         )
 
-        # Execute via provider's agentic code mode
+        # Execute via provider's agentic code mode — runs in `wd`,
+        # which is the worktree path in worktree-managed mode and
+        # the project path in legacy mode.
         try:
-            response = await provider.code(prompt, working_directory=project_path)
+            response = await provider.code(prompt, working_directory=wd)
         except (OSError, subprocess.SubprocessError) as e:
             result.error = f"Coder execution failed: {e}"
             result.duration_ms = int((time.time() - start) * 1000)
             _write_execution_transcript(
-                project_path, work_item, prompt, response, result, exception=e,
+                ad, work_item, prompt, response, result, exception=e,
             )
             return result
 
@@ -398,14 +425,15 @@ class Coder:
             result.error = detail
             result.duration_ms = int((time.time() - start) * 1000)
             _write_execution_transcript(
-                project_path, work_item, prompt, response, result,
+                ad, work_item, prompt, response, result,
             )
             return result
 
-        # Figure out which files Claude actually touched by subtracting
-        # the pre-run snapshot — anything that was already dirty belongs
-        # to the user (or a prior failed item), not this execution.
-        post_snapshot = _git_status_snapshot(project_path)
+        # Figure out which files Claude actually touched. In worktree
+        # mode pre_snapshot is empty (worktree starts clean), so all
+        # dirty files belong to the Coder. In legacy mode we subtract
+        # the pre-existing dirty files.
+        post_snapshot = _git_status_snapshot(wd)
         changed = sorted(post_snapshot - pre_snapshot)
         result.files_changed = changed
 
@@ -417,20 +445,23 @@ class Coder:
             )
             result.duration_ms = int((time.time() - start) * 1000)
             _write_execution_transcript(
-                project_path, work_item, prompt, response, result,
+                ad, work_item, prompt, response, result,
             )
             return result
 
-        # Run tests to verify
+        # Run tests to verify. The toolkit-config lives at the project
+        # root (artifacts_directory), not the worktree — config is
+        # repo-wide. Tests, however, run in the working directory so
+        # they see the Coder's diff.
         from sentinel.state import _read_toolkit_command  # type: ignore[attr-defined]
 
-        toolkit_config = Path(project_path) / ".toolkit-config"
+        toolkit_config = Path(ad) / ".toolkit-config"
         test_cmd = _read_toolkit_command(toolkit_config, "test_command")
         if test_cmd:
             try:
                 test_result = subprocess.run(
                     test_cmd.split(), capture_output=True, text=True,
-                    cwd=project_path, timeout=300,
+                    cwd=wd, timeout=300,
                 )
                 result.tests_passing = test_result.returncode == 0
             except (subprocess.TimeoutExpired, FileNotFoundError):
@@ -445,7 +476,7 @@ class Coder:
         # "changes-requested" is more useful with real commits to look
         # at than with vaporized work.
         commit_ok, commit_info = _commit_files(
-            project_path, result.files_changed, work_item,
+            wd, result.files_changed, work_item,
         )
         if commit_ok:
             result.commit_sha = commit_info
@@ -458,13 +489,13 @@ class Coder:
             result.status = "failed"
             result.duration_ms = int((time.time() - start) * 1000)
             _write_execution_transcript(
-                project_path, work_item, prompt, response, result,
+                ad, work_item, prompt, response, result,
             )
             return result
 
         result.status = "success" if result.tests_passing else "partial"
         result.duration_ms = int((time.time() - start) * 1000)
         _write_execution_transcript(
-            project_path, work_item, prompt, response, result,
+            ad, work_item, prompt, response, result,
         )
         return result

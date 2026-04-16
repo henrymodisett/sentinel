@@ -79,10 +79,10 @@ def work(budget: str | None, every: str | None, dry_run: bool, auto: bool) -> No
 
 @main.command()
 def status() -> None:
-    """Quick project health check (state + latest scan summary)."""
-    click.echo(f"{NOT_YET}")
-    click.echo("  Use `sentinel scan --quick` for state, `sentinel cost` for spend.")
-    sys.exit(1)
+    """Quick project health check (state + spend + latest cycle)."""
+    from sentinel.cli.status_cmd import run_status
+
+    run_status()
 
 
 # --- ADVANCED / GRANULAR ---
@@ -157,6 +157,23 @@ def cost() -> None:
     from sentinel.cli.cost_cmd import run_cost
 
     run_cost()
+
+
+@main.group(invoke_without_command=False)
+def routing() -> None:
+    """Inspect and tune router decisions."""
+
+
+@routing.command("show")
+@click.option(
+    "--limit", "-n", type=int, default=10,
+    help="How many recent cycles to scan (default 10).",
+)
+def routing_show(limit: int) -> None:
+    """Show routing overrides from recent run journals."""
+    from sentinel.cli.routing_cmd import run_routing_show
+
+    run_routing_show(limit=limit)
 
 
 @main.command()

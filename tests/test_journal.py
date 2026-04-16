@@ -332,6 +332,120 @@ class TestJournalShape:
         assert "## Provider errors" not in content
         assert "some warning" not in content
 
+    def test_role_attribution_renders_by_role_table(
+        self, tmp_path: Path,
+    ) -> None:
+        """When provider calls carry a role tag, the journal shows a
+        per-role breakdown so the user can answer 'where is my money
+        going?' without manually grouping the JSONL appendix."""
+        j = _journal(tmp_path)
+        j.record_provider_call(ProviderCall(
+            phase="scan", provider="gemini", model="flash",
+            latency_ms=100, cost_usd=0.01, role="monitor",
+            input_tokens=1000, output_tokens=200,
+        ))
+        j.record_provider_call(ProviderCall(
+            phase="scan", provider="gemini", model="pro",
+            latency_ms=300, cost_usd=0.03, role="researcher",
+            input_tokens=500, output_tokens=100,
+        ))
+        j.record_provider_call(ProviderCall(
+            phase="execute", provider="claude", model="sonnet",
+            latency_ms=2000, cost_usd=0.10, role="coder",
+            input_tokens=5000, output_tokens=2000,
+        ))
+        content = j.write().read_text()
+        assert "## By role" in content
+        assert "| coder |" in content
+        assert "| monitor |" in content
+        assert "| researcher |" in content
+        # Cost columns formatted to 4 decimal places
+        assert "$0.0100" in content  # monitor
+        assert "$0.0300" in content  # researcher
+        assert "$0.1000" in content  # coder
+
+    def test_role_table_omitted_when_no_calls_have_role(
+        self, tmp_path: Path,
+    ) -> None:
+        """Backwards compatibility: cycles run before the role-tagging
+        change (or test/ad-hoc invocations) leave role blank — no table
+        should appear in that case rather than rendering a useless
+        empty section."""
+        j = _journal(tmp_path)
+        j.record_provider_call(ProviderCall(
+            phase="scan", provider="gemini", model="flash",
+            latency_ms=100, cost_usd=0.01,
+        ))
+        content = j.write().read_text()
+        assert "## By role" not in content
+
+    def test_outer_role_must_be_restored_after_inner_role_returns(
+        self, tmp_path: Path,
+    ) -> None:
+        """Regression: dogfood 2026-04-16 found that Researcher.domain_brief
+        sets role='researcher' and never restores. Every subsequent
+        Monitor lens eval in the same scope inherited 'researcher' as
+        the role tag, breaking the per-role cost breakdown.
+
+        The fix is in Monitor.assess (re-set role after the inner call)
+        but the contract is enforced here: a recorded call AFTER the
+        outer role re-sets must carry the outer role, not the inner."""
+        from sentinel.journal import (
+            current_role,
+            record_provider_call,
+            set_current_journal,
+            set_current_role,
+        )
+
+        j = _journal(tmp_path)
+        set_current_journal(j)
+        try:
+            # Outer role enters
+            set_current_role("monitor")
+            assert current_role() == "monitor"
+
+            # Inner role overwrites (mimics Researcher.domain_brief)
+            set_current_role("researcher")
+            record_provider_call(
+                provider="gemini", model="pro", latency_ms=100, cost_usd=0.01,
+            )
+
+            # OUTER must re-set after the inner call returns —
+            # otherwise the next call leaks the inner role.
+            set_current_role("monitor")
+            record_provider_call(
+                provider="gemini", model="flash", latency_ms=50, cost_usd=0.001,
+            )
+
+            # Both calls landed with their correct role attribution
+            assert j.provider_calls[0].role == "researcher"
+            assert j.provider_calls[1].role == "monitor"
+        finally:
+            set_current_journal(None)
+            set_current_role("")
+
+    def test_role_jsonl_includes_role_when_tagged(
+        self, tmp_path: Path,
+    ) -> None:
+        """The JSONL appendix carries role inline so downstream tooling
+        can group without re-reading the table. Role is omitted from
+        JSONL entries when blank to keep the format clean."""
+        j = _journal(tmp_path)
+        j.record_provider_call(ProviderCall(
+            phase="scan", provider="gemini", model="flash",
+            latency_ms=100, cost_usd=0.01, role="monitor",
+        ))
+        j.record_provider_call(ProviderCall(
+            phase="scan", provider="gemini", model="flash",
+            latency_ms=100, cost_usd=0.01,  # no role
+        ))
+        content = j.write().read_text()
+        block = re.search(r"```jsonl\n(.*?)\n```", content, re.DOTALL)
+        assert block is not None
+        lines = [json.loads(ln) for ln in block.group(1).splitlines() if ln.strip()]
+        assert lines[0]["role"] == "monitor"
+        assert "role" not in lines[1]
+
     def test_stderr_truncated_at_render_with_byte_count(
         self, tmp_path: Path,
     ) -> None:

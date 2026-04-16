@@ -615,6 +615,136 @@ class TestCoderPersistsTranscripts:
             assert "authentication failed" in (result.error or "")
 
 
+class TestCoderWorktreeManagedMode:
+    """When the worktree layer manages the branch and the artifacts
+    directory is separated from the working directory, Coder must
+    operate on the supplied branch (no checkout) and write its
+    transcript to the artifacts directory (not the worktree, which
+    would vanish on cleanup)."""
+
+    @pytest.mark.asyncio
+    async def test_uses_supplied_branch_does_not_checkout(self) -> None:
+        """When `branch` is passed, Coder trusts the caller — no
+        `checkout -b`. The recorded result.branch matches what the
+        caller passed."""
+        import subprocess as _sp
+
+        class FileWritingMock(MockProvider):
+            async def code(self, prompt, options=None, **kwargs):
+                wd = kwargs.get("working_directory", ".")
+                (Path(wd) / "implemented.py").write_text("x = 1\n")
+                return ChatResponse(
+                    content="done", provider=self.name, cost_usd=0.01,
+                )
+
+        provider = FileWritingMock()
+        provider.capabilities = ProviderCapabilities(
+            chat=True, agentic_code=True,
+        )
+        router = _mock_router(provider)
+        coder = Coder(router)
+
+        work_item = WorkItem(
+            id="wm-1", title="worktree mode", description="",
+            type="fix", priority="high", complexity=1,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = Path(tmpdir) / "project"
+            project.mkdir()
+            _sp.run(
+                ["git", "init", "-q", "-b", "main"], cwd=project, check=True,
+            )
+            _sp.run(
+                ["git", "-c", "user.email=a@b", "-c", "user.name=t",
+                 "commit", "--allow-empty", "-m", "init", "-q"],
+                cwd=project, check=True,
+            )
+
+            # Caller (worktree layer) creates the branch up-front, then
+            # Coder runs against it.
+            worktree = Path(tmpdir) / "worktree"
+            _sp.run(
+                ["git", "worktree", "add", "-b", "sentinel/wm-1", str(worktree)],
+                cwd=project, check=True,
+            )
+            try:
+                result = await coder.execute(
+                    work_item, str(project),
+                    working_directory=str(worktree),
+                    artifacts_directory=str(project),
+                    branch="sentinel/wm-1",
+                )
+                # Coder records the supplied branch unchanged
+                assert result.branch == "sentinel/wm-1"
+                # Coder does NOT create a `sentinel/fix/...` branch
+                branches = _sp.run(
+                    ["git", "branch", "--list"],
+                    capture_output=True, text=True, cwd=project,
+                )
+                assert "sentinel/fix/worktree-mode" not in branches.stdout, (
+                    "Coder must not create its own branch in worktree mode"
+                )
+            finally:
+                _sp.run(
+                    ["git", "worktree", "remove", "--force", str(worktree)],
+                    cwd=project, check=False,
+                )
+
+    @pytest.mark.asyncio
+    async def test_transcripts_go_to_artifacts_dir_not_working_dir(
+        self,
+    ) -> None:
+        """When working_directory != artifacts_directory (the worktree
+        case), the transcript must land in artifacts_directory so it
+        survives worktree cleanup."""
+        import subprocess as _sp
+
+        provider = MockProvider(code_response=ChatResponse(
+            content="Error: ",
+            provider=ProviderName.CLAUDE,
+            is_error=True,
+            stderr="diagnostic info",
+        ))
+        provider.capabilities = ProviderCapabilities(
+            chat=True, agentic_code=True,
+        )
+        router = _mock_router(provider)
+        coder = Coder(router)
+
+        work_item = WorkItem(
+            id="wm-2", title="separate dirs", description="",
+            type="fix", priority="high", complexity=1,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = Path(tmpdir) / "project"
+            worktree = Path(tmpdir) / "worktree"
+            project.mkdir()
+            worktree.mkdir()
+            _sp.run(
+                ["git", "init", "-q", "-b", "main"], cwd=project, check=True,
+            )
+
+            await coder.execute(
+                work_item, str(project),
+                working_directory=str(worktree),
+                artifacts_directory=str(project),
+                branch="sentinel/wm-2",
+            )
+
+            # Transcript lands in artifacts_directory, NOT working_directory
+            artifact_transcripts = list(
+                (project / ".sentinel" / "executions").glob("*.md"),
+            )
+            worktree_transcripts = list(
+                (worktree / ".sentinel" / "executions").glob("*.md"),
+            ) if (worktree / ".sentinel" / "executions").exists() else []
+
+            assert len(artifact_transcripts) == 1
+            assert len(worktree_transcripts) == 0
+
+
 # --- Reviewer Tests ---
 
 class TestReviewerHandlesBadResponse:

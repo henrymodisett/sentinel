@@ -132,10 +132,18 @@ Inspired by [Karpathy's autoresearch](https://github.com/karpathy/autoresearch) 
 
 ## Relationship to toolkit
 
-[Toolkit](https://github.com/henrymodisett/toolkit) defines *what good looks like* — engineering principles, git workflow, review hooks.
-Sentinel provides *the autonomous loop that drives improvement*.
+[Toolkit](https://github.com/henrymodisett/toolkit) defines *what good looks like* — engineering principles, git workflow, Codex pre-merge review hooks, project starter templates.
+Sentinel provides *the autonomous loop that drives improvement* — lenses, planner, coder, reviewer, verifier, PR factory.
 
-Either installs without the other. Sentinel follows toolkit's principles when both are present.
+**Either installs without the other. Together they're better.**
+
+Sentinel does the minimum `git` and `gh` operations it needs to ship a PR (push, `gh pr create`, `gh pr merge --auto --squash`). It never imports Toolkit modules or calls Toolkit scripts as subprocesses. When Toolkit is installed and its `pre-push` hook is wired, Codex pre-merge review fires automatically on every PR Sentinel ships — same as if a human had pushed. The interface is git itself, not Python; no glue code, no conditional branches.
+
+```bash
+# Recommended together
+brew install henrymodisett/toolkit/toolkit
+brew install henrymodisett/sentinel/sentinel  # coming soon
+```
 
 ## Status
 

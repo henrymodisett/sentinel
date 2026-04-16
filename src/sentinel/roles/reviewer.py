@@ -227,11 +227,28 @@ class Reviewer:
         self.router = router
 
     async def review(
-        self, work_item: WorkItem, execution: ExecutionResult, project_path: str,
+        self,
+        work_item: WorkItem,
+        execution: ExecutionResult,
+        project_path: str,
+        *,
+        working_directory: str | None = None,
     ) -> ReviewResult:
-        """Review completed work against acceptance criteria."""
-        # Get the diff of what changed
-        diff = _get_diff(project_path)
+        """Review completed work against acceptance criteria.
+
+        `working_directory` is where the diff lives (the worktree path
+        in worktree-managed mode). Defaults to `project_path` for the
+        legacy single-tree path. Transcripts always land in
+        `project_path/.sentinel/reviews/` — under the main project,
+        never the worktree, so they survive cleanup.
+        """
+        from sentinel.journal import set_current_role
+        set_current_role("reviewer")
+        # Get the diff of what changed — query the worktree (where the
+        # commit landed), not the main project (which is unchanged in
+        # worktree-managed mode).
+        diff_dir = working_directory or project_path
+        diff = _get_diff(diff_dir)
 
         criteria = "\n".join(f"- {c}" for c in work_item.acceptance_criteria) or "(none)"
         files_changed = ", ".join(execution.files_changed[:10]) or "(none)"

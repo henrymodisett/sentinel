@@ -152,8 +152,15 @@ def verify_work_item(
     work_item_id: str,
     work_item_title: str,
     branch: str | None = None,
+    *,
+    working_directory: Path | None = None,
 ) -> WorkItemVerification:
     """Run all configured checks against the project, return a verdict.
+
+    `working_directory` is where the checks actually execute (the
+    worktree path in worktree-managed mode). Defaults to `project_path`
+    for the legacy single-tree path. Check configuration (toolkit-config
+    etc.) is always read from `project_path` since it's repo-wide.
 
     Overall verdict logic:
     - All checks have no command → no_check_defined (we couldn't tell)
@@ -161,8 +168,9 @@ def verify_work_item(
     - Otherwise (all pass, or mix of pass + no_check_defined) → verified
     """
     checks_config = discover_checks(project_path)
+    run_dir = working_directory or project_path
     results = [
-        run_check(name, command, project_path)
+        run_check(name, command, run_dir)
         for name, command in checks_config.items()
     ]
 

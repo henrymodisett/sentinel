@@ -114,6 +114,41 @@ templates/
 | `lenses/universal/*.md` | Analytical perspectives for project evaluation |
 | `templates/.claude/` | Claude Code agents/skills installed into target projects |
 
+## Sentinel and Toolkit — Two Layers, No Coupling
+
+Sentinel and the [`henrymodisett/toolkit`](https://github.com/henrymodisett/toolkit) Homebrew package are deliberately separate layers. They compose, they do not depend on each other. **Do not duplicate Toolkit's value-adds inside Sentinel; do not import Toolkit modules; do not call Toolkit scripts as subprocesses.**
+
+### Boundary
+
+| Concern | Owned by |
+|---|---|
+| Lens scanning, planning, coding dispatch, LLM review, verification | Sentinel |
+| Provider abstraction + routing + budget + journal | Sentinel |
+| Minimum `git`/`gh` operations needed to ship a PR (push, `gh pr create`, `gh pr merge --auto --squash`) | Sentinel |
+| Worktree management for parallel coders | Sentinel |
+| Codex pre-merge review (fires via `pre-push` hook) | Toolkit |
+| Pre-commit / pre-push validation gates | Toolkit |
+| Branch cleanup helpers (`cleanup-branches.sh`) | Toolkit |
+| Project starter templates | Toolkit |
+| The `toolkit` CLI for humans | Toolkit |
+
+### How they compose
+
+The interface is **git itself**, not Python. Sentinel does `git commit` / `git push`; whatever pre-commit / pre-push hooks the user has installed fire automatically. If Toolkit is installed and its hooks are wired, Codex review runs on every push Sentinel makes — same way it would for a human-driven push. **Sentinel does not branch on whether Toolkit is installed.** Single code path; hooks decide what to do.
+
+### Recommend together, operate independently
+
+Sentinel must run cleanly in any repo, with or without Toolkit. `sentinel init` and `sentinel status` may *detect* Toolkit (`shutil.which("toolkit")`) and print a one-line recommendation when absent (`[recommendation] install henrymodisett/toolkit for Codex pre-merge review on every PR Sentinel ships`), but never block on it.
+
+### When in doubt
+
+If a feature seems to need new git/PR/CI logic:
+1. Check if Toolkit already does it (almost always yes).
+2. If not, add it to Toolkit so other projects benefit, then call it from a git hook.
+3. Build it inside Sentinel only if the logic is genuinely LLM-flavored and project-specific.
+
+If you find yourself reaching for `subprocess.run(["bash", "scripts/open-pr.sh"…])` from Sentinel, **stop** — the boundary has been violated. Either the feature belongs in a git hook (Toolkit's domain) or in Sentinel's own minimum-`gh` layer (`src/sentinel/pr.py`).
+
 ## State & Config
 
 - **Config**: `.sentinel/config.toml` — role-to-provider mapping, budget, active lenses

@@ -186,8 +186,16 @@ class TestWorkExitsNonZeroOnScanFailure:
         async def fake_assess(self, state, on_progress=None):
             return _failed_result_with_partial_lenses()
 
+        # CliRunner runs without the host's gh/remote setup. The
+        # shipping preflight (added post-dogfood) would block the
+        # scan-failure path before we could exercise it — stub it
+        # out for this test since we're verifying scan behavior,
+        # not shipping behavior.
         with patch(
             "sentinel.roles.monitor.Monitor.assess", fake_assess,
+        ), patch(
+            "sentinel.cli.work_cmd._check_shipping_preflight",
+            return_value=[],
         ):
             result = CliRunner().invoke(main, ["work"])
 
