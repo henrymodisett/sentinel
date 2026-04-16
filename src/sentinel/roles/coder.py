@@ -297,6 +297,8 @@ class Coder:
         so no failure is silent. The transcript captures the prompt,
         the provider's stderr + stdout, and the final status.
         """
+        from sentinel.journal import set_current_role
+        set_current_role("coder")
         start = time.time()
         result = ExecutionResult(
             work_item_id=work_item.id,

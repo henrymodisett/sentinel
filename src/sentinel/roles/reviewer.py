@@ -230,6 +230,8 @@ class Reviewer:
         self, work_item: WorkItem, execution: ExecutionResult, project_path: str,
     ) -> ReviewResult:
         """Review completed work against acceptance criteria."""
+        from sentinel.journal import set_current_role
+        set_current_role("reviewer")
         # Get the diff of what changed
         diff = _get_diff(project_path)
 

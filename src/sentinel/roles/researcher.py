@@ -109,6 +109,8 @@ class Researcher:
         On research failure returns an empty brief — lens generation
         still works, just without the domain context (same as today).
         """
+        from sentinel.journal import set_current_role
+        set_current_role("researcher")
         cache_path = Path(project_path) / ".sentinel" / DOMAIN_BRIEF_FILENAME
         context_hash = _hash_context(
             project_type, readme_excerpt, docs_excerpt,

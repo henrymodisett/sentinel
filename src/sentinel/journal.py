@@ -70,6 +70,12 @@ class ProviderCall:
     output_tokens: int = 0
     cost_usd: float = 0.0
     error: str | None = None
+    # Sentinel role that issued the call (monitor / researcher / planner /
+    # coder / reviewer) or "" if the call happened outside a role context
+    # (test harness, ad-hoc CLI usage). Lets the journal break down spend
+    # by role — answers "where is my money going?" without manually
+    # tagging each call site.
+    role: str = ""
     # Raw stderr from the provider CLI (subprocess) or HTTP error body.
     # Populated whenever the provider has it — captures the actual diagnostic
     # text that lets us debug non-zero exits without re-running the call.
@@ -303,10 +309,34 @@ class Journal:
                     "out": c.output_tokens,
                     "cost": round(c.cost_usd, 6),
                 }
+                if c.role:
+                    payload["role"] = c.role
                 if c.error:
                     payload["error"] = c.error
                 lines.append(json.dumps(payload))
             lines += ["```", ""]
+
+            roles_present = [c for c in self.provider_calls if c.role]
+            if roles_present:
+                by_role: dict[str, list[ProviderCall]] = {}
+                for c in roles_present:
+                    by_role.setdefault(c.role, []).append(c)
+                lines += [
+                    "## By role",
+                    "",
+                    "| Role | Calls | Cost | Tokens (in/out) |",
+                    "|---|---|---|---|",
+                ]
+                for role in sorted(by_role):
+                    calls = by_role[role]
+                    cost = sum(c.cost_usd for c in calls)
+                    in_tok = sum(c.input_tokens for c in calls)
+                    out_tok = sum(c.output_tokens for c in calls)
+                    lines.append(
+                        f"| {role} | {len(calls)} | ${cost:.4f} | "
+                        f"{in_tok:,}/{out_tok:,} |"
+                    )
+                lines.append("")
 
             errors_with_stderr = [
                 c for c in self.provider_calls if c.error and c.stderr
@@ -343,6 +373,13 @@ _current_journal: ContextVar[Journal | None] = ContextVar(
 _current_phase: ContextVar[str] = ContextVar(
     "sentinel_phase", default="(unknown)",
 )
+# ContextVar for the active role (monitor/researcher/planner/coder/reviewer).
+# Roles set this on entry to their work; providers read it when recording
+# calls. Defaults to empty so test harness and ad-hoc usage produce
+# blank role rather than a misleading default.
+_current_role: ContextVar[str] = ContextVar(
+    "sentinel_role", default="",
+)
 
 
 def set_current_journal(journal: Journal | None) -> None:
@@ -367,6 +404,18 @@ def current_phase() -> str:
     return _current_phase.get()
 
 
+def set_current_role(role: str) -> None:
+    """Set the active role. Each Sentinel role sets this on entry to
+    its method (Monitor.assess, Coder.execute, etc.) so provider calls
+    issued during that role's work carry the role tag in the journal."""
+    _current_role.set(role)
+
+
+def current_role() -> str:
+    """Return the active role, or '' outside any role context."""
+    return _current_role.get()
+
+
 def record_provider_call(
     provider: str,
     model: str,
@@ -376,15 +425,16 @@ def record_provider_call(
     cost_usd: float = 0.0,
     error: str | None = None,
     phase: str | None = None,
+    role: str | None = None,
     stderr: str = "",
 ) -> None:
     """Append a provider call to the active journal. No-op if no
     journal is set (e.g., a `sentinel scan` invocation outside the
     work loop, or a unit test that exercises a provider directly).
 
-    `phase` is read from the current_phase() ContextVar by default —
-    callers don't need to pass it. Override only when recording from
-    a known-out-of-context position."""
+    `phase` and `role` are read from the current_phase()/current_role()
+    ContextVars by default — callers don't need to pass them. Override
+    only when recording from a known-out-of-context position."""
     journal = current_journal()
     if journal is None:
         return
@@ -397,5 +447,6 @@ def record_provider_call(
         output_tokens=output_tokens,
         cost_usd=cost_usd,
         error=error,
+        role=role if role is not None else current_role(),
         stderr=stderr,
     ))

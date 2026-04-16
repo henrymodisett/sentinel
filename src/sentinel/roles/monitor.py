@@ -564,6 +564,8 @@ class Monitor:
         on_progress: ProgressCallback | None = None,
     ) -> ScanResult:
         """Run the full multi-step scan pipeline with structured output."""
+        from sentinel.journal import set_current_role
+        set_current_role("monitor")
         result = ScanResult()
 
         def emit(event: str, data: dict) -> None:
