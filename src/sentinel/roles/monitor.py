@@ -598,6 +598,10 @@ class Monitor:
             logger.warning("Domain brief step skipped: %s", exc)
 
         # --- Step 1: EXPLORE + GENERATE LENSES ---
+        # Per-call routing: each step (explore / evaluate_lens / synthesize)
+        # passes a task hint so the router can override the configured
+        # model when a rule applies (e.g. synthesize → gemini-2.5-pro).
+        # Without hints the configured default is used unchanged.
         provider = self.router.get_provider("monitor")
 
         # Check for locked lenses first (reuse across scans for trend tracking)
@@ -641,7 +645,12 @@ class Monitor:
 
             explore_prompt = _build_explore_prompt(state)
 
-            parsed, response = await provider.chat_json(explore_prompt, EXPLORE_SCHEMA)
+            explore_provider = self.router.get_provider(
+                "monitor", task="explore", prompt_size=len(explore_prompt),
+            )
+            parsed, response = await explore_provider.chat_json(
+                explore_prompt, EXPLORE_SCHEMA,
+            )
 
             result.model = response.model
             result.provider = response.provider
@@ -699,7 +708,12 @@ class Monitor:
                 test_output=state.test_output[:500],
             )
 
-            parsed_eval, resp = await provider.chat_json(eval_prompt, EVALUATE_SCHEMA)
+            eval_provider = self.router.get_provider(
+                "monitor", task="evaluate_lens", prompt_size=len(eval_prompt),
+            )
+            parsed_eval, resp = await eval_provider.chat_json(
+                eval_prompt, EVALUATE_SCHEMA,
+            )
             result.total_input_tokens += resp.input_tokens
             result.total_output_tokens += resp.output_tokens
             result.total_cost_usd += resp.cost_usd
@@ -713,7 +727,7 @@ class Monitor:
                     + "\n\nOUTPUT REQUIREMENT: Return ONLY the JSON object. "
                     "No prose, no markdown, no explanation. Start with { and end with }."
                 )
-                parsed_eval, retry_resp = await provider.chat_json(
+                parsed_eval, retry_resp = await eval_provider.chat_json(
                     retry_prompt, EVALUATE_SCHEMA,
                 )
                 result.total_input_tokens += retry_resp.input_tokens
@@ -839,7 +853,10 @@ class Monitor:
             )
         result.n_lenses_failed = n_failed
 
-        parsed_synth, synth_resp = await provider.chat_json(
+        synth_provider = self.router.get_provider(
+            "monitor", task="synthesize", prompt_size=len(synth_prompt),
+        )
+        parsed_synth, synth_resp = await synth_provider.chat_json(
             synth_prompt, SYNTHESIZE_SCHEMA,
         )
         result.total_input_tokens += synth_resp.input_tokens
