@@ -129,6 +129,27 @@ class TestMonitorFailsLoudly:
 
 # --- Coder Tests ---
 
+def _coder_kwargs(tmpdir: str, branch: str = "test/coder-branch") -> dict:
+    """Set up the worktree-managed kwargs Coder.execute requires.
+
+    Mimics what `worktree_for(...)` does for the real call site:
+    creates the branch and checks it out, then returns the kwargs to
+    pass through. Tests that don't care about a real git repo can
+    skip this helper — the few tests that do their own repo setup
+    just need the kwargs dict shape.
+    """
+    import subprocess as _sp
+    _sp.run(
+        ["git", "checkout", "-b", branch], cwd=tmpdir,
+        check=True, capture_output=True,
+    )
+    return {
+        "working_directory": tmpdir,
+        "artifacts_directory": tmpdir,
+        "branch": branch,
+    }
+
+
 class TestCoderSlug:
     def test_simple_title(self) -> None:
         assert _slug("Fix bug in parser") == "fix-bug-in-parser"
@@ -160,11 +181,95 @@ class TestCoderRejectsNonAgenticProvider:
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            result = await coder.execute(work_item, tmpdir)
+            # Capability check fires before any git ops — bare kwargs OK
+            result = await coder.execute(
+                work_item,
+                working_directory=tmpdir,
+                artifacts_directory=tmpdir,
+                branch="test/no-branch-needed",
+            )
             assert result.status == "failed"
             assert "agentic_code" in (result.error or "") or "claude" in (
                 result.error or ""
             ).lower()
+
+
+class TestGitStatusSnapshotPreservesFullPath:
+    """Regression: dogfood on portfolio_new (2026-04-16) showed
+    `_git_status_snapshot` mangling paths — `src/foo.tsx` came back
+    as `rc/foo.tsx`, `principles/README.md.bak` as `rinciples/...`.
+    Every path lost its first character. Cause was a fragile line-
+    based parser in a region of git/locale state we couldn't fully
+    reproduce. The fix uses `git status --porcelain -z` (NUL-
+    terminated) so path boundaries are explicit, not whitespace-
+    derived. This test locks the contract in across the file states
+    we care about: untracked, modified, and modified+staged.
+    """
+
+    def test_full_path_preserved_for_untracked_file(self) -> None:
+        import subprocess as _sp
+
+        from sentinel.roles.coder import _git_status_snapshot
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _sp.run(["git", "init", "-q", "-b", "main"], cwd=tmpdir, check=True)
+            (Path(tmpdir) / "src" / "app").mkdir(parents=True)
+            (Path(tmpdir) / "src" / "app" / "MasonryGallery.tsx").write_text("x")
+            paths = _git_status_snapshot(tmpdir)
+            assert "src/app/MasonryGallery.tsx" in paths, (
+                f"untracked path mangled — got {paths}"
+            )
+            assert not any(p.startswith("rc/") for p in paths)
+
+    def test_full_path_preserved_for_modified_tracked_file(self) -> None:
+        import subprocess as _sp
+
+        from sentinel.roles.coder import _git_status_snapshot
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _sp.run(["git", "init", "-q", "-b", "main"], cwd=tmpdir, check=True)
+            _sp.run(
+                ["git", "config", "user.email", "t@t.io"], cwd=tmpdir,
+                check=True,
+            )
+            _sp.run(["git", "config", "user.name", "t"], cwd=tmpdir, check=True)
+            (Path(tmpdir) / "principles").mkdir()
+            f = Path(tmpdir) / "principles" / "README.md.bak"
+            f.write_text("v1")
+            _sp.run(["git", "add", "."], cwd=tmpdir, check=True)
+            _sp.run(["git", "commit", "-m", "init", "-q"], cwd=tmpdir, check=True)
+            f.write_text("v2")
+            paths = _git_status_snapshot(tmpdir)
+            assert "principles/README.md.bak" in paths
+            assert not any(p.startswith("rinciples/") for p in paths)
+
+    def test_rename_returns_both_old_and_new_paths(self) -> None:
+        """We pass `--no-renames` to git status so each side of a
+        rename is its own entry: ` D old.py` + `?? new.py` (or
+        equivalent). _commit_files needs BOTH so the commit captures
+        the deletion AND the new file — without both, codex flagged
+        that renames would ship as copies."""
+        import subprocess as _sp
+
+        from sentinel.roles.coder import _git_status_snapshot
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _sp.run(["git", "init", "-q", "-b", "main"], cwd=tmpdir, check=True)
+            _sp.run(
+                ["git", "config", "user.email", "t@t.io"], cwd=tmpdir,
+                check=True,
+            )
+            _sp.run(["git", "config", "user.name", "t"], cwd=tmpdir, check=True)
+            (Path(tmpdir) / "old.py").write_text("x")
+            _sp.run(["git", "add", "."], cwd=tmpdir, check=True)
+            _sp.run(["git", "commit", "-m", "init", "-q"], cwd=tmpdir, check=True)
+            _sp.run(["git", "mv", "old.py", "new.py"], cwd=tmpdir, check=True)
+            paths = _git_status_snapshot(tmpdir)
+            assert "new.py" in paths
+            assert "old.py" in paths, (
+                "rename's old path must also be in the snapshot so "
+                "_commit_files stages the deletion alongside the new file"
+            )
 
 
 class TestFilesChangedIgnoresSentinelArtifacts:
@@ -248,7 +353,7 @@ class TestCoderCommitsToFeatureBranch:
                 capture_output=True, text=True, cwd=tmpdir,
             ).stdout.strip()
 
-            result = await coder.execute(work_item, tmpdir)
+            result = await coder.execute(work_item, **_coder_kwargs(tmpdir))
 
             assert result.status in ("success", "partial")
             # The fix: an actual commit exists on the feature branch
@@ -302,7 +407,7 @@ class TestCoderCommitsToFeatureBranch:
             (Path(tmpdir) / ".toolkit-config").write_text(
                 "test_command=false\n",
             )
-            result = await coder.execute(work_item, tmpdir)
+            result = await coder.execute(work_item, **_coder_kwargs(tmpdir))
 
             # Partial = code landed but tests failed
             assert result.status == "partial"
@@ -358,7 +463,7 @@ class TestCoderCommitPathspecIsolation:
                 cwd=tmpdir, check=True,
             )
 
-            result = await coder.execute(work_item, tmpdir)
+            result = await coder.execute(work_item, **_coder_kwargs(tmpdir))
 
             # Commit landed
             assert result.commit_sha
@@ -466,66 +571,6 @@ class TestResetAndCheckoutReturnCodes:
         assert _reset_and_checkout(str(tmp_path), "main") is True
 
 
-class TestCoderExistingBranchCheckout:
-    """Codex review caught: when the feature branch already exists
-    (e.g. from a prior partial run), `git checkout -b` failed with
-    'already exists' and we skipped the error path — BUT we didn't
-    actually check the branch out. Claude ran + the commit landed on
-    the original branch instead of the feature branch."""
-
-    @pytest.mark.asyncio
-    async def test_checks_out_existing_branch_instead_of_original(self) -> None:
-        import subprocess as _sp
-
-        class FileWritingMock(MockProvider):
-            async def code(self, prompt, options=None, **kwargs):
-                wd = kwargs.get("working_directory", ".")
-                (Path(wd) / "fixed.py").write_text("ok\n")
-                return ChatResponse(
-                    content="done", provider=self.name, cost_usd=0.0,
-                )
-
-        provider = FileWritingMock()
-        provider.capabilities = ProviderCapabilities(
-            chat=True, agentic_code=True,
-        )
-        router = _mock_router(provider)
-        coder = Coder(router)
-        work_item = WorkItem(
-            id="1", title="reuse branch", description="",
-            type="fix", priority="low", complexity=1,
-        )
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _sp.run(["git", "init", "-q", "-b", "main"], cwd=tmpdir, check=True)
-            _sp.run(
-                ["git", "-c", "user.email=a@b", "-c", "user.name=t",
-                 "commit", "--allow-empty", "-m", "init", "-q"],
-                cwd=tmpdir, check=True,
-            )
-            # Pre-create the branch the Coder will try to create
-            branch = f"sentinel/{work_item.type}/{_slug(work_item.title)}"
-            _sp.run(["git", "branch", branch], cwd=tmpdir, check=True)
-
-            await coder.execute(work_item, tmpdir)
-
-            # The commit must land on the feature branch, not main
-            current = _sp.run(
-                ["git", "branch", "--show-current"],
-                capture_output=True, text=True, cwd=tmpdir,
-            ).stdout.strip()
-            assert current == branch, (
-                f"coder must switch to existing feature branch, got {current!r}"
-            )
-            main_log = _sp.run(
-                ["git", "log", "--oneline", "main"],
-                capture_output=True, text=True, cwd=tmpdir,
-            )
-            assert "reuse branch" not in main_log.stdout, (
-                "commit must NOT land on main when feature branch exists"
-            )
-
-
 class TestCoderPersistsTranscripts:
     """Every execution attempt — success, failure, or exception —
     must leave a debuggable record behind. Before this PR, bare
@@ -564,7 +609,7 @@ class TestCoderPersistsTranscripts:
                 cwd=tmpdir, check=True,
             )
 
-            result = await coder.execute(work_item, tmpdir)
+            result = await coder.execute(work_item, **_coder_kwargs(tmpdir))
             assert result.status == "failed"
             # The fix: transcript exists on disk
             transcripts = list(
@@ -611,7 +656,7 @@ class TestCoderPersistsTranscripts:
                  "commit", "--allow-empty", "-m", "init", "-q"],
                 cwd=tmpdir, check=True,
             )
-            result = await coder.execute(work_item, tmpdir)
+            result = await coder.execute(work_item, **_coder_kwargs(tmpdir))
             assert "authentication failed" in (result.error or "")
 
 
@@ -670,7 +715,7 @@ class TestCoderWorktreeManagedMode:
             )
             try:
                 result = await coder.execute(
-                    work_item, str(project),
+                    work_item,
                     working_directory=str(worktree),
                     artifacts_directory=str(project),
                     branch="sentinel/wm-1",
@@ -727,7 +772,7 @@ class TestCoderWorktreeManagedMode:
             )
 
             await coder.execute(
-                work_item, str(project),
+                work_item,
                 working_directory=str(worktree),
                 artifacts_directory=str(project),
                 branch="sentinel/wm-2",

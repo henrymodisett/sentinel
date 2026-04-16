@@ -64,15 +64,57 @@ def _git_status_snapshot(project_path: str) -> set[str]:
     dirty. Sentinel's own artifacts (.sentinel/, .claude/) are dropped
     from the snapshot — they don't threaten user work and reset/clean
     excludes them anyway.
+
+    Uses `git status --porcelain -z` for NUL-terminated output. The
+    line-based parser this replaces stripped the first character off
+    every path during dogfood on portfolio_new (`src/...` → `rc/...`,
+    `principles/...` → `rinciples/...`). Root cause unclear — likely
+    a git/locale interaction where some entries shifted by one column.
+    NUL-terminated parsing is bulletproof against that class of bug
+    because path delimiters are explicit, not whitespace-derived.
+
+    -z format: each entry is `XY<sp>PATH\\0`. Rename/copy entries
+    (R, C status) are followed by an extra `ORIG\\0` entry that we
+    skip — we only want the new path.
     """
-    result = _run_git(["status", "--porcelain"], project_path)
+    # `--untracked-files=all` so newly-created files in newly-created
+    # directories show as full paths, not just their containing dir
+    # (the default `normal` mode collapses untracked dirs).
+    # `--no-renames` so each side of a rename gets its own entry
+    # (`D <old>` + `?? <new>`) — _commit_files stages both, capturing
+    # the deletion AND the new content. Without this, git's default
+    # rename detection would collapse to `R <old> -> <new>` and we'd
+    # ship the new file as a copy (the old path's deletion would not
+    # be staged).
+    result = _run_git(
+        ["status", "--porcelain", "-z",
+         "--untracked-files=all", "--no-renames"],
+        project_path,
+    )
+    if result.returncode != 0:
+        # Don't silently swallow — a git failure here means the
+        # snapshot is empty and downstream `result.files_changed = []`
+        # makes the Coder look like it produced nothing. Log so the
+        # underlying git problem (missing repo, locked index, etc.)
+        # is visible in operator output rather than masquerading as
+        # "Coder produced no file changes".
+        import logging
+        logging.getLogger(__name__).warning(
+            "git status failed in %s (rc=%s): %s",
+            project_path, result.returncode,
+            (result.stderr or result.stdout or "(no output)").strip(),
+        )
+        return set()
     paths: set[str] = set()
-    for line in result.stdout.strip().splitlines():
-        if len(line) > 3:
-            filename = line[3:]
-            if filename.startswith(".sentinel/") or filename.startswith(".claude/"):
-                continue
-            paths.add(filename)
+    for entry in result.stdout.split("\0"):
+        if len(entry) < 4:
+            continue
+        # Format: "XY PATH" — status is exactly 2 chars, then a single
+        # space, then the path. Slice from index 3 to drop the prefix.
+        path = entry[3:]
+        if path.startswith(".sentinel/") or path.startswith(".claude/"):
+            continue
+        paths.add(path)
     return paths
 
 
@@ -290,29 +332,22 @@ class Coder:
     async def execute(
         self,
         work_item: WorkItem,
-        project_path: str,
         *,
-        working_directory: str | None = None,
-        artifacts_directory: str | None = None,
-        branch: str | None = None,
+        working_directory: str,
+        artifacts_directory: str,
+        branch: str,
     ) -> ExecutionResult:
         """Execute a work item via the coder provider's agentic mode.
 
-        Modes:
-          - **Worktree-managed (preferred)**: caller passes
-            `working_directory` (where the Coder edits, typically a
-            git worktree), `artifacts_directory` (where transcripts go,
-            typically the main project's `.sentinel/`), and `branch`
-            (already checked out by the caller). Coder runs on that
-            branch without creating one.
-          - **Legacy (deprecated, retained for tests)**: only
-            `project_path` is given. Coder creates its own
-            `sentinel/{type}/{slug}` branch in-place. To be removed
-            once all tests migrate to the worktree-managed mode.
+        Worktree-managed: the caller (work_cmd._execute_and_review,
+        via `worktree_for(...)`) checks out `branch` in
+        `working_directory` before invoking Coder. Coder runs there
+        and never creates branches itself — that responsibility lives
+        in the worktree primitive so concurrent items can't conflict.
 
-        Every attempt writes a Markdown transcript to
-        `<artifacts_directory>/executions/` — on success, failure,
-        or exception — so no failure is silent.
+        `artifacts_directory` is where transcripts go (typically the
+        main project's `.sentinel/`, NOT the worktree, so failure
+        evidence survives `git worktree remove --force`).
         """
         from sentinel.journal import set_current_role
         set_current_role("coder")
@@ -320,15 +355,13 @@ class Coder:
         result = ExecutionResult(
             work_item_id=work_item.id,
             status="failed",
+            branch=branch,
         )
         prompt = ""
         response = None
 
-        # Resolve the dual-mode paths. Worktree-managed callers pass
-        # all three; legacy callers pass only project_path and we fall
-        # back to using it for everything (single-tree behavior).
-        wd = working_directory or project_path
-        ad = artifacts_directory or project_path
+        wd = working_directory
+        ad = artifacts_directory
 
         provider = self.router.get_provider("coder")
         if not provider.capabilities.agentic_code:
@@ -342,52 +375,21 @@ class Coder:
             )
             return result
 
-        if branch is not None:
-            # Worktree-managed: branch is already checked out by the
-            # caller. No checkout, no pre-snapshot — the worktree
-            # starts clean so anything in `git status` after the run
-            # IS the Coder's output.
-            result.branch = branch
-            pre_snapshot: set[str] = set()
-        else:
-            # Legacy: create the branch ourselves and snapshot dirty
-            # files so we can subtract them later. To be removed.
-            branch_name = f"sentinel/{work_item.type}/{_slug(work_item.title)}"
-            result.branch = branch_name
-            pre_snapshot = _git_status_snapshot(wd)
-
-            co_result = _run_git(["checkout", "-b", branch_name], wd)
-            if co_result.returncode != 0:
-                if "already exists" in co_result.stderr:
-                    switch_result = _run_git(
-                        ["checkout", branch_name], wd,
-                    )
-                    if switch_result.returncode != 0:
-                        result.error = (
-                            f"Branch {branch_name} exists but checkout failed: "
-                            f"{switch_result.stderr.strip()}"
-                        )
-                        result.duration_ms = int((time.time() - start) * 1000)
-                        _write_execution_transcript(
-                            ad, work_item, prompt, response, result,
-                        )
-                        return result
-                else:
-                    result.error = (
-                        f"Could not create branch {branch_name}: "
-                        f"{co_result.stderr.strip()}"
-                    )
-                    result.duration_ms = int((time.time() - start) * 1000)
-                    _write_execution_transcript(
-                        ad, work_item, prompt, response, result,
-                    )
-                    return result
+        # Snapshot dirty files BEFORE the call so we can subtract them
+        # from the post-call snapshot — anything pre-existing belongs to
+        # whatever set up the working directory (typically a clean
+        # worktree, but defense-in-depth catches stale state from an
+        # interrupted prior run).
+        pre_snapshot = _git_status_snapshot(wd)
 
         # Build the prompt
         criteria = "\n".join(f"- {c}" for c in work_item.acceptance_criteria) or "(none)"
         files = ", ".join(work_item.files) or "(let coder determine)"
+        # Project name comes from the artifacts dir (the main project),
+        # NOT the working dir (the worktree, whose path includes the
+        # `.sentinel/worktrees/wi-N` suffix).
         prompt = BUILD_PROMPT.format(
-            project_name=Path(project_path).name,
+            project_name=Path(ad).name,
             title=work_item.title,
             type=work_item.type,
             priority=work_item.priority,

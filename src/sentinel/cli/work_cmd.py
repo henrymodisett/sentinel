@@ -880,7 +880,7 @@ async def _execute_and_review(
     ) as ctx:
         t0 = time.time()
         exec_result = await coder.execute(
-            work_item, str(project),
+            work_item,
             working_directory=str(ctx.path),
             artifacts_directory=str(project),
             branch=ctx.branch,

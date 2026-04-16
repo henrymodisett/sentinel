@@ -1,32 +1,27 @@
 """
-sentinel cycle — the autonomous loop.
+sentinel cycle — legacy alias for `sentinel work`.
 
-Pipeline: scan → plan → execute top N items → review each → report.
+The original `cycle` command had its own scan/plan/execute loop using
+the legacy in-place Coder mode. That mode is gone now (the worktree-
+managed PR factory is the only execution path), so `cycle` is a thin
+shim that delegates to `sentinel.cli.work_cmd.run_work`.
 
-Respects the daily budget limit. Halts early if budget would be exceeded.
-Each successful execution lands on its own feature branch for human review.
+A few helper functions in this module — `_action_to_work_item`,
+`_current_branch`, `_load_approved_proposals` — are still imported
+by `work_cmd` and stay; the rest of the original module is gone.
 """
 
 from __future__ import annotations
 
-import os
 import subprocess
-import time
-from pathlib import Path
+from typing import TYPE_CHECKING
 
-import click
 from rich.console import Console
-from rich.panel import Panel
 
-from sentinel.budget import check_budget, record_spend
-from sentinel.cli.plan_cmd import _find_latest_scan, _parse_actions_from_scan, _write_backlog
-from sentinel.cli.scan_cmd import _load_config, _persist_scan
-from sentinel.providers.router import Router
-from sentinel.roles.coder import Coder
-from sentinel.roles.monitor import Monitor
 from sentinel.roles.planner import WorkItem
-from sentinel.roles.reviewer import Reviewer
-from sentinel.state import gather_state
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 console = Console()
 
@@ -112,299 +107,43 @@ async def run_cycle(
     max_items: int = 3,
     dry_run: bool = False,
 ) -> None:
-    """Run one autonomous cycle."""
-    project = Path(project_path or os.getcwd()).resolve()
-    config = _load_config(project)
-    if not config:
-        return
+    """Deprecated alias — delegates to `sentinel work`.
 
-    console.print(f"\n[bold]Sentinel Cycle[/bold] — {project.name}")
-    if dry_run:
-        console.print("[dim]  (dry run — will plan but not execute)[/dim]")
-    console.print()
+    The original `cycle_cmd` had its own scan/plan/execute loop using
+    the legacy in-place Coder mode. That mode is gone (worktree-managed
+    is the only path). Rather than re-implement the whole loop here,
+    `cycle` now redirects through `work_cmd.run_work` — single code
+    path, no drift.
 
-    # Same guard as `sentinel work`: refuse to start on a dirty tree
-    # because between-item resets would silently wipe user work.
-    from sentinel.cli.work_cmd import _working_tree_clean
-    if not _working_tree_clean(project):
+    `work` iterates the full backlog until budget exhaustion or
+    completion; it has no equivalent of `--max-items`. If the caller
+    passed a non-default `max_items`, refuse explicitly rather than
+    silently ignoring the cap — pretending to cap at N items while
+    actually executing the whole backlog is the worst kind of API
+    surprise.
+    """
+    if max_items != 3:
+        import click as _click
         console.print(
-            "[red]  Working tree has uncommitted changes.[/red]\n"
-            "  sentinel resets the tree between items; running on a "
-            "dirty tree would destroy your work.\n"
-            "  Commit, stash, or discard your changes, then run again."
+            f"[red]  `sentinel cycle --max-items {max_items}` is no longer "
+            f"supported.[/red]\n"
+            f"  The legacy item-cap was tied to the in-place Coder mode that "
+            f"has been removed.\n"
+            f"  Use `[bold]sentinel work --budget <time-or-money>[/bold]` "
+            f"to bound the cycle instead — `work` iterates the full "
+            f"backlog until the budget is hit.\n"
         )
-        return
+        # Non-zero exit so CI/scripts notice the rejection. Just
+        # printing and returning would silently succeed (exit 0)
+        # despite doing zero work — codex-flagged failure mode.
+        raise _click.exceptions.Exit(code=1)
 
-    # Budget check before starting
-    budget = check_budget(
-        project, config.budget.daily_limit_usd, config.budget.warn_at_usd,
-    )
-    if budget.over_limit:
-        console.print(
-            f"[red]Daily budget exceeded: ${budget.today_spent_usd:.2f} / "
-            f"${budget.daily_limit_usd:.2f}. Refusing to cycle.[/red]"
-        )
-        return
-    console.print(
-        f"  Budget: ${budget.today_spent_usd:.2f} spent / "
-        f"${budget.daily_limit_usd:.2f} limit\n"
-    )
-
-    # Save current branch so we can return to it
-    original_branch = _current_branch(str(project))
-
-    # --- PHASE 1: SCAN ---
-    console.print("[bold cyan]Phase 1/4: Scan[/bold cyan]")
-    state = gather_state(project)
-    router = Router(config)
-    monitor = Monitor(router)
-
-    scan_cost_start = budget.today_spent_usd
-    from sentinel.cli.scan_cmd import scan_progress_printer
-    scan_result = await monitor.assess(state, on_progress=scan_progress_printer())
-
-    if scan_result.total_cost_usd > 0:
-        record_spend(
-            project, scan_result.total_cost_usd, "cycle-scan",
-            f"model={scan_result.model}",
-        )
-
-    if not scan_result.ok:
-        console.print(f"[red]Scan failed: {scan_result.error}[/red]")
-        # Preserve any lens evaluations we got before the failure so the
-        # next cycle can plan from a partial file instead of rerunning
-        # everything from scratch.
-        if scan_result.evaluations:
-            try:
-                scan_file = _persist_scan(project, scan_result)
-                console.print(
-                    f"  [dim]Partial scan saved to: "
-                    f"{scan_file.relative_to(project)}[/dim]"
-                )
-            except (OSError, ValueError) as persist_err:
-                console.print(
-                    f"  [yellow]Could not persist partial scan: "
-                    f"{persist_err}[/yellow]"
-                )
-        raise click.exceptions.Exit(code=1)
-
-    _persist_scan(project, scan_result)
-    console.print(
-        f"  [green]✓[/green] Health: {scan_result.overall_score}/100 "
-        f"(cost: ${scan_result.total_cost_usd:.4f})\n"
-    )
-
-    # --- PHASE 2: PLAN ---
-    console.print("[bold cyan]Phase 2/4: Plan[/bold cyan]")
-    scan_file = _find_latest_scan(project)
-    if not scan_file:
-        console.print("[red]No scan to plan from[/red]")
-        return
-    actions = _parse_actions_from_scan(scan_file)
-    _write_backlog(project, actions, scan_file)
-    from sentinel.cli.plan_cmd import _write_proposals
-    proposals = _write_proposals(project, actions, scan_file)
-
-    refinements = [a for a in actions if a.get("kind", "refine") == "refine"]
-    expansions = [a for a in actions if a.get("kind") == "expand"]
-    approved = _load_approved_proposals(project)
-
-    # Execution queue: refinements + approved proposals
-    exec_queue = refinements + approved
+    from sentinel.cli.work_cmd import run_work
 
     console.print(
-        f"  [green]✓[/green] {len(refinements)} refinements, "
-        f"{len(expansions)} expansion proposals, "
-        f"{len(approved)} approved to execute\n"
+        "[dim]  `sentinel cycle` is a legacy alias — delegating to "
+        "`sentinel work`.[/dim]\n"
     )
-
-    if dry_run:
-        console.print("[yellow]Dry run — stopping before execution[/yellow]\n")
-        if exec_queue:
-            console.print("[bold]Would execute:[/bold]")
-            for i, action in enumerate(exec_queue[:max_items], 1):
-                kind = action.get("kind", "refine")
-                console.print(f"  {i}. [{kind}] {action['title']}")
-        if expansions and not approved:
-            console.print("\n[yellow]Pending your review:[/yellow]")
-            for p in proposals:
-                console.print(f"  • {p.relative_to(project)}")
-        console.print()
-        return
-
-    if not exec_queue:
-        console.print(
-            "[green]Nothing to execute — no refinements or approved expansions.[/green]"
-        )
-        if expansions:
-            console.print(
-                f"[dim]{len(expansions)} expansion proposals pending your review "
-                f"in .sentinel/proposals/[/dim]"
-            )
-        return
-
-    # Confirm before executing
-    console.print(
-        f"[bold]Phase 3 will execute top {min(max_items, len(exec_queue))} "
-        f"items on feature branches.[/bold]"
-    )
-    for i, action in enumerate(exec_queue[:max_items], 1):
-        kind = action.get("kind", "refine")
-        console.print(f"  {i}. [{kind}] {action['title']}")
-    console.print()
-    if not click.confirm("  Proceed with autonomous execution?", default=False):
-        console.print("[yellow]Stopped before execution.[/yellow]")
-        return
-    console.print()
-
-    # --- PHASE 3: EXECUTE ---
-    console.print("[bold cyan]Phase 3/4: Execute[/bold cyan]")
-    coder = Coder(router)
-    reviewer = Reviewer(router)
-
-    executions = []
-    reviews = []
-
-    for i, action in enumerate(exec_queue[:max_items], 1):
-        # Re-check budget before each execution
-        budget = check_budget(
-            project, config.budget.daily_limit_usd, config.budget.warn_at_usd,
-        )
-        if budget.over_limit:
-            console.print(
-                f"[yellow]  Stopped at item {i-1}/{max_items} — "
-                f"budget hit.[/yellow]"
-            )
-            break
-
-        work_item = _action_to_work_item(action, i)
-        console.print(f"\n  [bold]({i}/{max_items}) {work_item.title}[/bold]")
-        console.print(f"  [dim]lens: {action.get('lens', '')}[/dim]")
-
-        # Return to original branch before each item. Reset first so
-        # a dirty tree from a failed prior item doesn't silently block
-        # checkout and cause items to stack (sigint dogfood finding).
-        from sentinel.cli.work_cmd import _reset_and_checkout
-        if not _reset_and_checkout(str(project), original_branch):
-            console.print(
-                "  [red]Cannot return to original branch — aborting cycle.[/red]"
-            )
-            break
-
-        t0 = time.time()
-        exec_result = await coder.execute(work_item, str(project))
-
-        if exec_result.cost_usd > 0:
-            record_spend(
-                project, exec_result.cost_usd, "cycle-execute",
-                f"item={work_item.title[:40]}",
-            )
-
-        elapsed = time.time() - t0
-        if exec_result.status == "failed":
-            console.print(
-                f"    [red]✗ Execute failed: {exec_result.error}[/red]"
-            )
-            executions.append(exec_result)
-            continue
-
-        console.print(
-            f"    [green]✓ Coded in {elapsed:.0f}s — "
-            f"{len(exec_result.files_changed)} files changed, "
-            f"tests: {'pass' if exec_result.tests_passing else 'FAIL'}[/green]"
-        )
-        executions.append(exec_result)
-
-        # --- PHASE 4: REVIEW (per item) ---
-        console.print("    [dim]reviewing...[/dim]")
-        review = await reviewer.review(work_item, exec_result, str(project))
-        if review.cost_usd > 0:
-            record_spend(
-                project, review.cost_usd, "cycle-review",
-                f"item={work_item.title[:40]}",
-            )
-        reviews.append(review)
-
-        verdict_color = {
-            "approved": "green",
-            "changes-requested": "yellow",
-            "rejected": "red",
-        }[review.verdict]
-        console.print(
-            f"    [{verdict_color}]Review: {review.verdict}[/{verdict_color}]"
-        )
-        if review.blocking_issues:
-            for issue in review.blocking_issues[:3]:
-                console.print(f"      • {issue}")
-
-        # --- PHASE 4b: VERIFY (per item) ---
-        # Same independent objective signal as `sentinel work` runs.
-        # Without this, the legacy `sentinel cycle` alias quietly skips
-        # verification and produces inconsistent behavior between the
-        # two commands.
-        from sentinel.verify import persist_verification, verify_work_item
-        verification = verify_work_item(
-            project_path=project,
-            work_item_id=str(work_item.id),
-            work_item_title=work_item.title,
-            branch=exec_result.branch,
-        )
-        try:
-            persist_verification(project, verification)
-        except OSError as e:
-            console.print(
-                f"      [yellow]Could not persist verification: {e}[/yellow]"
-            )
-        verifier_icon = {
-            "verified": "[green]✅[/green]",
-            "not_verified": "[red]❌[/red]",
-            "no_check_defined": "[dim]—[/dim]",
-        }.get(verification.overall, "?")
-        console.print(
-            f"    Verifier: {verifier_icon} {verification.overall}"
-        )
-
-    # Return to original branch with a clean tree — see _reset_and_checkout
-    from sentinel.cli.work_cmd import _reset_and_checkout
-    _reset_and_checkout(str(project), original_branch)
-
-    # --- SUMMARY ---
-    console.print()
-    console.print(
-        Panel(
-            _summarize_cycle(executions, reviews, budget, scan_cost_start),
-            title="[bold]Cycle Complete[/bold]",
-            border_style="cyan",
-        )
-    )
-    console.print()
-
-    # List branches created
-    branches = [e.branch for e in executions if e.branch]
-    if branches:
-        console.print("[bold]Branches created (ready for your review):[/bold]")
-        for e in executions:
-            if e.branch:
-                status_icon = "✓" if e.status == "success" else "!"
-                console.print(f"  {status_icon} [cyan]{e.branch}[/cyan]")
-        console.print()
-
-
-def _summarize_cycle(executions, reviews, budget, scan_cost_start) -> str:
-    approved = sum(1 for r in reviews if r.verdict == "approved")
-    changes = sum(1 for r in reviews if r.verdict == "changes-requested")
-    rejected = sum(1 for r in reviews if r.verdict == "rejected")
-    failed = sum(1 for e in executions if e.status == "failed")
-
-    # Re-check budget
-    total_spent = budget.today_spent_usd
-
-    return (
-        f"Executed: {len(executions)} items\n"
-        f"  • Approved: {approved}\n"
-        f"  • Changes requested: {changes}\n"
-        f"  • Rejected: {rejected}\n"
-        f"  • Failed to execute: {failed}\n\n"
-        f"Total spend today: ${total_spent:.4f} "
-        f"(limit: ${budget.daily_limit_usd:.2f})"
+    await run_work(
+        project_path=project_path, dry_run=dry_run, auto=True,
     )

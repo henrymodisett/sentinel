@@ -81,17 +81,15 @@ class Loop:
         )
 
     async def _execute_phase(
-        self, plan: Plan, project_path: str,
+        self, plan: Plan, project_path: str,  # noqa: ARG002
     ) -> tuple[list[ExecutionResult], list[ReviewResult]]:
-        executions: list[ExecutionResult] = []
-        reviews: list[ReviewResult] = []
-
-        for item in plan.backlog[:3]:
-            result = await self.coder.execute(item, project_path)
-            executions.append(result)
-
-            if result.status == "success":
-                review = await self.reviewer.review(item, result, project_path)
-                reviews.append(review)
-
-        return executions, reviews
+        # The Loop class predates the worktree-managed Coder API and
+        # the autonomous PR factory in work_cmd._execute_and_review.
+        # That module is the live execution path; this one is unreached
+        # (Loop.cycle raises in _research_phase before _execute_phase
+        # is called). Keep the signature for type-checking and any
+        # legacy importers, but be loud about the path being dead.
+        raise NotImplementedError(
+            "Loop._execute_phase is superseded by "
+            "sentinel.cli.work_cmd._execute_and_review. Use `sentinel work`.",
+        )
