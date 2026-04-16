@@ -747,9 +747,53 @@ class Monitor:
             })
             return evaluation
 
-        # Run all lens evaluations in parallel
-        tasks = [evaluate_one(lens, i) for i, lens in enumerate(result.lenses, 1)]
-        result.evaluations = await asyncio.gather(*tasks)
+        # Run all lens evaluations in parallel with a per-lens timeout
+        # and exception isolation — one hung lens must not block the
+        # pipeline or erase the six sibling lenses that already succeeded.
+        # Toolkit dogfood hit this: a Gemini sub-call ran 13+ minutes
+        # past its budget, and gather() kept waiting for it, so the
+        # cycle died with zero persisted lens evaluations.
+        #
+        # The per-lens timeout is belt-and-suspenders relative to
+        # run_cli_async's own budget-clamped timeout: if the subprocess-
+        # level cancellation somehow fails to fire (Gemini CLI quirks,
+        # OS-level wedges), this outer asyncio.wait_for still guarantees
+        # the task ends. Use 2x the provider timeout to leave room for
+        # evaluate_one's own retry path.
+        from sentinel.budget_ctx import clamp_timeout
+        per_lens_timeout = clamp_timeout(provider.timeout_sec * 2)
+
+        async def evaluate_with_timeout(lens: Lens, index: int) -> LensEvaluation:
+            try:
+                return await asyncio.wait_for(
+                    evaluate_one(lens, index), timeout=per_lens_timeout,
+                )
+            except TimeoutError:
+                emit("lens_failed", {
+                    "lens_name": lens.name,
+                    "error": f"timed out after {per_lens_timeout}s",
+                })
+                return LensEvaluation(
+                    lens_name=lens.name,
+                    error=f"Evaluation timed out after {per_lens_timeout}s",
+                )
+
+        tasks = [
+            evaluate_with_timeout(lens, i)
+            for i, lens in enumerate(result.lenses, 1)
+        ]
+        # return_exceptions=True so one bad apple (unexpected exception,
+        # not just timeout) doesn't cancel the others. Exceptions that
+        # slip past evaluate_with_timeout's try/except become
+        # LensEvaluation(error=...) entries; scan proceeds.
+        gathered = await asyncio.gather(*tasks, return_exceptions=True)
+        result.evaluations = [
+            ev if isinstance(ev, LensEvaluation) else LensEvaluation(
+                lens_name=result.lenses[i].name,
+                error=f"Evaluation raised {type(ev).__name__}: {ev}",
+            )
+            for i, ev in enumerate(gathered)
+        ]
 
         emit("step_done", {
             "step": "evaluate",
