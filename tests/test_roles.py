@@ -194,6 +194,82 @@ class TestCoderRejectsNonAgenticProvider:
             ).lower()
 
 
+class TestGitStatusSnapshotPreservesFullPath:
+    """Regression: dogfood on portfolio_new (2026-04-16) showed
+    `_git_status_snapshot` mangling paths — `src/foo.tsx` came back
+    as `rc/foo.tsx`, `principles/README.md.bak` as `rinciples/...`.
+    Every path lost its first character. Cause was a fragile line-
+    based parser in a region of git/locale state we couldn't fully
+    reproduce. The fix uses `git status --porcelain -z` (NUL-
+    terminated) so path boundaries are explicit, not whitespace-
+    derived. This test locks the contract in across the file states
+    we care about: untracked, modified, and modified+staged.
+    """
+
+    def test_full_path_preserved_for_untracked_file(self) -> None:
+        import subprocess as _sp
+
+        from sentinel.roles.coder import _git_status_snapshot
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _sp.run(["git", "init", "-q", "-b", "main"], cwd=tmpdir, check=True)
+            (Path(tmpdir) / "src" / "app").mkdir(parents=True)
+            (Path(tmpdir) / "src" / "app" / "MasonryGallery.tsx").write_text("x")
+            paths = _git_status_snapshot(tmpdir)
+            assert "src/app/MasonryGallery.tsx" in paths, (
+                f"untracked path mangled — got {paths}"
+            )
+            assert not any(p.startswith("rc/") for p in paths)
+
+    def test_full_path_preserved_for_modified_tracked_file(self) -> None:
+        import subprocess as _sp
+
+        from sentinel.roles.coder import _git_status_snapshot
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _sp.run(["git", "init", "-q", "-b", "main"], cwd=tmpdir, check=True)
+            _sp.run(
+                ["git", "config", "user.email", "t@t.io"], cwd=tmpdir,
+                check=True,
+            )
+            _sp.run(["git", "config", "user.name", "t"], cwd=tmpdir, check=True)
+            (Path(tmpdir) / "principles").mkdir()
+            f = Path(tmpdir) / "principles" / "README.md.bak"
+            f.write_text("v1")
+            _sp.run(["git", "add", "."], cwd=tmpdir, check=True)
+            _sp.run(["git", "commit", "-m", "init", "-q"], cwd=tmpdir, check=True)
+            f.write_text("v2")
+            paths = _git_status_snapshot(tmpdir)
+            assert "principles/README.md.bak" in paths
+            assert not any(p.startswith("rinciples/") for p in paths)
+
+    def test_skips_rename_original_entry(self) -> None:
+        """`-z` rename format is `R<sp>NEW\\0ORIG\\0` — the ORIG entry
+        is bare (no status prefix) and would be misparsed if not
+        skipped explicitly."""
+        import subprocess as _sp
+
+        from sentinel.roles.coder import _git_status_snapshot
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _sp.run(["git", "init", "-q", "-b", "main"], cwd=tmpdir, check=True)
+            _sp.run(
+                ["git", "config", "user.email", "t@t.io"], cwd=tmpdir,
+                check=True,
+            )
+            _sp.run(["git", "config", "user.name", "t"], cwd=tmpdir, check=True)
+            (Path(tmpdir) / "old.py").write_text("x")
+            _sp.run(["git", "add", "."], cwd=tmpdir, check=True)
+            _sp.run(["git", "commit", "-m", "init", "-q"], cwd=tmpdir, check=True)
+            _sp.run(["git", "mv", "old.py", "new.py"], cwd=tmpdir, check=True)
+            paths = _git_status_snapshot(tmpdir)
+            # The new path should be in; the old path should not appear
+            # as a separate entry (it lives inside the rename's ORIG
+            # half, which we skip).
+            assert "new.py" in paths
+            assert "old.py" not in paths
+
+
 class TestFilesChangedIgnoresSentinelArtifacts:
     """Regression: transcripts and other .sentinel/ artifacts must never
     be counted as Coder changes. Otherwise a no-op Coder run shows up as

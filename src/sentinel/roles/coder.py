@@ -64,15 +64,45 @@ def _git_status_snapshot(project_path: str) -> set[str]:
     dirty. Sentinel's own artifacts (.sentinel/, .claude/) are dropped
     from the snapshot — they don't threaten user work and reset/clean
     excludes them anyway.
+
+    Uses `git status --porcelain -z` for NUL-terminated output. The
+    line-based parser this replaces stripped the first character off
+    every path during dogfood on portfolio_new (`src/...` → `rc/...`,
+    `principles/...` → `rinciples/...`). Root cause unclear — likely
+    a git/locale interaction where some entries shifted by one column.
+    NUL-terminated parsing is bulletproof against that class of bug
+    because path delimiters are explicit, not whitespace-derived.
+
+    -z format: each entry is `XY<sp>PATH\\0`. Rename/copy entries
+    (R, C status) are followed by an extra `ORIG\\0` entry that we
+    skip — we only want the new path.
     """
-    result = _run_git(["status", "--porcelain"], project_path)
+    # `--untracked-files=all` so newly-created files in newly-created
+    # directories show as full paths, not just their containing dir
+    # (the default `normal` mode collapses untracked dirs).
+    result = _run_git(
+        ["status", "--porcelain", "-z", "--untracked-files=all"], project_path,
+    )
+    if result.returncode != 0:
+        return set()
     paths: set[str] = set()
-    for line in result.stdout.strip().splitlines():
-        if len(line) > 3:
-            filename = line[3:]
-            if filename.startswith(".sentinel/") or filename.startswith(".claude/"):
-                continue
-            paths.add(filename)
+    entries = result.stdout.split("\0")
+    skip_next = False
+    for entry in entries:
+        if skip_next:
+            skip_next = False
+            continue
+        if len(entry) < 4:
+            continue
+        # Format: "XY PATH" — status is exactly 2 chars, then a single
+        # space, then the path. Slice from index 3 to drop the prefix.
+        status = entry[:2]
+        path = entry[3:]
+        if status and status[0] in ("R", "C"):
+            skip_next = True  # the next entry is the rename's original
+        if path.startswith(".sentinel/") or path.startswith(".claude/"):
+            continue
+        paths.add(path)
     return paths
 
 
