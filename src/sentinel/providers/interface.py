@@ -94,15 +94,14 @@ async def run_cli_async(
     The Coder path MUST pass the target project path here so Claude Code
     edits land in the target, not in the sentinel process cwd.
 
-    timeout is clamped against the current cycle deadline (see
-    sentinel.budget_ctx). A `--budget 10m` cycle can't have a single sub-call
-    that runs 600s when only 60s of budget remain — the clamped timeout
-    keeps provider CLIs bounded by the budget the user actually set.
+    timeout is used as-is. The cycle budget is enforced between calls
+    (see sentinel.budget_ctx.is_budget_exhausted) — providers skip the
+    call entirely when budget is out, rather than shrinking this
+    subprocess timeout to fit. Shrinking mid-call kills in-flight work
+    and returns zero output for the latency cost; between-call gating
+    lets every started call finish naturally.
     """
     import asyncio as _asyncio
-
-    from sentinel.budget_ctx import clamp_timeout
-    effective_timeout = clamp_timeout(timeout)
 
     process = await _asyncio.create_subprocess_exec(
         *args,
@@ -114,12 +113,12 @@ async def run_cli_async(
 
     try:
         stdout_bytes, stderr_bytes = await _asyncio.wait_for(
-            process.communicate(), timeout=effective_timeout,
+            process.communicate(), timeout=timeout,
         )
     except TimeoutError as e:
         process.kill()
         await process.wait()
-        raise subprocess.TimeoutExpired(args, effective_timeout) from e
+        raise subprocess.TimeoutExpired(args, timeout) from e
     except _asyncio.CancelledError:
         # Outer cancellation (e.g., a parent asyncio.wait_for timed out,
         # or the task was cancelled by KeyboardInterrupt handling). The
@@ -219,23 +218,42 @@ class Provider(ABC):
     async def chat(self, prompt: str, system_prompt: str | None = None) -> ChatResponse:
         """Send a prompt, get a response."""
 
+    def _abort_if_budget_exhausted(self) -> ChatResponse | None:
+        """Return a budget-exhausted error response if the cycle deadline
+        has passed, else None. Every chat() / code() entry point should
+        call this first:
+
+            if (resp := self._abort_if_budget_exhausted()):
+                return resp
+
+        The skip is recorded in the journal as a 0-latency call with
+        error="budget_exhausted" so the journal naturally shows which
+        calls were dropped (not just which ones ran).
+        """
+        from sentinel.budget_ctx import is_budget_exhausted
+
+        if not is_budget_exhausted():
+            return None
+        import time as _time
+        started = _time.perf_counter()
+        response = ChatResponse(
+            content="Error: cycle budget exhausted before this call could start",
+            provider=self.name,
+            is_error=True,
+        )
+        self._journal_call(started, response, error="budget_exhausted")
+        return response
+
     def _journal_call(
         self,
         started_at: float,
         response: ChatResponse,
-        was_clamped: bool,
         error: str | None = None,
     ) -> None:
         """Append this call to the cycle's run journal (no-op outside a
         cycle). Subclasses call this once at the end of every chat() /
-        code() path so the journal sees latency, tokens, cost, and
-        clamp status.
-
-        `was_clamped` MUST be captured BEFORE the call (typically at
-        the same time as `started_at`). Computing it here would race:
-        by the time the call returns, more time has elapsed against
-        the cycle deadline, so an unclamped call could appear clamped
-        because the remaining budget shrank during the call itself.
+        code() path so the journal sees latency, tokens, cost, and any
+        captured stderr/error context.
         """
         import time as _time
 
@@ -249,8 +267,8 @@ class Provider(ABC):
             input_tokens=response.input_tokens,
             output_tokens=response.output_tokens,
             cost_usd=response.cost_usd,
-            was_clamped=was_clamped,
             error=error,
+            stderr=response.stderr,
         )
 
     async def chat_json(

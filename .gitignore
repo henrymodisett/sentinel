@@ -53,6 +53,7 @@ uv.lock
 .sentinel/proposals/
 .sentinel/executions/
 .sentinel/reviews/
+.sentinel/runs/
 .sentinel/domain_brief.md
 
 # Test coverage

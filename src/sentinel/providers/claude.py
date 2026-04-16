@@ -41,7 +41,8 @@ class ClaudeProvider(Provider):
     async def chat(self, prompt: str, system_prompt: str | None = None) -> ChatResponse:
         import time as _time
 
-        from sentinel.budget_ctx import clamp_timeout
+        if (resp := self._abort_if_budget_exhausted()):
+            return resp
 
         # chat() is read-only — no tools, no file writes, no terminal.
         # For agentic code execution with full tools, use code() instead.
@@ -55,7 +56,6 @@ class ClaudeProvider(Provider):
         if system_prompt:
             args.extend(["--system-prompt", system_prompt])
 
-        was_clamped = clamp_timeout(self.timeout_sec) < self.timeout_sec
         started = _time.perf_counter()
         try:
             result = await run_cli_async(
@@ -65,20 +65,31 @@ class ClaudeProvider(Provider):
             response = ChatResponse(
                 content=f"Error: Claude CLI timed out after {self.timeout_sec}s",
                 provider=self.name,
+                stderr=f"(timeout after {self.timeout_sec}s — no stderr captured)",
             )
-            self._journal_call(started, response, was_clamped, error="timeout")
-            return response
-        if result.returncode != 0:
-            response = ChatResponse(
-                content=f"Error: {result.stderr.strip()}", provider=self.name,
-            )
-            self._journal_call(started, response, was_clamped, error="non-zero exit")
+            self._journal_call(started, response, error="timeout")
             return response
 
-        data = parse_json_safe(result.stdout)
+        stderr = result.stderr or ""
+        stdout = result.stdout or ""
+
+        if result.returncode != 0:
+            response = ChatResponse(
+                content=f"Error: {stderr.strip()}",
+                provider=self.name,
+                stderr=stderr,
+                raw_stdout=stdout,
+            )
+            self._journal_call(started, response, error="non-zero exit")
+            return response
+
+        data = parse_json_safe(stdout)
         if not data:
-            response = ChatResponse(content=result.stdout, provider=self.name)
-            self._journal_call(started, response, was_clamped, error="parse failure")
+            response = ChatResponse(
+                content=stdout, provider=self.name,
+                stderr=stderr, raw_stdout=stdout,
+            )
+            self._journal_call(started, response, error="parse failure")
             return response
 
         # Claude CLI returns is_error=true for auth failures etc.
@@ -86,8 +97,10 @@ class ClaudeProvider(Provider):
             response = ChatResponse(
                 content=f"Error: {data.get('result', 'unknown error')}",
                 provider=self.name,
+                stderr=stderr,
+                raw_stdout=stdout,
             )
-            self._journal_call(started, response, was_clamped, error="cli is_error")
+            self._journal_call(started, response, error="cli is_error")
             return response
 
         usage = data.get("usage", {})
@@ -100,8 +113,10 @@ class ClaudeProvider(Provider):
             cost_usd=data.get("total_cost_usd", 0.0),
             duration_ms=data.get("duration_ms", 0),
             session_id=data.get("session_id"),
+            stderr=stderr,
+            raw_stdout=stdout,
         )
-        self._journal_call(started, response, was_clamped)
+        self._journal_call(started, response)
         return response
 
     # Note: we tried Claude CLI's --json-schema flag but it hangs indefinitely
@@ -117,7 +132,8 @@ class ClaudeProvider(Provider):
         """
         import time as _time
 
-        from sentinel.budget_ctx import clamp_timeout
+        if (resp := self._abort_if_budget_exhausted()):
+            return resp
 
         # `-p` (print) mode blocks Edit/Write/Bash by default, which
         # surfaces as permission_denials in the JSON output and an
@@ -134,14 +150,13 @@ class ClaudeProvider(Provider):
             "--dangerously-skip-permissions",
             "--no-session-persistence",
         ]
-        was_clamped = clamp_timeout(self.timeout_sec) < self.timeout_sec
         started = _time.perf_counter()
 
         # Many early-return paths below — wrap _journal_call to keep
         # bookkeeping consistent without a try/finally that would obscure
         # the existing error-handling structure.
         def _finalize(response: ChatResponse, error: str | None = None) -> ChatResponse:
-            self._journal_call(started, response, was_clamped, error=error)
+            self._journal_call(started, response, error=error)
             return response
 
         try:

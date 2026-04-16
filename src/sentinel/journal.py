@@ -37,6 +37,12 @@ from pathlib import Path  # noqa: TC003 — runtime use for fs writes
 
 logger = logging.getLogger(__name__)
 
+# Stderr is rendered into the journal markdown only for failed calls. We
+# truncate at render time (not at capture) so any future tooling can read
+# the full payload from the in-memory ProviderCall, while the on-disk
+# markdown stays a sane size.
+_STDERR_RENDER_LIMIT = 2048
+
 
 @dataclass
 class PhaseRecord:
@@ -63,8 +69,13 @@ class ProviderCall:
     input_tokens: int = 0
     output_tokens: int = 0
     cost_usd: float = 0.0
-    was_clamped: bool = False
     error: str | None = None
+    # Raw stderr from the provider CLI (subprocess) or HTTP error body.
+    # Populated whenever the provider has it — captures the actual diagnostic
+    # text that lets us debug non-zero exits without re-running the call.
+    # Truncated at render time, not at capture, so we keep the full payload
+    # available in memory for any tooling that wants it.
+    stderr: str = ""
 
 
 @dataclass
@@ -219,7 +230,9 @@ class Journal:
     def _render(self) -> str:
         total_cost = sum(c.cost_usd for c in self.provider_calls)
         total_duration = (self.ended_at or time.time()) - self.started_at
-        clamped_count = sum(1 for c in self.provider_calls if c.was_clamped)
+        skipped_count = sum(
+            1 for c in self.provider_calls if c.error == "budget_exhausted"
+        )
         started = datetime.fromtimestamp(self.started_at).strftime(
             "%Y-%m-%d %H:%M:%S",
         )
@@ -235,7 +248,7 @@ class Journal:
             f"**Total time:** {total_duration:.1f}s  "
             f"**Total cost:** ${total_cost:.4f}  "
             f"**Provider calls:** {len(self.provider_calls)} "
-            f"({clamped_count} clamped)",
+            f"({skipped_count} skipped — budget exhausted)",
             "",
         ]
 
@@ -289,12 +302,31 @@ class Journal:
                     "in": c.input_tokens,
                     "out": c.output_tokens,
                     "cost": round(c.cost_usd, 6),
-                    "clamped": c.was_clamped,
                 }
                 if c.error:
                     payload["error"] = c.error
                 lines.append(json.dumps(payload))
             lines += ["```", ""]
+
+            errors_with_stderr = [
+                c for c in self.provider_calls if c.error and c.stderr
+            ]
+            if errors_with_stderr:
+                lines += ["## Provider errors", ""]
+                for c in errors_with_stderr:
+                    truncated = c.stderr[:_STDERR_RENDER_LIMIT]
+                    if len(c.stderr) > _STDERR_RENDER_LIMIT:
+                        truncated += (
+                            f"\n... [truncated {len(c.stderr) - _STDERR_RENDER_LIMIT} bytes]"
+                        )
+                    lines += [
+                        f"### {c.phase} — {c.provider}/{c.model} ({c.error})",
+                        "",
+                        "```",
+                        truncated,
+                        "```",
+                        "",
+                    ]
 
         return "\n".join(lines)
 
@@ -342,9 +374,9 @@ def record_provider_call(
     input_tokens: int = 0,
     output_tokens: int = 0,
     cost_usd: float = 0.0,
-    was_clamped: bool = False,
     error: str | None = None,
     phase: str | None = None,
+    stderr: str = "",
 ) -> None:
     """Append a provider call to the active journal. No-op if no
     journal is set (e.g., a `sentinel scan` invocation outside the
@@ -364,6 +396,6 @@ def record_provider_call(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cost_usd=cost_usd,
-        was_clamped=was_clamped,
         error=error,
+        stderr=stderr,
     ))

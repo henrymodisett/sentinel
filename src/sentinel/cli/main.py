@@ -22,6 +22,7 @@ def main() -> None:
         sentinel work             — do whatever the project needs
         sentinel work --budget 10m   — time-bounded
         sentinel work --budget $5    — money-bounded
+        sentinel work --budget 10m,$5  — time AND money bounded
         sentinel work --dry-run      — plan without executing
 
     Advanced (for when you want granular control):
@@ -42,7 +43,11 @@ def main() -> None:
 @click.option(
     "--budget", "-b",
     default=None,
-    help="Budget cap. Money ($5, 10.50) or time (10m, 1h, 30s).",
+    help=(
+        "Budget cap. Money ($5, 10.50), time (10m, 1h, 30s), or both "
+        "comma-separated (10m,$5). For free providers (Gemini OAuth, "
+        "Ollama) the money cap is naturally a no-op since calls cost $0."
+    ),
 )
 @click.option(
     "--every", "-e",

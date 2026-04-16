@@ -127,3 +127,23 @@ def isolated_home(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.chdir(tmp_path)
     return tmp_path
+
+
+@pytest.fixture(autouse=True)
+def _reset_budget_state():
+    """Reset both budget ContextVars (time deadline + money cap) around
+    every test.
+
+    set_cycle_deadline / set_cycle_money_cap write to module-level
+    ContextVars. Without an autouse reset, a test that exhausts either
+    dimension leaks that state into the next test in collection order —
+    so a provider's _abort_if_budget_exhausted short-circuits a call
+    that the next test expected to dispatch. Cheap to reset; impossible
+    to debug if you don't.
+    """
+    from sentinel.budget_ctx import set_cycle_deadline, set_cycle_money_cap
+    set_cycle_deadline(None)
+    set_cycle_money_cap(None)
+    yield
+    set_cycle_deadline(None)
+    set_cycle_money_cap(None)

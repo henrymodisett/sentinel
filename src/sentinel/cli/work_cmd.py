@@ -156,35 +156,44 @@ def _format_duration(seconds: float) -> str:
 def _parse_budget(budget_str: str | None) -> tuple[float | None, int | None]:
     """Parse --budget string. Returns (money_usd, time_seconds).
 
+    The two dimensions are independent — either can be set, both can be
+    set together (comma-separated), or neither.
+
     Examples:
-      "$5"    -> (5.0, None)
-      "5"     -> (5.0, None) — assume money if plain number
-      "10m"   -> (None, 600)
-      "1h"    -> (None, 3600)
-      "30s"   -> (None, 30)
+      "$5"        -> (5.0, None)
+      "5"         -> (5.0, None) — assume money if plain number
+      "10m"       -> (None, 600)
+      "1h"        -> (None, 3600)
+      "30s"       -> (None, 30)
+      "10m,$5"    -> (5.0, 600) — both
+      "$5,10m"    -> (5.0, 600) — order doesn't matter
     """
     if not budget_str:
         return None, None
 
-    s = budget_str.strip()
+    money_usd: float | None = None
+    time_seconds: int | None = None
 
-    # Money: $5, 5.50
-    money_match = re.match(r"^\$?(\d+(?:\.\d+)?)$", s)
-    if money_match:
-        return float(money_match.group(1)), None
-
-    # Time: 10m, 1h, 30s, 2h30m (simple suffix parse)
-    time_match = re.match(r"^(\d+)\s*([smh])$", s)
-    if time_match:
-        n = int(time_match.group(1))
-        unit = time_match.group(2)
-        seconds = {"s": n, "m": n * 60, "h": n * 3600}[unit]
-        return None, seconds
-
-    raise click.BadParameter(
-        f"Could not parse budget '{budget_str}'. "
-        f"Examples: '$5', '10m', '1h', '30s'"
-    )
+    # Split on comma to allow combined "10m,$5" — each part is parsed
+    # independently, and either dimension can appear in either order.
+    for raw_part in budget_str.split(","):
+        part = raw_part.strip()
+        if not part:
+            continue
+        if (m := re.match(r"^\$?(\d+(?:\.\d+)?)$", part)):
+            money_usd = float(m.group(1))
+            continue
+        if (t := re.match(r"^(\d+)\s*([smh])$", part)):
+            n = int(t.group(1))
+            unit = t.group(2)
+            time_seconds = {"s": n, "m": n * 60, "h": n * 3600}[unit]
+            continue
+        import click as _click
+        raise _click.BadParameter(
+            f"Invalid budget component {part!r}. "
+            f"Use $5 (money), 10m/1h/30s (time), or '10m,$5' (both).",
+        )
+    return money_usd, time_seconds
 
 
 def _latest_scan_age(project: Path) -> timedelta | None:
@@ -260,12 +269,15 @@ async def _run_single_cycle(
     money_budget, time_budget_sec = _parse_budget(budget_str)
     start_time = time.time()
 
-    # Set the cycle deadline so provider subprocess timeouts
-    # (run_cli_async) are clamped to the remaining budget. Without this a
-    # single slow LLM call can blow past `--budget 10m` by another 10
-    # minutes because each provider CLI still uses its own 600s timeout.
-    from sentinel.budget_ctx import set_cycle_deadline
+    # Both budget dimensions are independent — set whichever the user
+    # provided. Providers consult is_budget_exhausted() before each call
+    # and short-circuit when either dimension hits its cap. Time gates
+    # via wall-clock deadline; money gates via the live journal's
+    # accumulated cost (so the cap reflects exactly this cycle's spend,
+    # not the daily total).
+    from sentinel.budget_ctx import set_cycle_deadline, set_cycle_money_cap
     set_cycle_deadline(time_budget_sec)
+    set_cycle_money_cap(money_budget)
 
     console.print(f"\n[bold]Sentinel[/bold] — {project.name}")
     if budget_str:
@@ -297,6 +309,23 @@ async def _run_single_cycle(
     if not config:
         return
 
+    # Pre-flight: any role configured for the local (ollama) provider
+    # needs its model already pulled. Surfacing this as an actionable
+    # `ollama pull X` message is much friendlier than letting the first
+    # provider call fail with a less obvious error from inside a phase.
+    router_for_check = Router(config)
+    missing = router_for_check.missing_local_models()
+    if missing:
+        console.print(
+            "[red]  Missing local models — sentinel can't start until "
+            "they're pulled:[/red]"
+        )
+        for role, model in missing:
+            console.print(
+                f"    {role}: [bold]ollama pull {model}[/bold]"
+            )
+        return
+
     # Prune aged-out run journals before the cycle starts. Silent on
     # the common case (nothing expired), one-line note when something
     # was actually removed. Failing prune doesn't block work.
@@ -325,7 +354,9 @@ async def _run_single_cycle(
     set_current_journal(journal)
 
     # --- Main work loop ---
-    router = Router(config)
+    # Reuse the router built for the pre-flight model check so we don't
+    # initialize providers twice.
+    router = router_for_check
     monitor = Monitor(router)
     coder = Coder(router)
     reviewer = Reviewer(router)

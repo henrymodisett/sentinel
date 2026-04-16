@@ -1,10 +1,22 @@
-"""Tests for cycle-scoped budget clamping of provider subprocess timeouts.
+"""Tests for the cycle-scoped budget gating model.
 
 Dogfood on portfolio_new ran 21.6 minutes on a `--budget 10m` flag
 because each provider CLI still enforced its own 600s timeout
-independent of the cycle budget. These tests lock in the invariant:
-when a cycle deadline is set, no subprocess timeout exceeds the
-remaining time until that deadline.
+independent of the cycle budget. The first fix shrank subprocess
+timeouts dynamically — but a follow-up dogfood on the sentinel repo
+showed that cost zero output: half-finished Gemini calls returned
+nothing for the latency we paid.
+
+The current contract:
+- `set_cycle_deadline(seconds)` sets when the cycle should end.
+- `is_budget_exhausted()` returns True when that deadline has passed.
+- Providers consult `is_budget_exhausted()` BEFORE dispatch and skip
+  the call if True. Subprocess timeouts are NOT clamped — once a call
+  starts, it runs at its full configured timeout.
+
+Worst case: a call started just before the deadline can overshoot by
+up to its provider timeout (~10 min for Gemini). That's a one-shot
+overshoot, not a destructive kill — the next call won't start.
 """
 
 from __future__ import annotations
@@ -15,37 +27,41 @@ import time
 import pytest
 
 from sentinel.budget_ctx import (
-    clamp_timeout,
+    is_budget_exhausted,
     remaining_seconds,
+    remaining_usd,
     set_cycle_deadline,
+    set_cycle_money_cap,
 )
-from sentinel.providers.interface import run_cli_async
+from sentinel.cli.work_cmd import _parse_budget
+from sentinel.providers.interface import (
+    ChatResponse,
+    Provider,
+    ProviderCapabilities,
+    ProviderName,
+    run_cli_async,
+)
 
 
-class TestClampTimeout:
-    def test_no_deadline_returns_base(self) -> None:
+class TestIsBudgetExhausted:
+    def test_no_deadline_never_exhausted(self) -> None:
         set_cycle_deadline(None)
-        assert clamp_timeout(600) == 600
-        assert clamp_timeout(30) == 30
+        assert is_budget_exhausted() is False
 
-    def test_deadline_clamps_below_base(self) -> None:
-        """Remaining < base → we get the remaining time, not the full 600s."""
-        set_cycle_deadline(5)  # 5 seconds from now
-        clamped = clamp_timeout(600)
-        assert 1 <= clamped <= 5
+    def test_deadline_in_future_not_exhausted(self) -> None:
+        set_cycle_deadline(60)  # 60 seconds from now
+        assert is_budget_exhausted() is False
 
-    def test_deadline_above_base_keeps_base(self) -> None:
-        """Remaining > base → still use the provider's configured timeout.
-        We never extend a provider timeout past its configured ceiling."""
-        set_cycle_deadline(3600)  # 1 hour from now
-        assert clamp_timeout(600) == 600
+    def test_deadline_in_past_is_exhausted(self) -> None:
+        set_cycle_deadline(-1)  # 1 second ago
+        assert is_budget_exhausted() is True
 
-    def test_passed_deadline_floors_at_one(self) -> None:
-        """If the deadline is already in the past, clamp to 1s — never 0
-        or negative, which would make asyncio.wait_for fire immediately
-        without letting the CLI produce even a short error output."""
-        set_cycle_deadline(-10)  # 10 seconds ago
-        assert clamp_timeout(600) == 1
+    def test_deadline_at_exactly_zero_is_exhausted(self) -> None:
+        """A deadline that has just hit (0 remaining) counts as exhausted —
+        the next call would start with no budget. Treat 0.0 the same as
+        a passed deadline so we never spawn a doomed subprocess."""
+        set_cycle_deadline(0)
+        assert is_budget_exhausted() is True
 
     def test_remaining_seconds_is_nonnegative(self) -> None:
         set_cycle_deadline(-5)
@@ -58,134 +74,221 @@ class TestClampTimeout:
         assert 9 <= r <= 10
 
 
-class TestRunCliAsyncHonorsBudget:
-    """`run_cli_async` is the choke point for every provider CLI call.
-    Clamping must happen here so all providers inherit the behavior."""
+class TestRunCliAsyncDoesNotClamp:
+    """Subprocess timeouts are now passed through unchanged. The cycle
+    budget is enforced between calls, not by shrinking each subprocess
+    timeout to fit. This guarantees that any call that starts gets to
+    finish — no more zero-output partials."""
 
     @pytest.mark.asyncio
-    async def test_subprocess_timeout_shortened_by_budget(self) -> None:
-        """A provider call with a 60s base timeout must time out at ~2s
-        when only 2s of budget remain — not run to the full 60s."""
-        set_cycle_deadline(2)
+    async def test_subprocess_runs_to_full_timeout_regardless_of_budget(
+        self,
+    ) -> None:
+        """Even with the cycle deadline already passed, a call that's
+        started uses its own timeout. The protection is to not start
+        the call in the first place (provider-level), not to kill it
+        mid-flight (run_cli_async-level)."""
+        set_cycle_deadline(-10)  # cycle is "over"
         start = time.time()
+        # /bin/sleep 2 with a 1s timeout — should hit the 1s timeout,
+        # NOT a clamped 0s timeout, NOT the cycle deadline.
         with pytest.raises(subprocess.TimeoutExpired) as exc_info:
-            # /bin/sleep 60 — would run 60s without budget clamping
-            await run_cli_async(["/bin/sleep", "60"], timeout=60)
+            await run_cli_async(["/bin/sleep", "2"], timeout=1)
         elapsed = time.time() - start
 
-        # Should fail within ~3s (budget + small slack for process spawn)
-        assert elapsed < 5.0, (
-            f"subprocess ran {elapsed:.1f}s on a 2s budget — budget "
-            f"clamp not applied"
-        )
-        # And the TimeoutExpired should carry the clamped timeout, not
-        # the original 60s base.
-        assert exc_info.value.timeout <= 5
+        # The call ran for ~1 second (its own timeout), proving the
+        # subprocess timeout was respected as-passed.
+        assert 0.5 <= elapsed <= 2.5
+        assert exc_info.value.timeout == 1
 
     @pytest.mark.asyncio
-    async def test_no_budget_uses_base_timeout(self) -> None:
-        """Without a cycle deadline, behavior is unchanged — the base
-        timeout applies. This is the sentinel scan / dev-test path."""
+    async def test_no_budget_set_uses_passed_timeout(self) -> None:
+        """The dev-test path with no cycle deadline behaves identically
+        — the timeout argument is honored as given."""
         set_cycle_deadline(None)
         start = time.time()
         with pytest.raises(subprocess.TimeoutExpired) as exc_info:
             await run_cli_async(["/bin/sleep", "60"], timeout=1)
         elapsed = time.time() - start
 
-        assert elapsed < 3.0  # should hit the 1s base timeout
+        assert elapsed < 3.0
         assert exc_info.value.timeout == 1
 
 
-class TestLocalProviderHonorsBudget:
-    """LocalProvider (Ollama) goes over HTTP, not run_cli_async. It must
-    consult the budget directly or cycle-scoped timeouts don't cover the
-    local monitor path — which is the default preset."""
+class TestProviderShortCircuitsWhenBudgetExhausted:
+    """Every provider's chat()/code() entrypoint must check
+    is_budget_exhausted() before dispatching the call. A short-circuited
+    call appears in the journal as error="budget_exhausted" so it's
+    visible — silently skipping would hide the budget overrun."""
 
     @pytest.mark.asyncio
-    async def test_local_provider_clamps_http_timeout(
-        self, monkeypatch,
+    async def test_provider_returns_error_response_when_budget_gone(
+        self,
     ) -> None:
-        """Patch httpx.AsyncClient to record the timeout it was built
-        with. Proves the budget contextvar was consulted instead of the
-        old hardcoded 300s value."""
-        from sentinel.providers.local import LocalProvider
+        """The shared `_abort_if_budget_exhausted` helper produces a
+        clearly-labeled ChatResponse without spawning a subprocess.
+        Any concrete provider's chat() should use it as the first
+        line of the method."""
 
-        set_cycle_deadline(3)  # 3 seconds remaining
-        recorded: dict[str, float] = {}
+        class FakeProvider(Provider):
+            name = ProviderName.GEMINI
+            cli_command = "fake"
+            capabilities = ProviderCapabilities(chat=True)
+            calls_made = 0
 
-        class FakeAsyncClient:
-            def __init__(self, timeout: float = 0, **_: object) -> None:
-                recorded["timeout"] = timeout
+            async def chat(self, prompt, system_prompt=None):  # noqa: ANN001, ANN201
+                if (resp := self._abort_if_budget_exhausted()):
+                    return resp
+                self.calls_made += 1
+                return ChatResponse(content="ok", provider=self.name)
 
-            async def __aenter__(self) -> FakeAsyncClient:
-                return self
+            def detect(self):  # noqa: ANN201
+                from sentinel.providers.interface import ProviderStatus
+                return ProviderStatus(installed=True, authenticated=True)
 
-            async def __aexit__(self, *_: object) -> None:
-                return None
-
-            async def post(self, *_: object, **__: object) -> object:
-                class R:
-                    status_code = 200
-                    @staticmethod
-                    def json() -> dict:
-                        return {
-                            "message": {"content": "hi"},
-                            "prompt_eval_count": 1,
-                            "eval_count": 1,
-                            "total_duration": 1_000_000,
-                        }
-                return R()
-
-        monkeypatch.setattr(
-            "sentinel.providers.local.httpx.AsyncClient", FakeAsyncClient,
-        )
-
-        provider = LocalProvider(model="fake-model")
-        await provider.chat("hi")
-
-        assert "timeout" in recorded, "httpx client was not constructed"
-        assert recorded["timeout"] <= 3, (
-            f"LocalProvider HTTP timeout was {recorded['timeout']}s "
-            f"on a 3s budget — clamp not applied"
-        )
+        set_cycle_deadline(-1)  # already exhausted
+        try:
+            provider = FakeProvider()
+            response = await provider.chat("anything")
+            assert provider.calls_made == 0, (
+                "exhausted budget must short-circuit before any work is done"
+            )
+            assert response.is_error is True
+            assert "budget exhausted" in response.content.lower()
+        finally:
+            set_cycle_deadline(None)
 
     @pytest.mark.asyncio
-    async def test_local_provider_returns_error_on_timeout(
-        self, monkeypatch,
+    async def test_provider_proceeds_when_budget_remains(self) -> None:
+        """Inverse of the above: with budget remaining, the provider
+        runs its real path — the helper returns None and the caller
+        falls through to the actual dispatch."""
+
+        class FakeProvider(Provider):
+            name = ProviderName.GEMINI
+            cli_command = "fake"
+            capabilities = ProviderCapabilities(chat=True)
+            calls_made = 0
+
+            async def chat(self, prompt, system_prompt=None):  # noqa: ANN001, ANN201
+                if (resp := self._abort_if_budget_exhausted()):
+                    return resp
+                self.calls_made += 1
+                return ChatResponse(content="ok", provider=self.name)
+
+            def detect(self):  # noqa: ANN201
+                from sentinel.providers.interface import ProviderStatus
+                return ProviderStatus(installed=True, authenticated=True)
+
+        set_cycle_deadline(60)  # plenty of budget
+        try:
+            provider = FakeProvider()
+            response = await provider.chat("anything")
+            assert provider.calls_made == 1
+            assert response.content == "ok"
+            assert response.is_error is False
+        finally:
+            set_cycle_deadline(None)
+
+
+class TestParseBudget:
+    """Money and time are independent dimensions. The user can specify
+    either, or both via comma-separation. Order doesn't matter."""
+
+    def test_money_only(self) -> None:
+        assert _parse_budget("$5") == (5.0, None)
+        assert _parse_budget("5") == (5.0, None)
+        assert _parse_budget("10.50") == (10.5, None)
+
+    def test_time_only(self) -> None:
+        assert _parse_budget("10m") == (None, 600)
+        assert _parse_budget("1h") == (None, 3600)
+        assert _parse_budget("30s") == (None, 30)
+
+    def test_combined_money_first(self) -> None:
+        assert _parse_budget("$5,10m") == (5.0, 600)
+
+    def test_combined_time_first(self) -> None:
+        assert _parse_budget("10m,$5") == (5.0, 600)
+
+    def test_combined_with_whitespace(self) -> None:
+        """Whitespace around the comma should be tolerated — common copy-paste."""
+        assert _parse_budget("10m , $5") == (5.0, 600)
+
+    def test_empty_returns_none(self) -> None:
+        assert _parse_budget(None) == (None, None)
+        assert _parse_budget("") == (None, None)
+
+    def test_garbage_raises(self) -> None:
+        import click as _click
+        with pytest.raises(_click.BadParameter):
+            _parse_budget("nonsense")
+        with pytest.raises(_click.BadParameter):
+            _parse_budget("10x")  # invalid time unit
+
+
+class TestMoneyCapExhaustion:
+    """Money cap is checked against the live journal's accumulated cost.
+    A run with no cost spent reports False; once cost ≥ cap, True."""
+
+    def test_no_cap_never_exhausted(self) -> None:
+        set_cycle_money_cap(None)
+        assert is_budget_exhausted() is False
+        assert remaining_usd() is None
+
+    def test_cap_with_no_journal_reports_full_remaining(self) -> None:
+        """Outside a cycle (no journal), cap is set but nothing is
+        spent — exhausted is False, remaining is the full cap."""
+        set_cycle_money_cap(10.0)
+        try:
+            assert is_budget_exhausted() is False
+            assert remaining_usd() == 10.0
+        finally:
+            set_cycle_money_cap(None)
+
+    def test_cap_exhausted_when_journal_total_meets_cap(
+        self, tmp_path,
     ) -> None:
-        """httpx timeouts must become error ChatResponses, not raise.
-
-        The CLI providers all translate timeouts into an error-content
-        ChatResponse so the scan-failure + partial-persist path can
-        handle them uniformly. If LocalProvider leaked httpx.TimeoutException
-        up through Monitor.assess, the partial scan writer would never run.
-        """
-        import httpx as _httpx
-
-        from sentinel.providers.local import LocalProvider
-
-        class TimingOutAsyncClient:
-            def __init__(self, **_: object) -> None:
-                pass
-
-            async def __aenter__(self) -> TimingOutAsyncClient:
-                return self
-
-            async def __aexit__(self, *_: object) -> None:
-                return None
-
-            async def post(self, *_: object, **__: object) -> object:
-                raise _httpx.ReadTimeout("simulated")
-
-        monkeypatch.setattr(
-            "sentinel.providers.local.httpx.AsyncClient", TimingOutAsyncClient,
+        """With a live journal whose total_cost reaches the cap,
+        is_budget_exhausted returns True so the next provider call
+        short-circuits."""
+        from sentinel.journal import (
+            Journal,
+            ProviderCall,
+            set_current_journal,
         )
 
-        provider = LocalProvider(model="fake-model")
-        set_cycle_deadline(1)
-        resp = await provider.chat("hi")
-
-        # Must not raise — must return a ChatResponse with an error marker.
-        assert "timed out" in resp.content.lower(), (
-            f"expected timeout error content, got: {resp.content!r}"
+        j = Journal(
+            project_path=tmp_path, project_name="t", branch="main",
+            budget_str="$1",
         )
+        j.record_provider_call(ProviderCall(
+            phase="scan", provider="claude", model="opus",
+            latency_ms=100, cost_usd=0.50,
+        ))
+        j.record_provider_call(ProviderCall(
+            phase="scan", provider="claude", model="opus",
+            latency_ms=100, cost_usd=0.55,
+        ))
+
+        set_current_journal(j)
+        set_cycle_money_cap(1.0)
+        try:
+            assert is_budget_exhausted() is True
+            assert remaining_usd() == 0.0
+        finally:
+            set_current_journal(None)
+            set_cycle_money_cap(None)
+
+    def test_time_and_money_caps_are_independent(self) -> None:
+        """Setting one dimension does not implicitly set the other.
+        A user who specifies only `--budget 5m` should not get any
+        money enforcement (only the daily limit applies, separately)."""
+        set_cycle_deadline(60)
+        set_cycle_money_cap(None)
+        try:
+            assert is_budget_exhausted() is False
+            assert remaining_seconds() is not None
+            assert remaining_usd() is None
+        finally:
+            set_cycle_deadline(None)

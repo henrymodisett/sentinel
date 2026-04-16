@@ -41,18 +41,13 @@ class LocalProvider(Provider):
     async def chat(self, prompt: str, system_prompt: str | None = None) -> ChatResponse:
         import time as _time
 
+        if (resp := self._abort_if_budget_exhausted()):
+            return resp
+
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
-
-        # Ollama goes over HTTP, not run_cli_async, so it needs to consult
-        # the cycle deadline directly. Without this clamp, a slow local
-        # model call can blow past `sentinel work --budget 10m` even
-        # though the CLI providers (Claude/Gemini/Codex) are bounded.
-        from sentinel.budget_ctx import clamp_timeout
-        http_timeout = clamp_timeout(self.timeout_sec)
-        was_clamped = http_timeout < self.timeout_sec
 
         # Return an error ChatResponse on timeout/connection error rather
         # than raising. The CLI providers all do this (TimeoutExpired →
@@ -61,7 +56,7 @@ class LocalProvider(Provider):
         # traceback out of Monitor.assess and bypass _persist_scan.
         started = _time.perf_counter()
         try:
-            async with httpx.AsyncClient(timeout=http_timeout) as client:
+            async with httpx.AsyncClient(timeout=self.timeout_sec) as client:
                 resp = await client.post(
                     f"{self.endpoint}/api/chat",
                     json={
@@ -74,25 +69,29 @@ class LocalProvider(Provider):
             response = ChatResponse(
                 content=(
                     f"Error: Ollama HTTP call timed out after "
-                    f"{http_timeout}s"
+                    f"{self.timeout_sec}s"
                 ),
                 provider=self.name,
+                stderr=f"(timeout after {self.timeout_sec}s — no response body)",
             )
-            self._journal_call(started, response, was_clamped, error="timeout")
+            self._journal_call(started, response, error="timeout")
             return response
         except httpx.RequestError as e:
             response = ChatResponse(
                 content=f"Error: Ollama HTTP call failed: {e}",
                 provider=self.name,
+                stderr=str(e),
             )
-            self._journal_call(started, response, was_clamped, error="request error")
+            self._journal_call(started, response, error="request error")
             return response
 
         if resp.status_code != 200:
             response = ChatResponse(
-                content=f"Error: Ollama returned {resp.status_code}", provider=self.name,
+                content=f"Error: Ollama returned {resp.status_code}",
+                provider=self.name,
+                stderr=resp.text[:4096],
             )
-            self._journal_call(started, response, was_clamped, error=f"http {resp.status_code}")
+            self._journal_call(started, response, error=f"http {resp.status_code}")
             return response
 
         data = resp.json()
@@ -105,7 +104,7 @@ class LocalProvider(Provider):
             output_tokens=data.get("eval_count", 0),
             duration_ms=data.get("total_duration", 0) // 1_000_000,  # nanoseconds → ms
         )
-        self._journal_call(started, response, was_clamped)
+        self._journal_call(started, response)
         return response
 
     def detect(self) -> ProviderStatus:

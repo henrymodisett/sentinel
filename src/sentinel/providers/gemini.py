@@ -43,7 +43,8 @@ class GeminiProvider(Provider):
     ) -> ChatResponse:
         import time as _time
 
-        from sentinel.budget_ctx import clamp_timeout
+        if (resp := self._abort_if_budget_exhausted()):
+            return resp
 
         # Gemini CLI doesn't have a --system-prompt flag, so prepend it
         full_prompt = prompt
@@ -61,9 +62,6 @@ class GeminiProvider(Provider):
         if self.model and self.model != "auto":
             args.extend(["-m", self.model])
 
-        # Snapshot clamp state BEFORE the call so elapsed time inside
-        # the call doesn't change whether we report it as clamped.
-        was_clamped = clamp_timeout(self.timeout_sec) < self.timeout_sec
         started = _time.perf_counter()
         try:
             result = await run_cli_async(
@@ -73,23 +71,35 @@ class GeminiProvider(Provider):
             response = ChatResponse(
                 content=f"Error: Gemini CLI timed out after {self.timeout_sec}s",
                 provider=self.name,
+                stderr=f"(timeout after {self.timeout_sec}s — no stderr captured)",
             )
-            self._journal_call(started, response, was_clamped, error="timeout")
-            return response
-        if result.returncode != 0:
-            response = ChatResponse(
-                content=f"Error: {result.stderr.strip()}", provider=self.name,
-            )
-            self._journal_call(started, response, was_clamped, error="non-zero exit")
+            self._journal_call(started, response, error="timeout")
             return response
 
-        data = parse_json_safe(result.stdout)
+        stderr = result.stderr or ""
+        stdout = result.stdout or ""
+
+        if result.returncode != 0:
+            response = ChatResponse(
+                content=f"Error: {stderr.strip()}",
+                provider=self.name,
+                stderr=stderr,
+                raw_stdout=stdout,
+            )
+            self._journal_call(started, response, error="non-zero exit")
+            return response
+
+        data = parse_json_safe(stdout)
         if not data:
             # Gemini CLI sometimes outputs plain text
             response = ChatResponse(
-                content=result.stdout.strip(), provider=self.name, model=self.model,
+                content=stdout.strip(),
+                provider=self.name,
+                model=self.model,
+                stderr=stderr,
+                raw_stdout=stdout,
             )
-            self._journal_call(started, response, was_clamped)
+            self._journal_call(started, response)
             return response
 
         # Extract token counts from stats
@@ -108,8 +118,10 @@ class GeminiProvider(Provider):
             input_tokens=total_input,
             output_tokens=total_output,
             session_id=data.get("session_id"),
+            stderr=stderr,
+            raw_stdout=stdout,
         )
-        self._journal_call(started, response, was_clamped)
+        self._journal_call(started, response)
         return response
 
     async def research(self, prompt: str) -> ChatResponse:
