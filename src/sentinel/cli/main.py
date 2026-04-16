@@ -152,11 +152,21 @@ def cycle(max_items: int, dry_run: bool) -> None:
 
 
 @main.command()
-def cost() -> None:
+@click.option(
+    "--by-role", is_flag=True,
+    help="Aggregate spend by role (monitor/researcher/coder/reviewer) "
+         "across recent cycles instead of by date.",
+)
+@click.option(
+    "--cycles", "-n", type=int, default=20,
+    help="How many recent cycles to aggregate when --by-role is set "
+         "(default 20).",
+)
+def cost(by_role: bool, cycles: int) -> None:
     """Show spend history and budget status."""
     from sentinel.cli.cost_cmd import run_cost
 
-    run_cost()
+    run_cost(by_role=by_role, cycles=cycles)
 
 
 @main.group(invoke_without_command=False)

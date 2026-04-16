@@ -1,5 +1,7 @@
 """Tests for CLI commands."""
 
+from pathlib import Path  # noqa: TC003 — runtime use via tmp_path
+
 from click.testing import CliRunner
 
 from sentinel.cli.main import main
@@ -88,6 +90,73 @@ class TestStatusCommand:
         assert result.exit_code == 0, result.output
         assert "State:" in result.output
         assert "Spend (today):" in result.output
+
+
+class TestCostByRole:
+    """`sentinel cost --by-role` aggregates spend across recent
+    journals. Single-cycle by-role tables already work (rendered into
+    each journal); this rolls them up across runs."""
+
+    def _seed(self, project: Path, journals: list[str]) -> None:
+        runs = project / ".sentinel" / "runs"
+        runs.mkdir(parents=True, exist_ok=True)
+        for i, body in enumerate(journals):
+            (runs / f"2026-04-16-{i:06d}.md").write_text(body)
+
+    def _config(self, project: Path) -> None:
+        sentinel_dir = project / ".sentinel"
+        sentinel_dir.mkdir(exist_ok=True)
+        (sentinel_dir / "config.toml").write_text(
+            f'[project]\nname = "test"\npath = "{project}"\ntype = "python"\n'
+            '[roles.monitor]\nprovider = "gemini"\nmodel = "gemini-2.5-flash"\n'
+            '[roles.researcher]\nprovider = "gemini"\nmodel = "gemini-2.5-pro"\n'
+            '[roles.planner]\nprovider = "claude"\nmodel = "claude-opus-4-6"\n'
+            '[roles.coder]\nprovider = "claude"\nmodel = "claude-sonnet-4-6"\n'
+            '[roles.reviewer]\nprovider = "gemini"\nmodel = "gemini-2.5-pro"\n'
+            "[budget]\ndaily_limit_usd = 15.0\nwarn_at_usd = 10.0\n",
+        )
+
+    def test_aggregates_cost_per_role_across_journals(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        self._config(tmp_path)
+        # Two journals, each with calls tagged by role
+        self._seed(tmp_path, [
+            "## Provider calls\n\n```jsonl\n"
+            '{"phase":"scan","provider":"gemini","model":"flash","latency_ms":100,'
+            '"in":1000,"out":200,"cost":0.01,"role":"monitor"}\n'
+            '{"phase":"scan","provider":"gemini","model":"pro","latency_ms":300,'
+            '"in":500,"out":100,"cost":0.05,"role":"researcher"}\n'
+            "```\n",
+            "## Provider calls\n\n```jsonl\n"
+            '{"phase":"execute","provider":"claude","model":"sonnet","latency_ms":2000,'
+            '"in":5000,"out":2000,"cost":0.10,"role":"coder"}\n'
+            '{"phase":"scan","provider":"gemini","model":"flash","latency_ms":50,'
+            '"in":1500,"out":300,"cost":0.015,"role":"monitor"}\n'
+            "```\n",
+        ])
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(main, ["cost", "--by-role"])
+        assert result.exit_code == 0, result.output
+        # All three roles appear; costs aggregated
+        assert "monitor" in result.output
+        assert "researcher" in result.output
+        assert "coder" in result.output
+        # Aggregate: monitor = 0.01 + 0.015 = 0.025
+        assert "$0.0250" in result.output
+        # Total = 0.01 + 0.05 + 0.10 + 0.015 = 0.175
+        assert "$0.1750" in result.output
+
+    def test_no_journals_prints_friendly_message(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        self._config(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(main, ["cost", "--by-role"])
+        assert result.exit_code == 0
+        assert "No run journals" in result.output
 
 
 class TestCycleMaxItemsRefusal:
