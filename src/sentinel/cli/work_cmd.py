@@ -583,19 +583,113 @@ async def _run_single_cycle(
         project, config.budget.daily_limit_usd, config.budget.warn_at_usd,
     )
     console.print()
-    console.print(
-        Panel(
-            f"Items executed: {items_executed}\n"
-            f"  • Approved: {items_approved}\n"
-            f"  • Failed: {items_failed}\n\n"
-            f"Time: {int(elapsed)}s\n"
-            f"Spend today: ${budget_now.today_spent_usd:.4f} / "
-            f"${budget_now.daily_limit_usd:.2f}",
-            title="[bold]Done[/bold]",
-            border_style="cyan",
+
+    failure_summary = _build_failure_summary(journal)
+    if failure_summary:
+        console.print(
+            Panel(
+                failure_summary,
+                title="[bold red]Cycle failed[/bold red]",
+                border_style="red",
+            )
         )
-    )
+    else:
+        console.print(
+            Panel(
+                f"Items executed: {items_executed}\n"
+                f"  • Approved: {items_approved}\n"
+                f"  • Failed: {items_failed}\n\n"
+                f"Time: {int(elapsed)}s\n"
+                f"Spend today: ${budget_now.today_spent_usd:.4f} / "
+                f"${budget_now.daily_limit_usd:.2f}",
+                title="[bold]Done[/bold]",
+                border_style="cyan",
+            )
+        )
     console.print()
+
+
+def _build_failure_summary(journal) -> str:  # noqa: ANN001
+    """Return a user-facing failure summary, or "" if the cycle did
+    not fail. Pulls the failing phase + last erroring provider call
+    from the journal and matches the error pattern to a suggested next
+    action so the user doesn't have to grep the journal to know what
+    to try next."""
+    failed_phase = next(
+        (p for p in reversed(journal.phases) if p.status == "failed"),
+        None,
+    )
+    erroring_call = next(
+        (c for c in reversed(journal.provider_calls) if c.error),
+        None,
+    )
+    exit_reason = journal.exit_reason or ""
+
+    is_failure = (
+        failed_phase is not None
+        or exit_reason.startswith(("scan_failed", "error:", "budget:"))
+        or exit_reason in ("loop_ended_unexpectedly", "interrupted")
+    )
+    if not is_failure:
+        return ""
+
+    lines: list[str] = []
+    if failed_phase:
+        lines.append(f"Phase: [bold]{failed_phase.name}[/bold]")
+        if failed_phase.error:
+            lines.append(f"Reason: {failed_phase.error}")
+    elif exit_reason:
+        lines.append(f"Exit: {exit_reason}")
+
+    if erroring_call:
+        lines.append(
+            f"Last call: {erroring_call.role or '?'} via "
+            f"{erroring_call.provider}/{erroring_call.model} "
+            f"({erroring_call.error})"
+        )
+        if erroring_call.routed_via:
+            lines.append(
+                f"Routing rule: [dim]{erroring_call.routed_via}[/dim]"
+            )
+
+    suggestion = _suggest_next_action(
+        exit_reason, failed_phase, erroring_call,
+    )
+    if suggestion:
+        lines += ["", f"Try: [bold]{suggestion}[/bold]"]
+
+    return "\n".join(lines)
+
+
+def _suggest_next_action(  # noqa: ANN001
+    exit_reason: str, failed_phase, erroring_call,
+) -> str:
+    """Map a failure pattern to one suggested next action. Patterns
+    are keyed off (a) journal.exit_reason and (b) the last erroring
+    provider call's error classification — both are stable strings
+    set by code we control."""
+    if exit_reason.startswith("budget:"):
+        return "increase --budget or check `sentinel cost`"
+    if erroring_call and erroring_call.error == "budget_exhausted":
+        return "increase --budget or set a money cap with --budget $N"
+    if erroring_call and erroring_call.error == "timeout":
+        return (
+            "increase --budget for more time, or pin the model to a "
+            "faster one in .sentinel/config.toml"
+        )
+    if erroring_call and erroring_call.error == "non-zero exit":
+        return (
+            "check `sentinel routing show` — the model that failed may "
+            "warrant a new routing rule (DEFAULT_RULES in providers/router.py)"
+        )
+    if erroring_call and erroring_call.error == "cli is_error":
+        return "check provider auth with `sentinel providers`"
+    if failed_phase and failed_phase.name == "scan":
+        return (
+            "scan failure: check `.sentinel/scans/partial/` for any "
+            "rescued lens evaluations"
+        )
+    return ""
 
 
 def _check_all_budgets(
