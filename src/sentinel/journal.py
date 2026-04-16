@@ -69,7 +69,6 @@ class ProviderCall:
     input_tokens: int = 0
     output_tokens: int = 0
     cost_usd: float = 0.0
-    was_clamped: bool = False
     error: str | None = None
     # Raw stderr from the provider CLI (subprocess) or HTTP error body.
     # Populated whenever the provider has it — captures the actual diagnostic
@@ -231,7 +230,9 @@ class Journal:
     def _render(self) -> str:
         total_cost = sum(c.cost_usd for c in self.provider_calls)
         total_duration = (self.ended_at or time.time()) - self.started_at
-        clamped_count = sum(1 for c in self.provider_calls if c.was_clamped)
+        skipped_count = sum(
+            1 for c in self.provider_calls if c.error == "budget_exhausted"
+        )
         started = datetime.fromtimestamp(self.started_at).strftime(
             "%Y-%m-%d %H:%M:%S",
         )
@@ -247,7 +248,7 @@ class Journal:
             f"**Total time:** {total_duration:.1f}s  "
             f"**Total cost:** ${total_cost:.4f}  "
             f"**Provider calls:** {len(self.provider_calls)} "
-            f"({clamped_count} clamped)",
+            f"({skipped_count} skipped — budget exhausted)",
             "",
         ]
 
@@ -301,7 +302,6 @@ class Journal:
                     "in": c.input_tokens,
                     "out": c.output_tokens,
                     "cost": round(c.cost_usd, 6),
-                    "clamped": c.was_clamped,
                 }
                 if c.error:
                     payload["error"] = c.error
@@ -374,7 +374,6 @@ def record_provider_call(
     input_tokens: int = 0,
     output_tokens: int = 0,
     cost_usd: float = 0.0,
-    was_clamped: bool = False,
     error: str | None = None,
     phase: str | None = None,
     stderr: str = "",
@@ -397,7 +396,6 @@ def record_provider_call(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cost_usd=cost_usd,
-        was_clamped=was_clamped,
         error=error,
         stderr=stderr,
     ))

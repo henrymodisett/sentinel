@@ -754,14 +754,12 @@ class Monitor:
         # past its budget, and gather() kept waiting for it, so the
         # cycle died with zero persisted lens evaluations.
         #
-        # The per-lens timeout is belt-and-suspenders relative to
-        # run_cli_async's own budget-clamped timeout: if the subprocess-
-        # level cancellation somehow fails to fire (Gemini CLI quirks,
-        # OS-level wedges), this outer asyncio.wait_for still guarantees
-        # the task ends. Use 2x the provider timeout to leave room for
-        # evaluate_one's own retry path.
-        from sentinel.budget_ctx import clamp_timeout
-        per_lens_timeout = clamp_timeout(provider.timeout_sec * 2)
+        # The per-lens timeout is belt-and-suspenders relative to the
+        # provider's own subprocess timeout: if subprocess-level cancellation
+        # somehow fails to fire (Gemini CLI quirks, OS-level wedges), this
+        # outer asyncio.wait_for still guarantees the task ends. Use 2x the
+        # provider timeout to leave room for evaluate_one's own retry path.
+        per_lens_timeout = provider.timeout_sec * 2
 
         async def evaluate_with_timeout(lens: Lens, index: int) -> LensEvaluation:
             try:

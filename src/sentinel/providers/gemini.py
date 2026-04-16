@@ -43,7 +43,8 @@ class GeminiProvider(Provider):
     ) -> ChatResponse:
         import time as _time
 
-        from sentinel.budget_ctx import clamp_timeout
+        if (resp := self._abort_if_budget_exhausted()):
+            return resp
 
         # Gemini CLI doesn't have a --system-prompt flag, so prepend it
         full_prompt = prompt
@@ -61,9 +62,6 @@ class GeminiProvider(Provider):
         if self.model and self.model != "auto":
             args.extend(["-m", self.model])
 
-        # Snapshot clamp state BEFORE the call so elapsed time inside
-        # the call doesn't change whether we report it as clamped.
-        was_clamped = clamp_timeout(self.timeout_sec) < self.timeout_sec
         started = _time.perf_counter()
         try:
             result = await run_cli_async(
@@ -75,7 +73,7 @@ class GeminiProvider(Provider):
                 provider=self.name,
                 stderr=f"(timeout after {self.timeout_sec}s — no stderr captured)",
             )
-            self._journal_call(started, response, was_clamped, error="timeout")
+            self._journal_call(started, response, error="timeout")
             return response
 
         stderr = result.stderr or ""
@@ -88,7 +86,7 @@ class GeminiProvider(Provider):
                 stderr=stderr,
                 raw_stdout=stdout,
             )
-            self._journal_call(started, response, was_clamped, error="non-zero exit")
+            self._journal_call(started, response, error="non-zero exit")
             return response
 
         data = parse_json_safe(stdout)
@@ -101,7 +99,7 @@ class GeminiProvider(Provider):
                 stderr=stderr,
                 raw_stdout=stdout,
             )
-            self._journal_call(started, response, was_clamped)
+            self._journal_call(started, response)
             return response
 
         # Extract token counts from stats
@@ -123,7 +121,7 @@ class GeminiProvider(Provider):
             stderr=stderr,
             raw_stdout=stdout,
         )
-        self._journal_call(started, response, was_clamped)
+        self._journal_call(started, response)
         return response
 
     async def research(self, prompt: str) -> ChatResponse:

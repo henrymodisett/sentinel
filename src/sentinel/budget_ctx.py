@@ -1,22 +1,28 @@
-"""Cycle-scoped time budget that provider CLI calls can read.
+"""Cycle-scoped time budget that provider calls can read.
 
-`sentinel work --budget 10m` sets a deadline for the whole cycle. Without
-this module, each provider sub-call still honored its own `provider_timeout_sec`
-(default 600s) — so a single slow synthesis call could blow past a 10-minute
-cycle budget by another 10 minutes. Observed live on portfolio_new: 10m
-budget, 21.6m actual runtime, hardcoded Gemini timeout ignored the budget
-completely.
+`sentinel work --budget 10m` sets a deadline for the whole cycle. Each
+provider checks `is_budget_exhausted()` BEFORE dispatching a call: if the
+budget is already gone, the call is skipped (recorded in the journal,
+no subprocess spawned). If budget remains, the call runs at its own
+configured timeout — we do not shrink subprocess timeouts dynamically.
 
-The fix: carry a deadline in a `ContextVar` set by `run_work` at cycle
-start. `run_cli_async` clamps each subprocess timeout to the minimum of
-the provider's configured timeout and the time remaining until the cycle
-deadline. Nothing runs longer than the cycle is allowed to live.
+Why between-call gating instead of mid-call clamping: dogfood on the
+sentinel repo (2026-04-16) showed that shrinking subprocess timeouts
+to fit the remaining budget killed in-flight Gemini calls and produced
+zero output for the latency cost — strictly worse than letting the call
+finish slowly. With between-call gating, every dispatched call gets to
+complete naturally; only the next call is gated on remaining budget.
 
-ContextVar was chosen over threading a `deadline=` argument through every
-layer because asyncio tasks and nested subprocess calls inherit it
-automatically — no plumbing through Router, Monitor, each Role, each
-Provider method signature. When no deadline is set (unit tests, `sentinel
-work` without `--budget`), behavior is unchanged.
+Worst case overshoot: a call started just before the deadline can run
+for up to its own configured timeout (default 600s) past the deadline.
+That's a one-shot overshoot, not a destructive kill — and the next
+call won't start. Tighten provider.timeout_sec if a tighter ceiling is
+required.
+
+ContextVar is used so asyncio tasks and nested calls inherit the
+deadline automatically. When no deadline is set (unit tests, `sentinel
+work` without `--budget`), `is_budget_exhausted()` returns False and
+behavior is unchanged.
 """
 
 from __future__ import annotations
@@ -25,8 +31,8 @@ import time
 from contextvars import ContextVar
 
 # Absolute wall-clock timestamp (time.time()) when the current cycle must
-# end. None means no cycle budget is in effect — provider timeouts apply
-# as configured. Set by run_work at cycle start, cleared on exit.
+# end. None means no cycle budget is in effect — calls run unconstrained.
+# Set by run_work at cycle start, cleared on exit.
 _cycle_deadline: ContextVar[float | None] = ContextVar(
     "sentinel_cycle_deadline", default=None,
 )
@@ -44,23 +50,22 @@ def set_cycle_deadline(seconds_from_now: float | None) -> None:
 def remaining_seconds() -> float | None:
     """Seconds until the cycle deadline, or None if no deadline is set.
     Never returns negative — a passed deadline returns 0.0 so callers
-    can short-circuit rather than compute a negative timeout."""
+    can short-circuit cleanly."""
     deadline = _cycle_deadline.get()
     if deadline is None:
         return None
     return max(0.0, deadline - time.time())
 
 
-def clamp_timeout(base_timeout: int) -> int:
-    """Return the effective timeout for a provider CLI call.
+def is_budget_exhausted() -> bool:
+    """True if a cycle deadline is set AND it has already passed.
 
-    With no cycle deadline set: returns base_timeout unchanged.
-    With a deadline: returns min(base_timeout, remaining_seconds),
-    floored at 1 second so we never ask asyncio.wait_for for a zero
-    or negative timeout (which would raise immediately without letting
-    the CLI produce even a quick error).
+    Providers call this before dispatching any subprocess or HTTP call.
+    A True result means: do not start the call, return a budget-exhausted
+    error response, journal the skip. False means: proceed at full
+    configured timeout — we do NOT shrink the timeout to fit.
+
+    No deadline set → always False (no constraints).
     """
     remaining = remaining_seconds()
-    if remaining is None:
-        return base_timeout
-    return max(1, min(base_timeout, int(remaining)))
+    return remaining is not None and remaining <= 0.0

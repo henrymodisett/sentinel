@@ -76,12 +76,12 @@ class TestJournalShape:
         j.record_provider_call(ProviderCall(
             phase="scan", provider="gemini", model="gemini-2.5-flash",
             latency_ms=2104, input_tokens=1820, output_tokens=540,
-            cost_usd=0.0021, was_clamped=False,
+            cost_usd=0.0021,
         ))
         j.record_provider_call(ProviderCall(
             phase="scan", provider="gemini", model="gemini-2.5-pro",
             latency_ms=31200, input_tokens=12500, output_tokens=2100,
-            cost_usd=0.0022, was_clamped=True,
+            cost_usd=0.0022,
         ))
         content = j.write().read_text()
         assert "## Provider calls" in content
@@ -93,23 +93,24 @@ class TestJournalShape:
         lines = [json.loads(ln) for ln in block.group(1).splitlines() if ln.strip()]
         assert len(lines) == 2
         assert lines[0]["provider"] == "gemini"
-        assert lines[0]["clamped"] is False
-        assert lines[1]["clamped"] is True
+        assert lines[0]["model"] == "gemini-2.5-flash"
+        assert lines[1]["model"] == "gemini-2.5-pro"
 
     def test_totals_in_header(self, tmp_path: Path) -> None:
         j = _journal(tmp_path)
         j.record_provider_call(ProviderCall(
             phase="scan", provider="gemini", model="m",
-            latency_ms=100, cost_usd=0.01, was_clamped=False,
+            latency_ms=100, cost_usd=0.01,
         ))
         j.record_provider_call(ProviderCall(
             phase="scan", provider="claude", model="m",
-            latency_ms=200, cost_usd=0.02, was_clamped=True,
+            latency_ms=200, cost_usd=0.02,
         ))
         content = j.write().read_text()
         assert "$0.0300" in content
         assert "Provider calls:** 2" in content
-        assert "(1 clamped)" in content
+        # No skipped calls in this fixture — header should reflect zero.
+        assert "(0 skipped — budget exhausted)" in content
 
     def test_repeated_write_reuses_same_path(self, tmp_path: Path) -> None:
         """Journal.write() is idempotent — incremental writes during a
@@ -144,7 +145,7 @@ class TestJournalShape:
         j.start_phase("scan")
         j.record_provider_call(ProviderCall(
             phase="scan", provider="gemini", model="flash",
-            latency_ms=100, cost_usd=0.001, was_clamped=False,
+            latency_ms=100, cost_usd=0.001,
         ))
 
         runs_dir = tmp_path / ".sentinel" / "runs"
@@ -263,7 +264,7 @@ class TestJournalShape:
         j.start_phase("scan")
         j.record_provider_call(ProviderCall(
             phase="scan", provider="x", model="y",
-            latency_ms=1, was_clamped=False,
+            latency_ms=1,
         ))
 
     def test_two_journals_in_same_second_get_unique_paths(
@@ -309,7 +310,7 @@ class TestJournalShape:
         j = _journal(tmp_path)
         j.record_provider_call(ProviderCall(
             phase="scan", provider="gemini", model="gemini-2.5-pro",
-            latency_ms=222000, was_clamped=False,
+            latency_ms=222000,
             error="non-zero exit",
             stderr="Error: API quota exceeded for project ABC123",
         ))
@@ -324,7 +325,7 @@ class TestJournalShape:
         j = _journal(tmp_path)
         j.record_provider_call(ProviderCall(
             phase="scan", provider="gemini", model="flash",
-            latency_ms=1000, was_clamped=False,
+            latency_ms=1000,
             stderr="some warning the CLI emitted to stderr",
         ))
         content = j.write().read_text()
@@ -341,7 +342,7 @@ class TestJournalShape:
         j = _journal(tmp_path)
         j.record_provider_call(ProviderCall(
             phase="scan", provider="claude", model="opus",
-            latency_ms=300, was_clamped=False,
+            latency_ms=300,
             error="non-zero exit",
             stderr=huge,
         ))
@@ -436,7 +437,7 @@ class TestProviderHelperWiring:
                 output_tokens=30,
                 cost_usd=0.0005,
             )
-            FakeProvider()._journal_call(started, response, was_clamped=False)
+            FakeProvider()._journal_call(started, response)
             assert len(j.provider_calls) == 1
             call = j.provider_calls[0]
             assert call.phase == "scan"
@@ -446,57 +447,8 @@ class TestProviderHelperWiring:
             assert call.output_tokens == 30
             assert call.cost_usd == 0.0005
             assert call.latency_ms >= 0
-            assert call.was_clamped is False
         finally:
             set_current_journal(None)
-
-    def test_provider_helper_records_clamped_state_as_passed(
-        self, tmp_path: Path,
-    ) -> None:
-        """was_clamped is captured by the provider BEFORE the call to
-        avoid the race where elapsed time during the call shrinks the
-        remaining budget. Verify the helper records exactly what was
-        passed, not what it would compute now."""
-        from sentinel.budget_ctx import set_cycle_deadline
-        from sentinel.providers.interface import (
-            ChatResponse,
-            Provider,
-            ProviderCapabilities,
-            ProviderName,
-        )
-
-        class FakeProvider(Provider):
-            name = ProviderName.GEMINI
-            cli_command = "fake"
-            capabilities = ProviderCapabilities(chat=True)
-            timeout_sec = 600
-
-            async def chat(self, prompt, system_prompt=None):  # noqa: ANN001, ANN201
-                return ChatResponse(content="ok", provider=self.name)
-
-            def detect(self):  # noqa: ANN201
-                from sentinel.providers.interface import ProviderStatus
-                return ProviderStatus(installed=True, authenticated=True)
-
-        j = _journal(tmp_path)
-        set_current_journal(j)
-        # Simulate: budget is wide open, so the call wasn't clamped at
-        # entry. If we computed `was_clamped` after the call returned,
-        # a brief delay could shrink the remaining budget below 600s
-        # and we'd misreport. Helper must use the value the caller
-        # captured at the start.
-        set_cycle_deadline(None)
-        try:
-            import time
-            FakeProvider()._journal_call(
-                time.perf_counter(),
-                ChatResponse(content="ok", provider=ProviderName.GEMINI),
-                was_clamped=False,
-            )
-            assert j.provider_calls[0].was_clamped is False
-        finally:
-            set_current_journal(None)
-            set_cycle_deadline(None)
 
 
 class TestUnusedSymbolsExist:

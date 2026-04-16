@@ -63,14 +63,14 @@ class OpenAIProvider(Provider):
     ) -> ChatResponse:
         import time as _time
 
-        from sentinel.budget_ctx import clamp_timeout
+        if (resp := self._abort_if_budget_exhausted()):
+            return resp
 
         # Codex CLI has no --system-prompt flag; prepend to user prompt
         full_prompt = prompt
         if system_prompt:
             full_prompt = f"{system_prompt}\n\n{prompt}"
         args = ["codex", "exec", full_prompt, "--json", "--ephemeral"]
-        was_clamped = clamp_timeout(self.timeout_sec) < self.timeout_sec
         started = _time.perf_counter()
         try:
             result = await run_cli_async(
@@ -82,7 +82,7 @@ class OpenAIProvider(Provider):
                 provider=self.name,
                 stderr=f"(timeout after {self.timeout_sec}s — no stderr captured)",
             )
-            self._journal_call(started, response, was_clamped, error="timeout")
+            self._journal_call(started, response, error="timeout")
             return response
 
         stderr = result.stderr or ""
@@ -95,7 +95,7 @@ class OpenAIProvider(Provider):
                 stderr=stderr,
                 raw_stdout=stdout,
             )
-            self._journal_call(started, response, was_clamped, error="non-zero exit")
+            self._journal_call(started, response, error="non-zero exit")
             return response
 
         content, total_input, total_output = self._parse_ndjson(stdout)
@@ -108,7 +108,7 @@ class OpenAIProvider(Provider):
             stderr=stderr,
             raw_stdout=stdout,
         )
-        self._journal_call(started, response, was_clamped)
+        self._journal_call(started, response)
         return response
 
     async def code(
@@ -116,14 +116,14 @@ class OpenAIProvider(Provider):
     ) -> ChatResponse:
         import time as _time
 
-        from sentinel.budget_ctx import clamp_timeout
+        if (resp := self._abort_if_budget_exhausted()):
+            return resp
 
         args = [
             "codex", "exec", prompt,
             "--json", "--full-auto",
             "-C", working_directory,
         ]
-        was_clamped = clamp_timeout(self.timeout_sec) < self.timeout_sec
         started = _time.perf_counter()
         try:
             result = await run_cli_async(
@@ -135,7 +135,7 @@ class OpenAIProvider(Provider):
                 provider=self.name,
                 stderr=f"(timeout after {self.timeout_sec}s — no stderr captured)",
             )
-            self._journal_call(started, response, was_clamped, error="timeout")
+            self._journal_call(started, response, error="timeout")
             return response
 
         stderr = result.stderr or ""
@@ -148,7 +148,7 @@ class OpenAIProvider(Provider):
                 stderr=stderr,
                 raw_stdout=stdout,
             )
-            self._journal_call(started, response, was_clamped, error="non-zero exit")
+            self._journal_call(started, response, error="non-zero exit")
             return response
 
         content, total_input, total_output = self._parse_ndjson(stdout)
@@ -161,7 +161,7 @@ class OpenAIProvider(Provider):
             stderr=stderr,
             raw_stdout=stdout,
         )
-        self._journal_call(started, response, was_clamped)
+        self._journal_call(started, response)
         return response
 
     def detect(self) -> ProviderStatus:
