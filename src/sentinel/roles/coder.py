@@ -84,6 +84,18 @@ def _git_status_snapshot(project_path: str) -> set[str]:
         ["status", "--porcelain", "-z", "--untracked-files=all"], project_path,
     )
     if result.returncode != 0:
+        # Don't silently swallow — a git failure here means the
+        # snapshot is empty and downstream `result.files_changed = []`
+        # makes the Coder look like it produced nothing. Log so the
+        # underlying git problem (missing repo, locked index, etc.)
+        # is visible in operator output rather than masquerading as
+        # "Coder produced no file changes".
+        import logging
+        logging.getLogger(__name__).warning(
+            "git status failed in %s (rc=%s): %s",
+            project_path, result.returncode,
+            (result.stderr or result.stdout or "(no output)").strip(),
+        )
         return set()
     paths: set[str] = set()
     entries = result.stdout.split("\0")
