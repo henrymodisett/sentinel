@@ -90,6 +90,27 @@ class TestStatusCommand:
         assert "Spend (today):" in result.output
 
 
+class TestCycleMaxItemsRefusal:
+    """`sentinel cycle --max-items N` (N != default 3) used to silently
+    ignore the cap after the legacy in-place mode was removed. Codex
+    flagged: must exit non-zero AND not delegate to run_work, otherwise
+    CI/scripts can't tell the cap was disregarded."""
+
+    def test_non_default_max_items_exits_nonzero(self) -> None:
+        from unittest.mock import patch
+        runner = CliRunner()
+        with patch("sentinel.cli.work_cmd.run_work") as mock_run_work:
+            result = runner.invoke(main, ["cycle", "--max-items", "1"])
+        assert result.exit_code != 0, (
+            f"refusal must exit non-zero; got 0 with output:\n{result.output}"
+        )
+        assert "no longer supported" in result.output
+        # The hard guarantee: we must NOT have delegated to run_work,
+        # otherwise we'd execute the full backlog while pretending to
+        # honor the user's --max-items cap.
+        mock_run_work.assert_not_called()
+
+
 class TestUnimplementedCommandsFailLoudly:
     """Remaining unimplemented commands must fail loudly, not silently."""
 
