@@ -123,6 +123,7 @@ async def run_cycle(
     surprise.
     """
     if max_items != 3:
+        import click as _click
         console.print(
             f"[red]  `sentinel cycle --max-items {max_items}` is no longer "
             f"supported.[/red]\n"
@@ -132,7 +133,10 @@ async def run_cycle(
             f"to bound the cycle instead — `work` iterates the full "
             f"backlog until the budget is hit.\n"
         )
-        return
+        # Non-zero exit so CI/scripts notice the rejection. Just
+        # printing and returning would silently succeed (exit 0)
+        # despite doing zero work — codex-flagged failure mode.
+        raise _click.exceptions.Exit(code=1)
 
     from sentinel.cli.work_cmd import run_work
 
