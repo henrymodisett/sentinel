@@ -79,10 +79,10 @@ def work(budget: str | None, every: str | None, dry_run: bool, auto: bool) -> No
 
 @main.command()
 def status() -> None:
-    """Quick project health check (state + latest scan summary)."""
-    click.echo(f"{NOT_YET}")
-    click.echo("  Use `sentinel scan --quick` for state, `sentinel cost` for spend.")
-    sys.exit(1)
+    """Quick project health check (state + spend + latest cycle)."""
+    from sentinel.cli.status_cmd import run_status
+
+    run_status()
 
 
 # --- ADVANCED / GRANULAR ---

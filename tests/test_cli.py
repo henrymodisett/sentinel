@@ -49,14 +49,48 @@ class TestCLIBasics:
         assert result.exit_code == 0
 
 
-class TestUnimplementedCommandsFailLoudly:
-    """Unimplemented commands must fail loudly, not silently."""
+class TestStatusCommand:
+    """Status produces a one-screen project health summary without
+    making any LLM calls. Free + read-only — runnable on any project."""
 
-    def test_status_exits_with_error(self) -> None:
+    def test_status_runs_in_clean_dir_without_config(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """A directory without .sentinel/config.toml should print a
+        friendly hint, not crash."""
+        monkeypatch.chdir(tmp_path)
         runner = CliRunner()
         result = runner.invoke(main, ["status"])
-        assert result.exit_code == 1
-        assert "Not yet implemented" in result.output
+        assert result.exit_code == 0
+        assert "Sentinel Status" in result.output
+        assert "config.toml" in result.output
+
+    def test_status_with_config_shows_state_and_spend(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """When config exists, status prints state, spend, and a
+        latest-cycle hint when no cycles have been run yet."""
+        sentinel_dir = tmp_path / ".sentinel"
+        sentinel_dir.mkdir()
+        (sentinel_dir / "config.toml").write_text(
+            f'[project]\nname = "test"\npath = "{tmp_path}"\ntype = "python"\n'
+            '[roles.monitor]\nprovider = "gemini"\nmodel = "gemini-2.5-flash"\n'
+            '[roles.researcher]\nprovider = "gemini"\nmodel = "gemini-2.5-pro"\n'
+            '[roles.planner]\nprovider = "claude"\nmodel = "claude-opus-4-6"\n'
+            '[roles.coder]\nprovider = "claude"\nmodel = "claude-sonnet-4-6"\n'
+            '[roles.reviewer]\nprovider = "gemini"\nmodel = "gemini-2.5-pro"\n'
+            "[budget]\ndaily_limit_usd = 15.0\nwarn_at_usd = 10.0\n",
+        )
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(main, ["status"])
+        assert result.exit_code == 0, result.output
+        assert "State:" in result.output
+        assert "Spend (today):" in result.output
+
+
+class TestUnimplementedCommandsFailLoudly:
+    """Remaining unimplemented commands must fail loudly, not silently."""
 
     def test_config_exits_with_error(self) -> None:
         runner = CliRunner()
