@@ -159,6 +159,23 @@ def cost() -> None:
     run_cost()
 
 
+@main.group(invoke_without_command=False)
+def routing() -> None:
+    """Inspect and tune router decisions."""
+
+
+@routing.command("show")
+@click.option(
+    "--limit", "-n", type=int, default=10,
+    help="How many recent cycles to scan (default 10).",
+)
+def routing_show(limit: int) -> None:
+    """Show routing overrides from recent run journals."""
+    from sentinel.cli.routing_cmd import run_routing_show
+
+    run_routing_show(limit=limit)
+
+
 @main.command()
 def providers() -> None:
     """Show LLM provider detection and health."""

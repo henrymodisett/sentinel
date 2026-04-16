@@ -182,6 +182,12 @@ class Router:
                     f"{configured.model} → {rule.override_model} "
                     f"({rule.name})[/dim]"
                 )
+                # Record the override on the next provider call so the
+                # journal shows why this model was chosen — paired with
+                # the rule's static reason in the source, the override
+                # is fully traceable from the journal alone.
+                from sentinel.journal import set_pending_routing_reason
+                set_pending_routing_reason(rule.name)
                 return self._materialize(configured_provider, rule.override_model)
 
         return configured

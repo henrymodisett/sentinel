@@ -142,11 +142,13 @@ def _reset_budget_state():
     don't.
     """
     from sentinel.budget_ctx import set_cycle_deadline, set_cycle_money_cap
-    from sentinel.journal import set_current_role
+    from sentinel.journal import set_current_role, set_pending_routing_reason
     set_cycle_deadline(None)
     set_cycle_money_cap(None)
     set_current_role("")
+    set_pending_routing_reason("")
     yield
     set_cycle_deadline(None)
     set_cycle_money_cap(None)
     set_current_role("")
+    set_pending_routing_reason("")

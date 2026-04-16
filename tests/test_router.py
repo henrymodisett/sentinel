@@ -219,6 +219,43 @@ class TestCustomRules:
         # Without rules, configured default wins regardless of task.
         assert provider.model == "gemini-2.5-flash"
 
+    def test_override_sets_pending_routing_reason(
+        self, gemini_config: SentinelConfig,
+    ) -> None:
+        """When a rule fires, the next provider call should pick up the
+        rule name via the pending-reason ContextVar — that's how the
+        journal records *why* a particular model was used."""
+        from sentinel.journal import (
+            consume_pending_routing_reason,
+            set_pending_routing_reason,
+        )
+
+        # Clear any leftover state, then trigger an override.
+        set_pending_routing_reason("")
+        router = Router(gemini_config)
+        router.get_provider(RoleName.MONITOR, task="synthesize")
+        # The Router set a pending reason; consume returns it once and clears.
+        first = consume_pending_routing_reason()
+        second = consume_pending_routing_reason()
+        assert first == "synthesize-prefers-pro"
+        assert second == "", "consume must clear the pending reason"
+
+    def test_no_override_leaves_pending_reason_blank(
+        self, gemini_config: SentinelConfig,
+    ) -> None:
+        """A call that doesn't trigger any rule must NOT leave a stale
+        reason in the ContextVar — otherwise the next call would
+        misattribute."""
+        from sentinel.journal import (
+            consume_pending_routing_reason,
+            set_pending_routing_reason,
+        )
+
+        set_pending_routing_reason("")
+        router = Router(gemini_config)
+        router.get_provider(RoleName.MONITOR)  # no task → no rule
+        assert consume_pending_routing_reason() == ""
+
 
 class TestMissingLocalModels:
     """Pre-flight check: any role configured for local (ollama) needs

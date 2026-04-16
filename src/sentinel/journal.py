@@ -76,6 +76,11 @@ class ProviderCall:
     # by role — answers "where is my money going?" without manually
     # tagging each call site.
     role: str = ""
+    # Name of the routing rule that overrode the configured (provider, model)
+    # for this call. Empty when the configured default was used. Lets the
+    # journal answer "why did this call use that model?" — when paired with
+    # the rule's reason in the source, the override is fully traceable.
+    routed_via: str = ""
     # Raw stderr from the provider CLI (subprocess) or HTTP error body.
     # Populated whenever the provider has it — captures the actual diagnostic
     # text that lets us debug non-zero exits without re-running the call.
@@ -311,6 +316,8 @@ class Journal:
                 }
                 if c.role:
                     payload["role"] = c.role
+                if c.routed_via:
+                    payload["routed_via"] = c.routed_via
                 if c.error:
                     payload["error"] = c.error
                 lines.append(json.dumps(payload))
@@ -380,6 +387,13 @@ _current_phase: ContextVar[str] = ContextVar(
 _current_role: ContextVar[str] = ContextVar(
     "sentinel_role", default="",
 )
+# ContextVar set by the Router when it overrides a configured model via
+# a routing rule. The next provider call consumes and clears it (one-shot)
+# so the override is recorded against the call it produced — not against
+# subsequent calls that may have used a different rule (or no rule).
+_pending_routing_reason: ContextVar[str] = ContextVar(
+    "sentinel_pending_routing_reason", default="",
+)
 
 
 def set_current_journal(journal: Journal | None) -> None:
@@ -416,6 +430,21 @@ def current_role() -> str:
     return _current_role.get()
 
 
+def set_pending_routing_reason(reason: str) -> None:
+    """Router sets this when an override fires. Cleared by the next
+    record_provider_call so the reason attaches to the right call."""
+    _pending_routing_reason.set(reason)
+
+
+def consume_pending_routing_reason() -> str:
+    """Return and clear the pending routing reason. Called once per
+    provider call — if no override is in flight, returns ''."""
+    reason = _pending_routing_reason.get()
+    if reason:
+        _pending_routing_reason.set("")
+    return reason
+
+
 def record_provider_call(
     provider: str,
     model: str,
@@ -448,5 +477,6 @@ def record_provider_call(
         cost_usd=cost_usd,
         error=error,
         role=role if role is not None else current_role(),
+        routed_via=consume_pending_routing_reason(),
         stderr=stderr,
     ))
