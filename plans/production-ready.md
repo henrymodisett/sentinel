@@ -192,7 +192,7 @@ Five workstreams, sequenced by dependency. Each item is small enough to ship in 
 
 #### 5.3 Release script
 
-- Mirrors touchstone: bump `__init__.py`, tag, push, `gh release create`, update Homebrew SHA — one script.
+- Version is derived from the git tag via `hatch-vcs` (see `pyproject.toml`), so no `__init__.py` bump. Script: tag on main (`git tag v0.X.Y`), push tag, `gh release create`, update Homebrew formula SHA.
 - **Acceptance:** release a v0.1.0-beta following the script with no manual steps.
 
 ---
