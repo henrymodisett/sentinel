@@ -801,6 +801,23 @@ def _check_shipping_preflight(project: Path) -> list[str]:
     return errors
 
 
+def _should_ship(review_verdict: str, verification_overall: str | None) -> bool:
+    """Pure ship-gate predicate: True iff Sentinel should attempt to
+    open a PR for this work item.
+
+    - `approved` + `verified` → ship (the happy path)
+    - `approved` + `no_check_defined` → ship (project has no test
+      config; auto-merge still gated by branch protection in ship_pr)
+    - `approved` + `not_verified` → block (a configured check
+      actually FAILED)
+    - any non-approved verdict → block
+    """
+    return (
+        review_verdict == "approved"
+        and verification_overall in ("verified", "no_check_defined")
+    )
+
+
 def _build_pr_body(
     work_item, action: dict, review, verification,  # noqa: ANN001
 ) -> str:
@@ -983,10 +1000,7 @@ async def _execute_and_review(
         #     the PR sits open for human review)
         ship_status = ""
         pr_url = ""
-        ship_ready = (
-            review.verdict == "approved"
-            and verification.overall in ("verified", "no_check_defined")
-        )
+        ship_ready = _should_ship(review.verdict, verification.overall)
         if ship_ready and exec_result.commit_sha:
             ship = await ship_pr(
                 worktree_path=ctx.path,
