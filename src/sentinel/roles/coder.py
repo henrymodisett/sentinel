@@ -49,11 +49,40 @@ def _slug(title: str) -> str:
 
 def _run_git(
     args: list[str], cwd: str,
+    env_overrides: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run a git command."""
+    """Run a git command.
+
+    `env_overrides` merges onto the current process environment — use
+    it when a hook needs a specific env var (e.g. the pre-commit tool's
+    ``PRE_COMMIT_ALLOW_NO_CONFIG=1`` for repos without a config file).
+    """
+    env = None
+    if env_overrides:
+        import os
+        env = {**os.environ, **env_overrides}
     return subprocess.run(
         ["git", *args], capture_output=True, text=True, cwd=cwd, timeout=30,
+        env=env,
     )
+
+
+def _is_missing_precommit_config_error(stderr: str, stdout: str) -> bool:
+    """True iff the commit failure is the `pre-commit` tool complaining
+    about a missing ``.pre-commit-config.yaml``.
+
+    A globally-installed `pre-commit` hook fires in every repo under
+    the user's account. Target repos that don't use pre-commit have no
+    config file, which makes every `git commit` abort with this error.
+    Dogfood on portfolio_new (2026-04-17) lost ~$1.39 of coder output
+    across four work items to exactly this failure mode.
+
+    The signature is stable across pre-commit versions: the tool always
+    prints "No .pre-commit-config.yaml file was found" when invoked
+    against a repo that lacks the file.
+    """
+    blob = f"{stderr}\n{stdout}"
+    return "No .pre-commit-config.yaml file was found" in blob
 
 
 def _git_status_snapshot(project_path: str) -> set[str]:
@@ -213,13 +242,42 @@ def _commit_files(
         project_path,
     )
     if commit_result.returncode != 0:
-        # Target project's pre-commit hook rejected the work. This is
-        # signal worth preserving — a lint failure, a test-suite block,
-        # anything the project enforces is a real review finding.
-        return False, (
-            f"commit blocked (exit {commit_result.returncode}): "
-            f"{commit_result.stderr.strip() or commit_result.stdout.strip()}"
-        )
+        # Distinguish "hook rejected the code" (real signal — lint,
+        # tests, etc.) from "hook infrastructure is misconfigured for
+        # this repo." The latter is not a review finding; it's our
+        # environment leaking into the target project. Only one such
+        # case today: the `pre-commit` tool installed globally, but the
+        # target repo has no .pre-commit-config.yaml. Retry once with
+        # the documented bypass env var, and ONLY when the repo truly
+        # lacks the config file — don't override a user whose config
+        # is present but broken.
+        if (
+            _is_missing_precommit_config_error(
+                commit_result.stderr, commit_result.stdout,
+            )
+            and not (Path(project_path) / ".pre-commit-config.yaml").exists()
+        ):
+            import logging
+            _log = logging.getLogger(__name__)
+            _log.info(
+                "pre-commit has no config in %s; retrying commit with "
+                "PRE_COMMIT_ALLOW_NO_CONFIG=1", project_path,
+            )
+            commit_result = _run_git(
+                ["commit", "-m", commit_msg, "--", *staged],
+                project_path,
+                env_overrides={"PRE_COMMIT_ALLOW_NO_CONFIG": "1"},
+            )
+
+        if commit_result.returncode != 0:
+            # Target project's pre-commit hook rejected the work. This
+            # is signal worth preserving — a lint failure, a test-suite
+            # block, anything the project enforces is a real review
+            # finding.
+            return False, (
+                f"commit blocked (exit {commit_result.returncode}): "
+                f"{commit_result.stderr.strip() or commit_result.stdout.strip()}"
+            )
 
     # Capture the commit SHA for downstream review + transcript
     sha_result = _run_git(["rev-parse", "HEAD"], project_path)
