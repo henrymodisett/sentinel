@@ -349,10 +349,23 @@ You are executing this work item for the {project_name} project.
 3. Run the project's tests to verify nothing is broken.
 4. If tests fail, fix them before moving on.
 
-Do NOT commit or push — sentinel commits the diff for you once tests
-have run. Leave your work in the working tree; sentinel stages the
-files it knows you touched and writes the commit message itself.
-Do NOT refactor surrounding code unless the work item requires it.
+## Hard scope rules (a reviewer LLM will reject the diff if violated)
+
+- **Touch ONLY files this work item is about.** The "Files likely to
+  be touched" list above is not exhaustive but it IS scoped — do not
+  add or modify files unrelated to this work item's described change.
+- **Do not modify `.claude/` or `.sentinel/` files.** Those are meta-
+  configuration / agent scaffolds, not project source. They look like
+  legitimate edits because of their proximity but they are out of
+  scope for every work item.
+- **Do not add tooling, hooks, CI configs, or "improvements" beyond
+  the explicit acceptance criteria.** Scope creep is the most common
+  reason the reviewer rejects a diff. If you find related work that
+  feels worth doing, mention it in your final reply but DO NOT do it.
+- **Do not commit or push.** Sentinel stages the files you touched
+  and writes the commit message. Leave your work in the working tree.
+- **Do not refactor surrounding code** unless the work item explicitly
+  requires it.
 
 Report what you changed and whether tests pass.
 """
