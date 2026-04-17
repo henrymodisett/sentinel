@@ -46,7 +46,7 @@ Fix failing tests before pushing.
 
 ## Release & Distribution
 
-Homebrew formula (`brew install sentinel` via `autumngarage/sentinel` tap) + PyPI (`pip install sentinel`). Release process mirrors touchstone: version bump in `__init__.py`, tag, push, `gh release create`, update Homebrew formula SHA.
+Homebrew formula (`brew install sentinel` via `autumngarage/sentinel` tap) + PyPI (`pip install sentinel`). Version is derived from the git tag via `hatch-vcs` — no manual bump. Release process: tag on main (`git tag v0.X.Y`), push tag (`git push --tags`), `gh release create`, update Homebrew formula SHA. `.git_archival.txt` (populated by git-archive's `export-subst`) lets tag tarballs resolve the version without `.git`, so Homebrew's source archive build works.
 
 ## Architecture
 
