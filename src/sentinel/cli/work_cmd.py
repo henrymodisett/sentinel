@@ -801,6 +801,23 @@ def _check_shipping_preflight(project: Path) -> list[str]:
     return errors
 
 
+def _should_ship(review_verdict: str, verification_overall: str | None) -> bool:
+    """Pure ship-gate predicate: True iff Sentinel should attempt to
+    open a PR for this work item.
+
+    - `approved` + `verified` → ship (the happy path)
+    - `approved` + `no_check_defined` → ship (project has no test
+      config; auto-merge still gated by branch protection in ship_pr)
+    - `approved` + `not_verified` → block (a configured check
+      actually FAILED)
+    - any non-approved verdict → block
+    """
+    return (
+        review_verdict == "approved"
+        and verification_overall in ("verified", "no_check_defined")
+    )
+
+
 def _build_pr_body(
     work_item, action: dict, review, verification,  # noqa: ANN001
 ) -> str:
@@ -830,6 +847,17 @@ def _build_pr_body(
     ]
     for c in verification.checks:
         lines.append(f"- `{c.name}`: {c.verdict} ({c.duration_s:.1f}s)")
+
+    if verification.overall == "no_check_defined":
+        lines += [
+            "",
+            "> ⚠️ **No automated verification was run.** This project "
+            "has no `lint_command` or `test_command` configured in "
+            "`.toolkit-config`, so sentinel could not independently "
+            "verify the diff. The reviewer LLM still approved the "
+            "change; please review carefully before merging.",
+        ]
+
     lines += [
         "",
         "---",
@@ -956,15 +984,23 @@ async def _execute_and_review(
         )
         console.print()
 
-        # Ship gate: BOTH reviewer.approved AND verifier.verified
-        # required. `no_check_defined` is NOT tested PR quality and
-        # must not pass — codex-flagged risk.
+        # Ship gate: reviewer.approved AND verifier ∈ {verified,
+        # no_check_defined}. The original codex-flagged risk was
+        # "no_check_defined ≠ tested PR quality" — true, but the
+        # alternative is refusing to ship on any project that hasn't
+        # configured tests, which is most projects on first-touch
+        # (portfolio_new dogfood 2026-04-16 hit exactly this and
+        # blocked all 5 candidate items). Reconciliation:
+        #   - `verified` and `no_check_defined` both ship the PR
+        #   - `not_verified` (a check failed) blocks
+        #   - The PR body explicitly notes when verification was
+        #     undefined so reviewers see the gap, and ship_pr only
+        #     arms auto-merge when the base branch has required
+        #     checks (so unprotected repos won't autoship anyway —
+        #     the PR sits open for human review)
         ship_status = ""
         pr_url = ""
-        ship_ready = (
-            review.verdict == "approved"
-            and verification.overall == "verified"
-        )
+        ship_ready = _should_ship(review.verdict, verification.overall)
         if ship_ready and exec_result.commit_sha:
             ship = await ship_pr(
                 worktree_path=ctx.path,
@@ -989,13 +1025,19 @@ async def _execute_and_review(
                 console.print(
                     f"  [red]✗ Ship failed:[/red] {ship.error}"
                 )
-        elif review.verdict == "approved" and verification.overall != "verified":
-            # Approved by reviewer but verification didn't pass — branch
-            # stays for human inspection; no PR opened.
+        elif (
+            review.verdict == "approved"
+            and verification.overall == "not_verified"
+        ):
+            # Reviewer approved but a configured check actually
+            # FAILED — that's a real gate failure (different from
+            # no_check_defined which means we just couldn't tell).
+            # Branch stays for human inspection; no PR opened.
             console.print(
                 f"  [yellow]Approved by reviewer but verification "
-                f"is {verification.overall} — branch left at "
-                f"{ctx.branch}, no PR opened.[/yellow]"
+                f"FAILED — branch left at {ctx.branch}, no PR "
+                f"opened. Check `.sentinel/verifications.jsonl` for "
+                f"which check failed.[/yellow]"
             )
         console.print()
 

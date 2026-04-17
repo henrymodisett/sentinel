@@ -15,8 +15,49 @@ from __future__ import annotations
 
 from pathlib import Path  # noqa: TC003 — runtime use via tmp_path
 
-from sentinel.cli.work_cmd import _build_failure_summary, _suggest_next_action
+from sentinel.cli.work_cmd import (
+    _build_failure_summary,
+    _should_ship,
+    _suggest_next_action,
+)
 from sentinel.journal import Journal, PhaseRecord, ProviderCall
+
+
+class TestShouldShipGate:
+    """Pure ship-gate predicate. Codex: relaxing no_check_defined to
+    ship is a high-scrutiny change — these tests lock the contract."""
+
+    def test_approved_plus_verified_ships(self) -> None:
+        assert _should_ship("approved", "verified") is True
+
+    def test_approved_plus_no_check_defined_ships(self) -> None:
+        """The relaxation: project has no test/lint config, but the
+        LLM reviewer approved. Ship the PR; the body explicitly notes
+        the verification gap and auto-merge is still gated by base-
+        branch protection in ship_pr."""
+        assert _should_ship("approved", "no_check_defined") is True
+
+    def test_approved_plus_not_verified_blocks(self) -> None:
+        """A configured check actually FAILED. Different from
+        no_check_defined; this stays blocked."""
+        assert _should_ship("approved", "not_verified") is False
+
+    def test_approved_plus_none_blocks(self) -> None:
+        """Verifier was skipped (None) — treat as a real gap, not
+        permission-to-ship."""
+        assert _should_ship("approved", None) is False
+
+    def test_changes_requested_never_ships(self) -> None:
+        for v in ("verified", "no_check_defined", "not_verified", None):
+            assert _should_ship("changes-requested", v) is False, (
+                f"changes-requested + {v} must block"
+            )
+
+    def test_rejected_never_ships(self) -> None:
+        for v in ("verified", "no_check_defined", "not_verified", None):
+            assert _should_ship("rejected", v) is False, (
+                f"rejected + {v} must block"
+            )
 
 
 def _journal(tmp_path: Path) -> Journal:
