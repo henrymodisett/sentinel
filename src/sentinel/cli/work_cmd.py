@@ -867,6 +867,122 @@ def _build_pr_body(
     return "\n".join(lines)
 
 
+MAX_CODER_ITERATIONS = 3
+
+
+def _issue_set(issues: list[str]) -> frozenset[str]:
+    """Normalize reviewer blocking issues for no-progress comparison.
+
+    Two reviews reporting the same findings in different order — or
+    with incidental whitespace drift — are still the same findings for
+    the purposes of deciding whether to keep iterating.
+    """
+    return frozenset(i.strip() for i in issues if i.strip())
+
+
+async def _iterate_coder_reviewer(
+    *,
+    work_item,
+    exec_result,
+    review,
+    coder: Coder,
+    reviewer: Reviewer,
+    project: Path,
+    ctx,
+) -> tuple[object, object, int]:
+    """Loop coder.execute → reviewer.review until approved, stuck, or capped.
+
+    The initial (exec_result, review) pair is passed in — the first
+    coder+reviewer call happens at the top of `_execute_and_review`.
+    This helper picks up from there and only iterates when the verdict
+    is not `approved`.
+
+    Termination conditions (in priority order):
+      1. `review.verdict == 'approved'` → ship gate takes over
+      2. `iterations >= MAX_CODER_ITERATIONS` → cap hit, surface final verdict
+      3. No progress: reviewer returns the same blocking_issues set two
+         rounds in a row → stop burning budget on a coder that isn't
+         responding to feedback
+      4. `exec_result.status == 'failed'` mid-loop → surface the error,
+         bail out of iteration (the outer ship gate will handle it)
+
+    Returns `(exec_result, review, iterations_used)`. `iterations_used`
+    starts at 1 (counting the initial pass) so the caller can report
+    "approved on iteration N of M".
+    """
+    iterations = 1
+    prior_issues: frozenset[str] | None = None
+
+    while (
+        review.verdict != "approved"
+        and iterations < MAX_CODER_ITERATIONS
+    ):
+        current = _issue_set(review.blocking_issues)
+        # Stop if the coder couldn't shift the findings since last round.
+        # Check only once we've completed a revise→review cycle (i.e.
+        # we have a prior set to compare against).
+        if prior_issues is not None and current == prior_issues:
+            console.print(
+                "  [yellow]No progress on findings — stopping "
+                "iteration[/yellow]"
+            )
+            break
+        prior_issues = current
+        iterations += 1
+
+        console.print(
+            f"  [dim]revising (iteration {iterations}/"
+            f"{MAX_CODER_ITERATIONS})...[/dim]"
+        )
+        exec_result = await coder.execute(
+            work_item,
+            working_directory=str(ctx.path),
+            artifacts_directory=str(project),
+            branch=ctx.branch,
+            review_feedback=review,
+        )
+        if exec_result.cost_usd > 0:
+            record_spend(
+                project, exec_result.cost_usd, "work-execute",
+                f"revise={work_item.title[:40]}",
+            )
+        if exec_result.status == "failed":
+            console.print(
+                f"  [red]✗ Revise failed:[/red] {exec_result.error}"
+            )
+            break
+        console.print(
+            f"  [green]✓ Revised[/green] — "
+            f"{len(exec_result.files_changed)} files, "
+            f"tests: {'pass' if exec_result.tests_passing else 'FAIL'}"
+        )
+
+        console.print("  [dim]re-reviewing...[/dim]")
+        review = await reviewer.review(
+            work_item, exec_result, str(project),
+            working_directory=str(ctx.path),
+        )
+        if review.cost_usd > 0:
+            record_spend(
+                project, review.cost_usd, "work-review",
+                f"revise={work_item.title[:40]}",
+            )
+        verdict_color = {
+            "approved": "green",
+            "changes-requested": "yellow",
+            "rejected": "red",
+        }[review.verdict]
+        console.print(
+            f"  [{verdict_color}]Review: {review.verdict}"
+            f"[/{verdict_color}] [dim](iteration {iterations})[/dim]"
+        )
+        if review.verdict != "approved" and review.blocking_issues:
+            for issue in review.blocking_issues[:2]:
+                console.print(f"    • {issue}")
+
+    return exec_result, review, iterations
+
+
 async def _execute_and_review(
     action: dict,
     index: int,
@@ -955,6 +1071,30 @@ async def _execute_and_review(
         if review.blocking_issues:
             for issue in review.blocking_issues[:2]:
                 console.print(f"    • {issue}")
+
+        # Iteration loop: if the reviewer rejected or requested
+        # changes, feed the blocking issues back to the coder and try
+        # again. Without this the coder's partial work rots on an
+        # unmerged branch — sentinel was identifying impactful work
+        # but never shipping it. Dogfood on portfolio_new (2026-04-17)
+        # showed 2/2 items rejected for fixable coder-quality issues
+        # (invalid CSS syntax, incomplete scope); both were exactly
+        # what an iteration loop can resolve.
+        if review.verdict != "approved":
+            exec_result, review, iterations_used = await _iterate_coder_reviewer(
+                work_item=work_item,
+                exec_result=exec_result,
+                review=review,
+                coder=coder,
+                reviewer=reviewer,
+                project=project,
+                ctx=ctx,
+            )
+            if iterations_used > 1:
+                console.print(
+                    f"  [dim]coder iterations: {iterations_used}/"
+                    f"{MAX_CODER_ITERATIONS}[/dim]"
+                )
         console.print()
 
         # Verify in the worktree (where the diff lives), persist to

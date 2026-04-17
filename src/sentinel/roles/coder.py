@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from sentinel.providers.interface import ChatResponse
     from sentinel.providers.router import Router
     from sentinel.roles.planner import WorkItem
+    from sentinel.roles.reviewer import ReviewResult
 
 
 @dataclass
@@ -375,6 +376,49 @@ Report what you changed and whether tests pass.
 """
 
 
+REVISE_PROMPT = """\
+You are REVISING your previous work on this work item for the {project_name} project.
+
+## Work Item: {title}
+
+**Type:** {type} | **Priority:** {priority} | **Complexity:** {complexity}/5
+
+{description}
+
+## Acceptance Criteria
+{criteria}
+
+## Files likely to be touched
+{files}
+
+## Your previous attempt was reviewed and needs changes
+
+The code reviewer returned verdict: **{verdict}**.
+
+### Blocking issues (each must be addressed)
+
+{blocking_issues}
+
+{non_blocking}
+
+## Your Task
+
+1. Inspect the commits already on this branch to see your prior approach.
+2. Address EACH blocking issue explicitly. A finding left unaddressed means another rejection.
+3. Refine your prior changes — do not revert wholesale and rewrite from scratch.
+4. Run the project's tests to verify nothing is broken.
+
+## Hard scope rules (same as before)
+
+- Address the blocking issues ONLY. Do not expand scope.
+- Do not modify `.claude/` or `.sentinel/` files.
+- Do not commit or push — sentinel handles staging and commit.
+- Do not refactor surrounding code unless a blocking issue requires it.
+
+Report what you changed in response to the findings and whether tests pass.
+"""
+
+
 class Coder:
     def __init__(self, router: Router) -> None:
         self.router = router
@@ -386,6 +430,7 @@ class Coder:
         working_directory: str,
         artifacts_directory: str,
         branch: str,
+        review_feedback: ReviewResult | None = None,
     ) -> ExecutionResult:
         """Execute a work item via the coder provider's agentic mode.
 
@@ -432,23 +477,54 @@ class Coder:
         # interrupted prior run).
         pre_snapshot = _git_status_snapshot(wd)
 
-        # Build the prompt
+        # Build the prompt — `review_feedback` present means we're
+        # iterating on a previously-committed attempt on this branch,
+        # addressing the reviewer's blocking issues. The coder stays
+        # stateless across calls: each invocation rebuilds the prompt
+        # from the live work item + (for revisions) the review findings.
         criteria = "\n".join(f"- {c}" for c in work_item.acceptance_criteria) or "(none)"
         files = ", ".join(work_item.files) or "(let coder determine)"
         # Project name comes from the artifacts dir (the main project),
         # NOT the working dir (the worktree, whose path includes the
         # `.sentinel/worktrees/wi-N` suffix).
-        prompt = BUILD_PROMPT.format(
-            project_name=Path(ad).name,
-            title=work_item.title,
-            type=work_item.type,
-            priority=work_item.priority,
-            complexity=work_item.complexity,
-            description=work_item.description,
-            criteria=criteria,
-            files=files,
-            risk=work_item.risk or "(none noted)",
-        )
+        if review_feedback is None:
+            prompt = BUILD_PROMPT.format(
+                project_name=Path(ad).name,
+                title=work_item.title,
+                type=work_item.type,
+                priority=work_item.priority,
+                complexity=work_item.complexity,
+                description=work_item.description,
+                criteria=criteria,
+                files=files,
+                risk=work_item.risk or "(none noted)",
+            )
+        else:
+            blocking = (
+                "\n".join(f"- {i}" for i in review_feedback.blocking_issues)
+                or "(none listed — see summary)"
+            )
+            non_blocking_section = ""
+            if review_feedback.non_blocking_observations:
+                items = "\n".join(
+                    f"- {o}" for o in review_feedback.non_blocking_observations
+                )
+                non_blocking_section = (
+                    f"### Non-blocking observations (optional)\n\n{items}\n"
+                )
+            prompt = REVISE_PROMPT.format(
+                project_name=Path(ad).name,
+                title=work_item.title,
+                type=work_item.type,
+                priority=work_item.priority,
+                complexity=work_item.complexity,
+                description=work_item.description,
+                criteria=criteria,
+                files=files,
+                verdict=review_feedback.verdict,
+                blocking_issues=blocking,
+                non_blocking=non_blocking_section,
+            )
 
         # Execute via provider's agentic code mode — runs in `wd`,
         # which is the worktree path in worktree-managed mode and
