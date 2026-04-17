@@ -154,12 +154,44 @@ def _commit_files(
     if not safe_files:
         return False, "all files were sentinel/claude artifacts"
 
-    # Stage the files we care about — needed because untracked/new
-    # files aren't in the index yet, and `git commit -- pathspec`
-    # requires the paths to be known to git.
-    add_result = _run_git(["add", "--", *safe_files], project_path)
-    if add_result.returncode != 0:
-        return False, f"git add failed: {add_result.stderr.strip()}"
+    # Stage paths INDIVIDUALLY rather than as one batch.
+    #
+    # `git add -- a b c d` aborts the entire batch if ANY single path
+    # fails (e.g. a deleted-from-worktree file in some race state, a
+    # path with quoting that confuses git's pathspec resolver, a stale
+    # filesystem entry). Dogfood on portfolio_new (2026-04-16) hit
+    # exactly this: 22 valid file changes from Coder, 1 path that
+    # failed `git add` with "did not match any files", and the entire
+    # commit aborted — losing all 22 valid changes.
+    #
+    # Per-path staging means one bad file logs a warning but the rest
+    # still land. The ship is partial, not destroyed.
+    import logging
+    _log = logging.getLogger(__name__)
+    staged: list[str] = []
+    add_failures: list[tuple[str, str]] = []
+    for path in safe_files:
+        r = _run_git(["add", "--", path], project_path)
+        if r.returncode == 0:
+            staged.append(path)
+        else:
+            add_failures.append((path, r.stderr.strip() or r.stdout.strip()))
+
+    if not staged:
+        # Every path failed — surface the first failure as the error
+        # since they probably share a root cause.
+        first_path, first_err = add_failures[0]
+        return False, (
+            f"git add failed for all {len(safe_files)} files; "
+            f"first: {first_path!r}: {first_err}"
+        )
+
+    if add_failures:
+        _log.warning(
+            "git add failed for %d/%d files (proceeding with %d staged): %s",
+            len(add_failures), len(safe_files), len(staged),
+            [f"{p}: {e}" for p, e in add_failures[:3]],
+        )
 
     title = work_item.title[:72]
     body = (
@@ -175,8 +207,9 @@ def _commit_files(
     # our filter (.sentinel/ artifacts, stray binaries, user's
     # pre-existing in-progress work) would sweep into the sentinel
     # commit.
+    # Commit only what was actually staged (not the failed paths)
     commit_result = _run_git(
-        ["commit", "-m", commit_msg, "--", *safe_files],
+        ["commit", "-m", commit_msg, "--", *staged],
         project_path,
     )
     if commit_result.returncode != 0:

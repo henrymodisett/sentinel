@@ -194,6 +194,84 @@ class TestCoderRejectsNonAgenticProvider:
             ).lower()
 
 
+class TestCommitFilesPerPathResilience:
+    """Regression: dogfood on portfolio_new (2026-04-16) showed
+    `git add a b c d` aborts the entire batch on a single bad path,
+    losing all the valid files. _commit_files now stages each path
+    individually so one bad file is a warning, not a destroyed commit."""
+
+    def test_one_bad_path_does_not_abort_entire_commit(self) -> None:
+        import subprocess as _sp
+
+        from sentinel.roles.coder import _commit_files
+        from sentinel.roles.planner import WorkItem
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _sp.run(["git", "init", "-q", "-b", "main"], cwd=tmpdir, check=True)
+            _sp.run(
+                ["git", "config", "user.email", "t@t.io"], cwd=tmpdir,
+                check=True,
+            )
+            _sp.run(["git", "config", "user.name", "t"], cwd=tmpdir, check=True)
+            _sp.run(
+                ["git", "commit", "--allow-empty", "-m", "init", "-q"],
+                cwd=tmpdir, check=True,
+            )
+
+            # Two valid files actually exist, one path doesn't
+            (Path(tmpdir) / "real-1.py").write_text("a")
+            (Path(tmpdir) / "real-2.py").write_text("b")
+            files = ["real-1.py", "real-2.py", "imaginary.py"]
+
+            work_item = WorkItem(
+                id="t-1", title="resilience test", description="",
+                type="fix", priority="low", complexity=1,
+            )
+            ok, sha = _commit_files(tmpdir, files, work_item)
+
+            assert ok, f"commit should succeed despite one bad path; got error: {sha}"
+            # Both real files landed in the commit
+            show = _sp.run(
+                ["git", "show", "--name-only", "--pretty=format:", sha],
+                capture_output=True, text=True, cwd=tmpdir,
+            ).stdout
+            assert "real-1.py" in show
+            assert "real-2.py" in show
+            # The bad path is absent
+            assert "imaginary.py" not in show
+
+    def test_all_bad_paths_returns_failure(self) -> None:
+        """If EVERY path fails, surface the first failure (they
+        probably share a root cause) rather than committing nothing
+        with a misleading success."""
+        import subprocess as _sp
+
+        from sentinel.roles.coder import _commit_files
+        from sentinel.roles.planner import WorkItem
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _sp.run(["git", "init", "-q", "-b", "main"], cwd=tmpdir, check=True)
+            _sp.run(
+                ["git", "config", "user.email", "t@t.io"], cwd=tmpdir,
+                check=True,
+            )
+            _sp.run(["git", "config", "user.name", "t"], cwd=tmpdir, check=True)
+            _sp.run(
+                ["git", "commit", "--allow-empty", "-m", "init", "-q"],
+                cwd=tmpdir, check=True,
+            )
+
+            work_item = WorkItem(
+                id="t-2", title="all bad", description="",
+                type="fix", priority="low", complexity=1,
+            )
+            ok, err = _commit_files(
+                tmpdir, ["nope1.py", "nope2.py"], work_item,
+            )
+            assert ok is False
+            assert "nope1.py" in err  # first failure surfaced
+
+
 class TestGitStatusSnapshotPreservesFullPath:
     """Regression: dogfood on portfolio_new (2026-04-16) showed
     `_git_status_snapshot` mangling paths — `src/foo.tsx` came back
