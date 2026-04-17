@@ -61,7 +61,7 @@ unsafe_paths = [
 # Valid reviewer IDs: "codex", "claude", "gemini"
 #
 # If this section is absent, the hook defaults to ["codex"] (backward compatible).
-# Override for a single run with: TOOLKIT_REVIEWER=claude git push
+# Override for a single run with: TOUCHSTONE_REVIEWER=claude git push
 
 # [review]
 # reviewers = ["claude", "codex", "gemini"]

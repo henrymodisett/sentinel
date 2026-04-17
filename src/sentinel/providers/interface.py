@@ -122,7 +122,7 @@ async def run_cli_async(
     except _asyncio.CancelledError:
         # Outer cancellation (e.g., a parent asyncio.wait_for timed out,
         # or the task was cancelled by KeyboardInterrupt handling). The
-        # subprocess does NOT die automatically — toolkit dogfood caught
+        # subprocess does NOT die automatically — touchstone dogfood caught
         # this as a process that kept running for 13+ minutes after its
         # asyncio parent gave up. Kill it explicitly, then propagate the
         # cancellation so the caller sees the expected CancelledError.

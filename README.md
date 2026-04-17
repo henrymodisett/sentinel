@@ -53,7 +53,7 @@ Any role can use any provider, with one constraint: the **Coder** needs agentic-
 ## Quick start
 
 ```bash
-brew install henrymodisett/sentinel/sentinel
+brew install autumngarage/sentinel/sentinel
 ```
 
 (There's an unrelated macOS app cask also named `sentinel`, so the tap-prefixed form disambiguates.)
@@ -61,7 +61,7 @@ brew install henrymodisett/sentinel/sentinel
 Or from source:
 
 ```bash
-git clone https://github.com/henrymodisett/sentinel ~/Repos/sentinel
+git clone https://github.com/autumngarage/sentinel ~/Repos/sentinel
 cd ~/Repos/sentinel
 uv tool install .
 ```
@@ -136,24 +136,24 @@ Project context — what it is, current stage, what matters most right now — l
 
 Inspired by [Karpathy's autoresearch](https://github.com/karpathy/autoresearch) — fixed research budgets, structured logging, simplicity-weighted decisions, graceful failure.
 
-## Relationship to toolkit
+## Relationship to touchstone
 
-[Toolkit](https://github.com/henrymodisett/toolkit) defines *what good looks like* — engineering principles, git workflow, Codex pre-merge review hooks, project starter templates.
+[Touchstone](https://github.com/autumngarage/touchstone) defines *what good looks like* — engineering principles, git workflow, Codex pre-merge review hooks, project starter templates.
 Sentinel provides *the autonomous loop that drives improvement* — lenses, planner, coder, reviewer, verifier, PR factory.
 
 **Either installs without the other. Together they're better.**
 
-Sentinel does the minimum `git` and `gh` operations it needs to ship a PR (push, `gh pr create`, `gh pr merge --auto --squash`). It never imports Toolkit modules or calls Toolkit scripts as subprocesses. When Toolkit is installed and its `pre-push` hook is wired, Codex pre-merge review fires automatically on every PR Sentinel ships — same as if a human had pushed. The interface is git itself, not Python; no glue code, no conditional branches.
+Sentinel does the minimum `git` and `gh` operations it needs to ship a PR (push, `gh pr create`, `gh pr merge --auto --squash`). It never imports Touchstone modules or calls Touchstone scripts as subprocesses. When Touchstone is installed and its `pre-push` hook is wired, Codex pre-merge review fires automatically on every PR Sentinel ships — same as if a human had pushed. The interface is git itself, not Python; no glue code, no conditional branches.
 
 ```bash
 # Recommended together
-brew install henrymodisett/toolkit/toolkit
-brew install henrymodisett/sentinel/sentinel
+brew install autumngarage/touchstone/touchstone
+brew install autumngarage/sentinel/sentinel
 ```
 
 ## Status
 
-v0.2.0. Core loop shipped (scan, plan, execute, review). Autonomous PR factory wired (worktree + ship_pr). Available via Homebrew (`henrymodisett/sentinel` tap). PyPI release tracked separately.
+v0.2.0. Core loop shipped (scan, plan, execute, review). Autonomous PR factory wired (worktree + ship_pr). Available via Homebrew (`autumngarage/sentinel` tap). PyPI release tracked separately.
 
 ## License
 

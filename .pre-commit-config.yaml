@@ -68,13 +68,13 @@ repos:
         pass_filenames: false
 
   # ── Project profile checks ─────────────────────────────────────────────
-  # scripts/toolkit-run.sh reads .toolkit-config and dispatches to the
+  # scripts/touchstone-run.sh reads .touchstone-config and dispatches to the
   # appropriate Node/TypeScript, Swift, Rust, Python, Go, or monorepo commands.
   - repo: local
     hooks:
-      - id: toolkit-validate
-        name: Toolkit project validation
-        entry: /usr/bin/env bash scripts/toolkit-run.sh validate
+      - id: touchstone-validate
+        name: Touchstone project validation
+        entry: /usr/bin/env bash scripts/touchstone-run.sh validate
         language: system
         stages: [pre-push]
         always_run: true

@@ -38,8 +38,8 @@ out/
 # uv
 uv.lock
 
-# Toolkit
-.toolkit-version
+# Touchstone
+.touchstone-version
 *.bak
 
 # Sentinel dogfood artifacts (the sentinel repo runs sentinel on itself

@@ -481,8 +481,8 @@ class TestCoderCommitsToFeatureBranch:
                  "commit", "--allow-empty", "-m", "init", "-q"],
                 cwd=tmpdir, check=True,
             )
-            # Configure a toolkit test_command that always fails
-            (Path(tmpdir) / ".toolkit-config").write_text(
+            # Configure a Touchstone test_command that always fails
+            (Path(tmpdir) / ".touchstone-config").write_text(
                 "test_command=false\n",
             )
             result = await coder.execute(work_item, **_coder_kwargs(tmpdir))

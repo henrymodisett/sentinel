@@ -2,8 +2,8 @@
 
 Sentinel does the **minimum** git/gh operations needed to ship a PR:
 push, `gh pr create`, optionally `gh pr merge --auto`. No reimplementation
-of Codex review, branch hygiene, or other Toolkit value-adds — those flow
-in via the user's git hooks (pre-push, etc.) when Toolkit is installed.
+of Codex review, branch hygiene, or other Touchstone value-adds — those flow
+in via the user's git hooks (pre-push, etc.) when Touchstone is installed.
 
 Codex review of the PR factory plan flagged five real risks this module
 addresses up-front:
@@ -127,7 +127,7 @@ async def ship_pr(  # noqa: PLR0911 — explicit early-returns are clearer here
 
     Steps:
       1. Push `branch` to `origin` from the worktree's git context.
-         Toolkit's pre-push hook (Codex review) fires here transparently
+         Touchstone's pre-push hook (Codex review) fires here transparently
          if installed.
       2. Check for an existing open PR with this `--head`. If one
          exists, return "existed" — never duplicate.

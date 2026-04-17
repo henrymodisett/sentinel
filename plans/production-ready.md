@@ -12,7 +12,7 @@ Three concrete release gates:
 
 1. **Self-cycle gate** — `sentinel work --budget 30m` completes one full cycle on the Sentinel repo itself, end-to-end, with no manual intervention, on three consecutive nightly runs.
 2. **Foreign-repo gate** — same command completes on at least two unrelated user repos (one Python, one non-Python) without crashing.
-3. **Install gate** — `brew install henrymodisett/sentinel/sentinel && sentinel work` works on a clean macOS machine in under five minutes.
+3. **Install gate** — `brew install autumngarage/sentinel/sentinel && sentinel work` works on a clean macOS machine in under five minutes.
 
 Until all three gates pass, we are not production-ready.
 
@@ -180,9 +180,9 @@ Five workstreams, sequenced by dependency. Each item is small enough to ship in 
 
 #### 5.1 Homebrew formula
 
-- Mirror the toolkit pattern (`henrymodisett/sentinel` tap).
+- Mirror the Touchstone pattern (`autumngarage/sentinel` tap).
 - Formula installs into a managed venv, exposes `sentinel` on PATH.
-- **Acceptance:** `brew install henrymodisett/sentinel/sentinel` on a clean Mac and `sentinel --version` works.
+- **Acceptance:** `brew install autumngarage/sentinel/sentinel` on a clean Mac and `sentinel --version` works.
 
 #### 5.2 PyPI package
 
@@ -192,7 +192,7 @@ Five workstreams, sequenced by dependency. Each item is small enough to ship in 
 
 #### 5.3 Release script
 
-- Mirrors toolkit: bump `__init__.py`, tag, push, `gh release create`, update Homebrew SHA — one script.
+- Mirrors touchstone: bump `__init__.py`, tag, push, `gh release create`, update Homebrew SHA — one script.
 - **Acceptance:** release a v0.1.0-beta following the script with no manual steps.
 
 ---

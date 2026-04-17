@@ -233,12 +233,12 @@ class TestDiscoverChecks:
             mock_detect.assert_called_once_with(tmp_path)
             assert result == {"lint": "ruff check .", "test": "pytest"}
 
-    def test_toolkit_config_overrides_detection(self, tmp_path: Path) -> None:
-        """If the project has an explicit .toolkit-config, that wins
+    def test_touchstone_config_overrides_detection(self, tmp_path: Path) -> None:
+        """If the project has an explicit .touchstone-config, that wins
         over auto-detection — same precedence as state.py uses for
         scans, so the two paths can never disagree."""
-        toolkit_config = tmp_path / ".toolkit-config"
-        toolkit_config.write_text(
+        touchstone_config = tmp_path / ".touchstone-config"
+        touchstone_config.write_text(
             "lint_command=my-custom-lint\n"
             "test_command=my-custom-test\n",
         )

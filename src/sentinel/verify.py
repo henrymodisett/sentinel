@@ -8,7 +8,7 @@ new code. If they pass, the work item is `verified`. If not, it's
 one objective check.
 
 This module is deliberately narrow — it only runs commands the project
-ITSELF has configured (via `.toolkit-config` or auto-detected from
+ITSELF has configured (via `.touchstone-config` or auto-detected from
 project type). Sentinel never invents a check command. If a project
 has no configured lint/test command, the verdict is `no_check_defined`
 rather than silently passing.
@@ -71,21 +71,21 @@ class WorkItemVerification:
 
 
 def discover_checks(project_path: Path) -> dict[str, str | None]:
-    """Return {check_name: command_or_None} from toolkit-config or
+    """Return {check_name: command_or_None} from touchstone-config or
     auto-detect. Reuses state.py's machinery so verification and scan
     state-gathering can never disagree about what a project's lint /
     test commands are."""
-    from sentinel.state import _read_toolkit_command, detect_project_type
+    from sentinel.state import _read_touchstone_command, detect_project_type
 
-    toolkit_config = project_path / ".toolkit-config"
+    touchstone_config = project_path / ".touchstone-config"
     detected = detect_project_type(project_path)
     return {
         "lint": (
-            _read_toolkit_command(toolkit_config, "lint_command")
+            _read_touchstone_command(touchstone_config, "lint_command")
             or detected.get("lint_command")
         ),
         "test": (
-            _read_toolkit_command(toolkit_config, "test_command")
+            _read_touchstone_command(touchstone_config, "test_command")
             or detected.get("test_command")
         ),
     }
@@ -159,7 +159,7 @@ def verify_work_item(
 
     `working_directory` is where the checks actually execute (the
     worktree path in worktree-managed mode). Defaults to `project_path`
-    for the legacy single-tree path. Check configuration (toolkit-config
+    for the legacy single-tree path. Check configuration (touchstone-config
     etc.) is always read from `project_path` since it's repo-wide.
 
     Overall verdict logic:

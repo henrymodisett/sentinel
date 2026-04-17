@@ -102,7 +102,7 @@ fi
 COMMIT_BODY="$(git log -1 --format=%b)"
 
 # Build body from commit body + PR template (if present).
-BODY_FILE="$(mktemp -t toolkit-pr-body.XXXXXX.md)"
+BODY_FILE="$(mktemp -t touchstone-pr-body.XXXXXX.md)"
 trap 'rm -f "$BODY_FILE"' EXIT
 
 {

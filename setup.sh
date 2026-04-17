@@ -5,7 +5,7 @@
 # Run this after cloning the repo:
 #   bash setup.sh
 #
-# Installs all dev tools, syncs toolkit files, sets up hooks, and installs
+# Installs all dev tools, syncs touchstone files, sets up hooks, and installs
 # project dependencies. Idempotent — safe to re-run anytime.
 #
 set -euo pipefail
@@ -54,17 +54,17 @@ else
 fi
 
 # --------------------------------------------------------------------------
-# 2. Toolkit CLI
+# 2. Touchstone CLI
 # --------------------------------------------------------------------------
-info "Checking toolkit"
-if command -v toolkit >/dev/null 2>&1; then
-  TOOLKIT_VERSION_SUMMARY="$(toolkit version 2>&1 | awk 'NF { sub(/^toolkit /, ""); print; exit }')"
-  ok "toolkit ${TOOLKIT_VERSION_SUMMARY:-installed}"
+info "Checking touchstone"
+if command -v touchstone >/dev/null 2>&1; then
+  TOUCHSTONE_VERSION_SUMMARY="$(touchstone version 2>&1 | awk 'NF { sub(/^touchstone /, ""); print; exit }')"
+  ok "touchstone ${TOUCHSTONE_VERSION_SUMMARY:-installed}"
 else
-  warn "Installing toolkit..."
-  brew tap henrymodisett/toolkit 2>/dev/null || true
-  brew install toolkit
-  ok "toolkit installed"
+  warn "Installing touchstone..."
+  brew tap autumngarage/touchstone 2>/dev/null || true
+  brew install touchstone
+  ok "touchstone installed"
 fi
 
 # --------------------------------------------------------------------------
@@ -105,20 +105,20 @@ else
 fi
 
 # --------------------------------------------------------------------------
-# 5. Sync toolkit files to latest
+# 5. Sync touchstone files to latest
 # --------------------------------------------------------------------------
-info "Syncing toolkit files"
-# Skip update if this IS the toolkit repo (it's the source, not a downstream project).
-if [ -f "bin/toolkit" ] && [ -f "lib/auto-update.sh" ]; then
-  ok "this is the toolkit repo — skipping self-update"
-elif [ -f ".toolkit-version" ]; then
-  toolkit update 2>&1 | grep -E "added|updated|Already" | head -5 | while read -r line; do
+info "Syncing touchstone files"
+# Skip update if this IS the Touchstone repo (it's the source, not a downstream project).
+if [ -f "bin/touchstone" ] && [ -f "lib/auto-update.sh" ]; then
+  ok "this is the Touchstone repo — skipping self-update"
+elif [ -f ".touchstone-version" ]; then
+  touchstone update 2>&1 | grep -E "added|updated|Already" | head -5 | while read -r line; do
     ok "$line"
   done
-  ok "toolkit files up to date"
+  ok "touchstone files up to date"
 else
-  warn "No .toolkit-version found — this project hasn't been bootstrapped."
-  warn "Run: toolkit new $(pwd)"
+  warn "No .touchstone-version found — this project hasn't been bootstrapped."
+  warn "Run: touchstone new $(pwd)"
 fi
 
 # --------------------------------------------------------------------------
@@ -252,10 +252,10 @@ trim() {
   printf '%s' "$value"
 }
 
-load_toolkit_config() {
+load_touchstone_config() {
   local line key value
 
-  [ -f ".toolkit-config" ] || return 0
+  [ -f ".touchstone-config" ] || return 0
 
   while IFS= read -r line || [ -n "$line" ]; do
     line="$(trim "$line")"
@@ -270,7 +270,7 @@ load_toolkit_config() {
       package_manager) CONFIG_PACKAGE_MANAGER="$value" ;;
       targets) CONFIG_TARGETS="$value" ;;
     esac
-  done < ".toolkit-config"
+  done < ".touchstone-config"
 }
 
 detect_node_package_manager() {
@@ -443,7 +443,7 @@ install_profile_dependencies() {
     swift) install_swift_dependencies "$label" "$project_dir" ;;
     go) install_go_dependencies "$label" "$project_dir" ;;
     generic|"") return 1 ;;
-    *) warn "Unknown project_type '$profile' in .toolkit-config"; return 1 ;;
+    *) warn "Unknown project_type '$profile' in .touchstone-config"; return 1 ;;
   esac
 }
 
@@ -472,7 +472,7 @@ install_configured_targets() {
   done
 }
 
-load_toolkit_config
+load_touchstone_config
 
 DEPS_FOUND=false
 ROOT_PROFILE="${CONFIG_PROJECT_TYPE:-auto}"
@@ -502,6 +502,6 @@ fi
 echo ""
 info "Setup complete"
 echo ""
-printf "  Run ${BOLD}toolkit doctor${RESET} to verify everything.\n"
-printf "  Run ${BOLD}toolkit status${RESET} to see project health.\n"
+printf "  Run ${BOLD}touchstone doctor${RESET} to verify everything.\n"
+printf "  Run ${BOLD}touchstone status${RESET} to see project health.\n"
 echo ""

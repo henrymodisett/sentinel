@@ -35,7 +35,7 @@
 #   in the prompt. Set via CODEX_REVIEW_MODE env var or `mode` in .codex-review.toml.
 #
 # Env overrides:
-#   TOOLKIT_REVIEWER              — force a specific reviewer (skips cascade, hard-fails if unavailable)
+#   TOUCHSTONE_REVIEWER              — force a specific reviewer (skips cascade, hard-fails if unavailable)
 #   CODEX_REVIEW_MODE             — review-only|fix|diff-only|no-tests (default: fix)
 #   CODEX_REVIEW_BASE             — base ref to diff against (default: origin/<default-branch>)
 #   CODEX_REVIEW_MAX_ITERATIONS   — fix loop cap (default: from config, or 3)
@@ -415,9 +415,9 @@ if [ "${#ASSIST_HELPERS[@]}" -eq 0 ]; then
 fi
 ASSIST_ENABLED="$(normalize_bool "$ASSIST_ENABLED")"
 
-# TOOLKIT_REVIEWER env var overrides the cascade with a single forced reviewer.
-if [ -n "${TOOLKIT_REVIEWER:-}" ]; then
-  REVIEWER_CASCADE=("$TOOLKIT_REVIEWER")
+# TOUCHSTONE_REVIEWER env var overrides the cascade with a single forced reviewer.
+if [ -n "${TOUCHSTONE_REVIEWER:-}" ]; then
+  REVIEWER_CASCADE=("$TOUCHSTONE_REVIEWER")
 fi
 
 # --------------------------------------------------------------------------
@@ -578,10 +578,10 @@ Use this only for a specific technical question where another reviewer could mat
 
 To request help, include exactly one block in your output and end with CODEX_REVIEW_BLOCKED:
 
-TOOLKIT_HELP_REQUEST_BEGIN
+TOUCHSTONE_HELP_REQUEST_BEGIN
 question: <one concrete question for the peer reviewer>
 context: <brief context; include files or risk areas if useful>
-TOOLKIT_HELP_REQUEST_END
+TOUCHSTONE_HELP_REQUEST_END
 CODEX_REVIEW_BLOCKED
 
 The hook will ask a peer reviewer in read-only mode, then call you once more with the peer answer.
@@ -734,8 +734,8 @@ reviewer_label() {
 # Timeout and error handling
 # --------------------------------------------------------------------------
 
-REVIEW_OUTPUT_FILE="$(mktemp "${TMPDIR:-/tmp}/toolkit-review-output.XXXXXX")"
-ASSIST_OUTPUT_FILE="$(mktemp "${TMPDIR:-/tmp}/toolkit-review-assist-output.XXXXXX")"
+REVIEW_OUTPUT_FILE="$(mktemp "${TMPDIR:-/tmp}/touchstone-review-output.XXXXXX")"
+ASSIST_OUTPUT_FILE="$(mktemp "${TMPDIR:-/tmp}/touchstone-review-assist-output.XXXXXX")"
 trap 'rm -f "$REVIEW_OUTPUT_FILE" "$ASSIST_OUTPUT_FILE"' EXIT
 
 kill_process_tree() {
@@ -832,8 +832,8 @@ fi
 
 # Resolve which reviewer to use from the cascade.
 if ! resolve_reviewer; then
-  if [ -n "${TOOLKIT_REVIEWER:-}" ]; then
-    echo "ERROR: TOOLKIT_REVIEWER=$TOOLKIT_REVIEWER but that reviewer is not available:" >&2
+  if [ -n "${TOUCHSTONE_REVIEWER:-}" ]; then
+    echo "ERROR: TOUCHSTONE_REVIEWER=$TOUCHSTONE_REVIEWER but that reviewer is not available:" >&2
     printf '%b' "$REVIEWER_STATUS" >&2
     exit 1
   fi
@@ -964,7 +964,7 @@ append_cache_file() {
 
 review_cache_key() {
   {
-    printf 'toolkit-codex-review-cache-v2\n'
+    printf 'touchstone-codex-review-cache-v2\n'
     printf 'reviewer=%s\n' "$ACTIVE_REVIEWER"
     printf 'base=%s\n' "$BASE"
     printf 'merge_base=%s\n' "$MERGE_BASE"
@@ -987,7 +987,7 @@ review_cache_key() {
 }
 
 clean_review_cache_dir() {
-  git rev-parse --git-path toolkit/codex-review-clean
+  git rev-parse --git-path touchstone/codex-review-clean
 }
 
 clean_review_cache_file() {
@@ -1082,8 +1082,8 @@ $path"
 
 extract_help_request() {
   awk '
-    /^TOOLKIT_HELP_REQUEST_BEGIN$/ { in_request = 1; next }
-    /^TOOLKIT_HELP_REQUEST_END$/ { exit }
+    /^TOUCHSTONE_HELP_REQUEST_BEGIN$/ { in_request = 1; next }
+    /^TOUCHSTONE_HELP_REQUEST_END$/ { exit }
     in_request { print }
   ' <<EOF
 $1
@@ -1302,7 +1302,7 @@ print_banner() {
   label="$(reviewer_label)"
   printf "${C_CYAN}"
   printf '\n  ╔══════════════════════════════════════╗\n'
-  printf '  ║         ⚡ TOOLKIT REVIEW ⚡        ║\n'
+  printf '  ║         ⚡ TOUCHSTONE REVIEW ⚡        ║\n'
   printf '  ║     %s merge code review%s║\n' "$label" "$(printf '%*s' $((23 - ${#label})) '')"
   printf '  ╚══════════════════════════════════════╝\n\n'
   printf "${C_RESET}"
