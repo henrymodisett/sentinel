@@ -158,6 +158,85 @@ class TestCostByRole:
         assert result.exit_code == 0
         assert "No run journals" in result.output
 
+    def test_selects_recent_cycles_by_mtime_not_filename(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """Regression: collision-suffixed journals sort
+        lexicographically as `<ts>-2.md` < `<ts>.md` because '-' < '.'.
+        With reverse-name sort, `--cycles 1` would pick the unsuffixed
+        original (the FIRST written), not the latest suffixed write.
+        Sort must use mtime instead."""
+        import os as _os
+        self._config(tmp_path)
+        runs = tmp_path / ".sentinel" / "runs"
+        runs.mkdir(parents=True)
+
+        # First-written: the unsuffixed file with role=monitor
+        (runs / "2026-04-16-120000.md").write_text(
+            "## Provider calls\n\n```jsonl\n"
+            '{"phase":"x","provider":"p","model":"m","latency_ms":1,'
+            '"in":0,"out":0,"cost":0.01,"role":"monitor"}\n'
+            "```\n",
+        )
+        # Last-written: the collision-suffixed file with role=coder
+        # Set mtimes explicitly so the test is deterministic.
+        last = runs / "2026-04-16-120000-2.md"
+        last.write_text(
+            "## Provider calls\n\n```jsonl\n"
+            '{"phase":"y","provider":"p","model":"m","latency_ms":1,'
+            '"in":0,"out":0,"cost":0.99,"role":"coder"}\n'
+            "```\n",
+        )
+        _os.utime(runs / "2026-04-16-120000.md", (1000, 1000))
+        _os.utime(last, (2000, 2000))
+
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(main, ["cost", "--by-role", "-n", "1"])
+        assert result.exit_code == 0, result.output
+        # Only the latest (suffixed, role=coder, $0.99) should land
+        assert "coder" in result.output
+        assert "$0.9900" in result.output
+        # The earlier monitor entry must NOT be in the table
+        assert "monitor" not in result.output
+
+
+class TestRoutingShowMtimeOrder:
+    """Same regression as TestCostByRole — routing show -n N must
+    select journals by mtime so collision-suffixed entries don't
+    misorder."""
+
+    def test_selects_recent_cycles_by_mtime(self, tmp_path, monkeypatch) -> None:
+        import os as _os
+        runs = tmp_path / ".sentinel" / "runs"
+        runs.mkdir(parents=True)
+
+        # Older (unsuffixed): no overrides
+        (runs / "2026-04-16-120000.md").write_text(
+            "## Provider calls\n\n```jsonl\n"
+            '{"phase":"x","provider":"p","model":"m","latency_ms":1,'
+            '"in":0,"out":0,"cost":0.0}\n'
+            "```\n",
+        )
+        # Newer (suffixed): contains an override
+        last = runs / "2026-04-16-120000-2.md"
+        last.write_text(
+            "## Provider calls\n\n```jsonl\n"
+            '{"phase":"x","provider":"p","model":"pro","latency_ms":1,'
+            '"in":0,"out":0,"cost":0.0,"routed_via":"my-rule"}\n'
+            "```\n",
+        )
+        _os.utime(runs / "2026-04-16-120000.md", (1000, 1000))
+        _os.utime(last, (2000, 2000))
+
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(main, ["routing", "show", "-n", "1"])
+        assert result.exit_code == 0, result.output
+        # Should find the override from the suffixed (newer) journal,
+        # not give "no overrides" because it picked the unsuffixed one.
+        assert "my-rule" in result.output
+
 
 class TestCycleMaxItemsRefusal:
     """`sentinel cycle --max-items N` (N != default 3) used to silently
