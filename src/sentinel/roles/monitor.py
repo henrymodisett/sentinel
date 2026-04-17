@@ -198,7 +198,22 @@ SYNTHESIZE_SCHEMA = {
                 "properties": {
                     "title": {"type": "string"},
                     "why": {"type": "string"},
-                    "files": {"type": "array", "items": {"type": "string"}},
+                    "files": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "path": {"type": "string"},
+                                "rationale": {
+                                    "type": "string",
+                                    "description": "One-line reason why this file is touched",
+                                },
+                            },
+                            "required": ["path", "rationale"],
+                            "additionalProperties": False,
+                        },
+                        "description": "Files to be touched, each with a one-line rationale",
+                    },
                     "impact": {"type": "string"},
                     "lens": {"type": "string", "description": "Which lens surfaced this"},
                     "kind": {
@@ -213,8 +228,38 @@ SYNTHESIZE_SCHEMA = {
                             "Requires user approval before execution."
                         ),
                     },
+                    "acceptance_criteria": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Testable conditions that must hold after the work is done. "
+                            "Each item should be concrete and verifiable "
+                            "(e.g. 'uv run pytest exits 0', 'output contains X')."
+                        ),
+                        "minItems": 1,
+                    },
+                    "verification": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Shell commands a coder can run to verify the work is correct "
+                            "(e.g. 'uv run pytest', 'uv run ruff check src/')."
+                        ),
+                        "minItems": 1,
+                    },
+                    "out_of_scope": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Things explicitly NOT part of this work item, "
+                            "to prevent scope creep."
+                        ),
+                    },
                 },
-                "required": ["title", "why", "impact", "lens", "kind"],
+                "required": [
+                    "title", "why", "impact", "lens", "kind",
+                    "acceptance_criteria", "verification", "out_of_scope",
+                ],
                 "additionalProperties": False,
             },
             "description": "Top 5 recommended actions, prioritized by impact",
@@ -403,6 +448,32 @@ Coder quits halfway is worse than an "expand" the user rejects.
 When unsure, classify as `expand`. Unapproved refinement is fine.
 Unapproved expansion is scope creep. Half-finished refinement is the worst
 of both — it leaves commits nobody asked for on branches nobody reviews.
+
+## Sharp work items — required fields per top_action
+
+Every top_action MUST include these fields with high-signal content:
+
+**files** — list of {{path, rationale}} objects. Each entry is a specific file
+path with a one-line reason it must be touched. Example:
+  [{{"path": "src/sentinel/roles/monitor.py",
+    "rationale": "owns SYNTHESIZE_SCHEMA — schema change goes here"}}]
+
+**acceptance_criteria** — list of testable conditions that must hold after the
+work is done. Use concrete, verifiable wording:
+  - "uv run pytest exits 0"
+  - "uv run ruff check src/ tests/ exits 0"
+  - "scan output contains **Acceptance criteria:** section"
+NOT vague wording like "the code is better" or "tests are improved".
+
+**verification** — list of shell commands the coder can run to verify correctness.
+At minimum include the test and lint commands for this project:
+  - "uv run pytest"
+  - "uv run ruff check src/ tests/"
+
+**out_of_scope** — list of things explicitly NOT part of this work item to
+prevent scope creep. May be empty list [] if nothing needs bounding, but
+should list any tempting-but-out-of-scope areas when the item is near other
+concerns.
 """
 
 

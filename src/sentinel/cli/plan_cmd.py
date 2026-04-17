@@ -9,6 +9,7 @@ syncs to GitHub issues via `gh` CLI.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from datetime import datetime
@@ -17,6 +18,13 @@ from pathlib import Path
 from rich.console import Console
 
 console = Console()
+
+# Compiled regexes used by _parse_actions_from_scan.
+# Placed at module level so they are compiled once (not per call) and satisfy
+# the N806 "variable in function should be lowercase" lint rule.
+_FILE_BULLET_RE = re.compile(r"^-\s*`([^`]+)`\s*(?:—\s*(.*))?$")
+_NUMBERED_ITEM_RE = re.compile(r"^\d+\.\s+(.+)$")
+_BULLET_ITEM_RE = re.compile(r"^-\s+`?(.+?)`?$")
 
 
 def _find_latest_scan(project_path: Path) -> Path | None:
@@ -29,45 +37,146 @@ def _find_latest_scan(project_path: Path) -> Path | None:
 
 
 def _parse_actions_from_scan(scan_file: Path) -> list[dict]:
-    """Extract 'Top Actions' from a scan markdown file."""
+    """Extract 'Top Actions' from a scan markdown file.
+
+    Handles both the new shape (files as list of {path, rationale} dicts,
+    plus acceptance_criteria / verification / out_of_scope sections) and the
+    legacy flat shape (**Files:** a, b, c on a single line) so older scans on
+    disk still load without error.
+    """
     content = scan_file.read_text()
     actions = []
 
     in_actions = False
     current: dict = {}
+    # Track which multi-line list section we're currently accumulating into.
+    # Values: "files" | "acceptance_criteria" | "verification" | "out_of_scope" | None
+    list_mode: str | None = None
+
+    def _flush_current() -> None:
+        """Append current action to actions if it has content."""
+        if current:
+            actions.append(dict(current))
+
     for line in content.splitlines():
         if line.strip() == "## Top Actions":
             in_actions = True
             continue
         if in_actions and line.startswith("## "):
             # End of Top Actions section
-            if current:
-                actions.append(current)
-                current = {}
+            _flush_current()
+            current = {}
+            list_mode = None
             break
         if not in_actions:
             continue
 
         # Parse "### 1. Title"
         if line.startswith("### ") and ". " in line:
-            if current:
-                actions.append(current)
+            _flush_current()
             title = line.split(". ", 1)[1].strip()
             current = {
-                "title": title, "why": "", "impact": "",
-                "lens": "", "files": [], "kind": "refine",
+                "title": title,
+                "why": "",
+                "impact": "",
+                "lens": "",
+                "files": [],
+                "kind": "refine",
+                "acceptance_criteria": [],
+                "verification": [],
+                "out_of_scope": [],
             }
-        elif line.startswith("**Kind:**"):
+            list_mode = None
+            continue
+
+        if not current:
+            continue
+
+        # --- Single-line header fields ---
+        if line.startswith("**Kind:**"):
             current["kind"] = line.replace("**Kind:**", "").strip()
-        elif line.startswith("**Lens:**"):
+            list_mode = None
+            continue
+        if line.startswith("**Lens:**"):
             current["lens"] = line.replace("**Lens:**", "").strip()
-        elif line.startswith("**Why:**"):
+            list_mode = None
+            continue
+        if line.startswith("**Why:**"):
             current["why"] = line.replace("**Why:**", "").strip()
-        elif line.startswith("**Impact:**"):
+            list_mode = None
+            continue
+        if line.startswith("**Impact:**"):
             current["impact"] = line.replace("**Impact:**", "").strip()
-        elif line.startswith("**Files:**"):
-            files_str = line.replace("**Files:**", "").strip()
-            current["files"] = [f.strip() for f in files_str.split(",") if f.strip()]
+            list_mode = None
+            continue
+
+        # --- Files: new multi-line or legacy flat ---
+        if line.startswith("**Files:**"):
+            remainder = line.replace("**Files:**", "").strip()
+            if remainder:
+                # Legacy flat format: "**Files:** a.py, b.py, c.py"
+                current["files"] = [
+                    {"path": f.strip(), "rationale": ""}
+                    for f in remainder.split(",")
+                    if f.strip()
+                ]
+                list_mode = None
+            else:
+                # New multi-line format: bullet list follows
+                list_mode = "files"
+            continue
+
+        # --- New multi-line list section headers ---
+        if line.startswith("**Acceptance criteria:**"):
+            list_mode = "acceptance_criteria"
+            continue
+        if line.startswith("**Verification:**"):
+            list_mode = "verification"
+            continue
+        if line.startswith("**Out of scope:**"):
+            list_mode = "out_of_scope"
+            continue
+
+        # --- Any other bold header ends list accumulation ---
+        if line.startswith("**") and line.rstrip().endswith("**"):
+            list_mode = None
+            continue
+
+        # --- Accumulate list items into the active list_mode ---
+        if list_mode == "files":
+            m = _FILE_BULLET_RE.match(line.strip())
+            if m:
+                current["files"].append({
+                    "path": m.group(1),
+                    "rationale": (m.group(2) or "").strip(),
+                })
+            elif not line.strip():
+                list_mode = None
+            continue
+
+        if list_mode == "acceptance_criteria":
+            m = _NUMBERED_ITEM_RE.match(line.strip())
+            if m:
+                current["acceptance_criteria"].append(m.group(1).strip())
+            elif not line.strip():
+                list_mode = None
+            continue
+
+        if list_mode == "verification":
+            m = _BULLET_ITEM_RE.match(line.strip())
+            if m:
+                current["verification"].append(m.group(1).strip())
+            elif not line.strip():
+                list_mode = None
+            continue
+
+        if list_mode == "out_of_scope":
+            m = _BULLET_ITEM_RE.match(line.strip())
+            if m:
+                current["out_of_scope"].append(m.group(1).strip())
+            elif not line.strip():
+                list_mode = None
+            continue
 
     if current and in_actions:
         actions.append(current)
@@ -100,12 +209,36 @@ def _write_backlog(project_path: Path, actions: list[dict], scan_file: Path) -> 
         lines.append("")
         lines.append("**Status:** todo")
         lines.append(f"**Lens:** {action.get('lens', '')}")
+        lines.append(f"**Why:** {action.get('why', '')}")
         lines.append(f"**Impact:** {action.get('impact', '')}")
         lines.append("")
-        lines.append(f"{action.get('why', '')}")
-        lines.append("")
         if action.get("files"):
-            lines.append(f"**Files:** {', '.join(action['files'])}")
+            lines.append("**Files:**")
+            for f in action["files"]:
+                if isinstance(f, dict):
+                    path = f.get("path", "")
+                    rationale = f.get("rationale", "")
+                    if rationale:
+                        lines.append(f"- `{path}` — {rationale}")
+                    else:
+                        lines.append(f"- `{path}`")
+                else:
+                    lines.append(f"- `{f}`")
+            lines.append("")
+        if action.get("acceptance_criteria"):
+            lines.append("**Acceptance criteria:**")
+            for j, criterion in enumerate(action["acceptance_criteria"], 1):
+                lines.append(f"{j}. {criterion}")
+            lines.append("")
+        if action.get("verification"):
+            lines.append("**Verification:**")
+            for cmd in action["verification"]:
+                lines.append(f"- `{cmd}`")
+            lines.append("")
+        if action.get("out_of_scope"):
+            lines.append("**Out of scope:**")
+            for item in action["out_of_scope"]:
+                lines.append(f"- {item}")
             lines.append("")
         lines.append("---")
         lines.append("")
