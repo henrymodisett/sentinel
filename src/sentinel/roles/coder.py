@@ -249,13 +249,27 @@ def _commit_files(
         # case today: the `pre-commit` tool installed globally, but the
         # target repo has no .pre-commit-config.yaml. Retry once with
         # the documented bypass env var, and ONLY when the repo truly
-        # lacks the config file — don't override a user whose config
-        # is present but broken.
+        # has never had the config file — don't override a user whose
+        # config is present but broken, AND don't treat "coder deleted
+        # the config" as "repo has no config" (Codex caught this — if
+        # the coder removes the tracked config, the real hook error is
+        # a signal, not an environment mismatch).
+        precommit_config = Path(project_path) / ".pre-commit-config.yaml"
+        # Check HEAD, not the index — staging a deletion removes the
+        # file from the index, which would make `ls-files` claim the
+        # repo was never configured. `cat-file -e HEAD:path` exits 0
+        # iff the path exists in the HEAD tree.
+        head_check = _run_git(
+            ["cat-file", "-e", "HEAD:.pre-commit-config.yaml"],
+            project_path,
+        )
+        precommit_config_tracked = head_check.returncode == 0
         if (
             _is_missing_precommit_config_error(
                 commit_result.stderr, commit_result.stdout,
             )
-            and not (Path(project_path) / ".pre-commit-config.yaml").exists()
+            and not precommit_config.exists()
+            and not precommit_config_tracked
         ):
             import logging
             _log = logging.getLogger(__name__)

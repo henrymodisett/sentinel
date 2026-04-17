@@ -359,6 +359,58 @@ class TestCoderCommitPreCommitMissingConfigRecovery:
             assert ok is False
             assert "commit blocked" in err
 
+    def test_retry_skipped_when_config_tracked_but_coder_deleted_it(
+        self,
+    ) -> None:
+        """Codex review caught: checking only the working tree means a
+        coder that DELETES a tracked .pre-commit-config.yaml would look
+        like a configless repo to the retry guard — we'd bypass the
+        pre-commit hook in a repo that legitimately uses it. Guard
+        must also consult git's tracked-file state (HEAD/index), not
+        just the working tree."""
+        import subprocess as _sp
+
+        from sentinel.roles.coder import _commit_files
+        from sentinel.roles.planner import WorkItem
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._init_repo_with_fake_precommit(tmpdir)
+            config = Path(tmpdir) / ".pre-commit-config.yaml"
+            config.write_text("# real config\n")
+            # Commit the config so it's tracked in HEAD. Use the bypass
+            # env var for this setup commit (the fake hook would abort
+            # it otherwise — the first commit IS the one that adds the
+            # config).
+            _sp.run(
+                ["git", "add", ".pre-commit-config.yaml"],
+                cwd=tmpdir, check=True,
+            )
+            import os
+            env = {**os.environ, "PRE_COMMIT_ALLOW_NO_CONFIG": "1"}
+            _sp.run(
+                ["git", "commit", "-m", "add precommit config"],
+                cwd=tmpdir, check=True, env=env,
+            )
+            # Now the coder deletes the tracked config AND edits a file
+            config.unlink()
+            (Path(tmpdir) / "real.py").write_text("x = 1\n")
+            _sp.run(
+                ["git", "add", "-u", ".pre-commit-config.yaml"],
+                cwd=tmpdir, check=True,
+            )
+
+            work_item = WorkItem(
+                id="t-precommit-3", title="no-retry-on-tracked-delete",
+                description="", type="fix", priority="low", complexity=1,
+            )
+            ok, err = _commit_files(
+                tmpdir, ["real.py", ".pre-commit-config.yaml"], work_item,
+            )
+            # Retry must NOT fire — file was tracked, so the missing-
+            # config error is a signal the coder broke something real.
+            assert ok is False
+            assert "commit blocked" in err
+
 
 class TestGitStatusSnapshotPreservesFullPath:
     """Regression: dogfood on portfolio_new (2026-04-16) showed
