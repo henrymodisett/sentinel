@@ -36,7 +36,7 @@ You are building a tool that automates what Henry does every day: investigate th
 
 ```bash
 bash setup.sh --deps-only          # reinstall deps
-bash scripts/toolkit-run.sh validate  # full validation
+bash scripts/touchstone-run.sh validate  # full validation
 uv run pytest                      # tests
 uv run ruff check src/ tests/      # lint
 uv run ruff check --fix src/ tests/   # auto-fix
@@ -46,7 +46,7 @@ Fix failing tests before pushing.
 
 ## Release & Distribution
 
-Homebrew formula (`brew install sentinel` via `henrymodisett/sentinel` tap) + PyPI (`pip install sentinel`). Release process mirrors toolkit: version bump in `__init__.py`, tag, push, `gh release create`, update Homebrew formula SHA.
+Homebrew formula (`brew install sentinel` via `autumngarage/sentinel` tap) + PyPI (`pip install sentinel`). Release process mirrors touchstone: version bump in `__init__.py`, tag, push, `gh release create`, update Homebrew formula SHA.
 
 ## Architecture
 
@@ -114,9 +114,9 @@ templates/
 | `lenses/universal/*.md` | Analytical perspectives for project evaluation |
 | `templates/.claude/` | Claude Code agents/skills installed into target projects |
 
-## Sentinel and Toolkit — Two Layers, No Coupling
+## Sentinel and Touchstone — Two Layers, No Coupling
 
-Sentinel and the [`henrymodisett/toolkit`](https://github.com/henrymodisett/toolkit) Homebrew package are deliberately separate layers. They compose, they do not depend on each other. **Do not duplicate Toolkit's value-adds inside Sentinel; do not import Toolkit modules; do not call Toolkit scripts as subprocesses.**
+Sentinel and the [`autumngarage/touchstone`](https://github.com/autumngarage/touchstone) Homebrew package are deliberately separate layers. They compose, they do not depend on each other. **Do not duplicate Touchstone's value-adds inside Sentinel; do not import Touchstone modules; do not call Touchstone scripts as subprocesses.**
 
 ### Boundary
 
@@ -126,28 +126,28 @@ Sentinel and the [`henrymodisett/toolkit`](https://github.com/henrymodisett/tool
 | Provider abstraction + routing + budget + journal | Sentinel |
 | Minimum `git`/`gh` operations needed to ship a PR (push, `gh pr create`, `gh pr merge --auto --squash`) | Sentinel |
 | Worktree management for parallel coders | Sentinel |
-| Codex pre-merge review (fires via `pre-push` hook) | Toolkit |
-| Pre-commit / pre-push validation gates | Toolkit |
-| Branch cleanup helpers (`cleanup-branches.sh`) | Toolkit |
-| Project starter templates | Toolkit |
-| The `toolkit` CLI for humans | Toolkit |
+| Codex pre-merge review (fires via `pre-push` hook) | Touchstone |
+| Pre-commit / pre-push validation gates | Touchstone |
+| Branch cleanup helpers (`cleanup-branches.sh`) | Touchstone |
+| Project starter templates | Touchstone |
+| The `touchstone` CLI for humans | Touchstone |
 
 ### How they compose
 
-The interface is **git itself**, not Python. Sentinel does `git commit` / `git push`; whatever pre-commit / pre-push hooks the user has installed fire automatically. If Toolkit is installed and its hooks are wired, Codex review runs on every push Sentinel makes — same way it would for a human-driven push. **Sentinel does not branch on whether Toolkit is installed.** Single code path; hooks decide what to do.
+The interface is **git itself**, not Python. Sentinel does `git commit` / `git push`; whatever pre-commit / pre-push hooks the user has installed fire automatically. If Touchstone is installed and its hooks are wired, Codex review runs on every push Sentinel makes — same way it would for a human-driven push. **Sentinel does not branch on whether Touchstone is installed.** Single code path; hooks decide what to do.
 
 ### Recommend together, operate independently
 
-Sentinel must run cleanly in any repo, with or without Toolkit. `sentinel init` and `sentinel status` may *detect* Toolkit (`shutil.which("toolkit")`) and print a one-line recommendation when absent (`[recommendation] install henrymodisett/toolkit for Codex pre-merge review on every PR Sentinel ships`), but never block on it.
+Sentinel must run cleanly in any repo, with or without Touchstone. `sentinel init` and `sentinel status` may *detect* Touchstone (`shutil.which("touchstone")`) and print a one-line recommendation when absent (`[recommendation] install autumngarage/touchstone for Codex pre-merge review on every PR Sentinel ships`), but never block on it.
 
 ### When in doubt
 
 If a feature seems to need new git/PR/CI logic:
-1. Check if Toolkit already does it (almost always yes).
-2. If not, add it to Toolkit so other projects benefit, then call it from a git hook.
+1. Check if Touchstone already does it (almost always yes).
+2. If not, add it to Touchstone so other projects benefit, then call it from a git hook.
 3. Build it inside Sentinel only if the logic is genuinely LLM-flavored and project-specific.
 
-If you find yourself reaching for `subprocess.run(["bash", "scripts/open-pr.sh"…])` from Sentinel, **stop** — the boundary has been violated. Either the feature belongs in a git hook (Toolkit's domain) or in Sentinel's own minimum-`gh` layer (`src/sentinel/pr.py`).
+If you find yourself reaching for `subprocess.run(["bash", "scripts/open-pr.sh"…])` from Sentinel, **stop** — the boundary has been violated. Either the feature belongs in a git hook (Touchstone's domain) or in Sentinel's own minimum-`gh` layer (`src/sentinel/pr.py`).
 
 ## State & Config
 

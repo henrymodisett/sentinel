@@ -497,14 +497,14 @@ class Coder:
             )
             return result
 
-        # Run tests to verify. The toolkit-config lives at the project
+        # Run tests to verify. The touchstone-config lives at the project
         # root (artifacts_directory), not the worktree — config is
         # repo-wide. Tests, however, run in the working directory so
         # they see the Coder's diff.
-        from sentinel.state import _read_toolkit_command  # type: ignore[attr-defined]
+        from sentinel.state import _read_touchstone_command  # type: ignore[attr-defined]
 
-        toolkit_config = Path(ad) / ".toolkit-config"
-        test_cmd = _read_toolkit_command(toolkit_config, "test_command")
+        touchstone_config = Path(ad) / ".touchstone-config"
+        test_cmd = _read_touchstone_command(touchstone_config, "test_command")
         if test_cmd:
             try:
                 test_result = subprocess.run(

@@ -48,7 +48,7 @@ DOC_DIRS: tuple[str, ...] = (
 SKIP_DIRS: frozenset[str] = frozenset({
     ".git", ".venv", "venv", "node_modules", ".next", "dist", "build",
     "__pycache__", ".pytest_cache", ".sentinel", ".claude",
-    "vendor", ".toolkit-version",
+    "vendor", ".touchstone-version",
 })
 
 # Tiered keywords that bias ranking. Higher tier = higher priority. Used

@@ -1,6 +1,6 @@
 """Tests for defense-in-depth against hung provider calls.
 
-Toolkit dogfood found a real hang: a Gemini subprocess ran 13+ minutes
+Touchstone dogfood found a real hang: a Gemini subprocess ran 13+ minutes
 past its budget, and asyncio.gather kept waiting for it — blocking the
 whole pipeline and erasing six sibling lens evaluations that had
 already succeeded.
@@ -26,7 +26,7 @@ from sentinel.providers.interface import run_cli_async
 class TestRunCliAsyncCancellationKillsSubprocess:
     """If an outer asyncio.wait_for cancels run_cli_async mid-flight,
     the subprocess must be killed — not left running as an orphan.
-    Without this fix, the toolkit dogfood pattern reproduces: outer
+    Without this fix, the Touchstone dogfood pattern reproduces: outer
     task gives up, inner subprocess keeps running for minutes."""
 
     @pytest.mark.asyncio

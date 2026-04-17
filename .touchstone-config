@@ -1,4 +1,4 @@
-# toolkit project profile. Commit this file so all clones use the same commands.
+# touchstone project profile. Commit this file so all clones use the same commands.
 project_type=python
 package_manager=uv
 monorepo=false

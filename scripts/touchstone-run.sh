@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 #
-# scripts/toolkit-run.sh — run project profile tasks from .toolkit-config.
+# scripts/touchstone-run.sh — run project profile tasks from .touchstone-config.
 #
 # Usage:
-#   bash scripts/toolkit-run.sh detect
-#   bash scripts/toolkit-run.sh lint
-#   bash scripts/toolkit-run.sh typecheck
-#   bash scripts/toolkit-run.sh build
-#   bash scripts/toolkit-run.sh test
-#   bash scripts/toolkit-run.sh validate
+#   bash scripts/touchstone-run.sh detect
+#   bash scripts/touchstone-run.sh lint
+#   bash scripts/touchstone-run.sh typecheck
+#   bash scripts/touchstone-run.sh build
+#   bash scripts/touchstone-run.sh test
+#   bash scripts/touchstone-run.sh validate
 #
 set -euo pipefail
 
@@ -17,7 +17,7 @@ ACTION="${1:-validate}"
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 cd "$REPO_ROOT"
 
-CONFIG_FILE="${TOOLKIT_CONFIG_FILE:-.toolkit-config}"
+CONFIG_FILE="${TOUCHSTONE_CONFIG_FILE:-.touchstone-config}"
 
 PROJECT_TYPE=""
 PACKAGE_MANAGER=""
@@ -253,7 +253,7 @@ run_python_action() {
       fi
       ;;
     build)
-      ok "no default Python build command; set build_command in .toolkit-config"
+      ok "no default Python build command; set build_command in .touchstone-config"
       ;;
     test)
       if python_bin="$(find_python_bin)"; then
@@ -354,7 +354,7 @@ run_profile_action() {
     swift) run_swift_action "$action" ;;
     go) run_go_action "$action" ;;
     generic|"")
-      ok "generic project has no default '$action' command; set ${action}_command in .toolkit-config"
+      ok "generic project has no default '$action' command; set ${action}_command in .touchstone-config"
       ;;
     *)
       warn "unknown project_type '$profile' for action '$action'"
@@ -479,7 +479,7 @@ case "$ACTION" in
   lint|typecheck|build|test) run_action "$ACTION" ;;
   validate) run_validate ;;
   *)
-    echo "ERROR: unknown toolkit-run action '$ACTION'" >&2
+    echo "ERROR: unknown touchstone-run action '$ACTION'" >&2
     usage >&2
     exit 1
     ;;

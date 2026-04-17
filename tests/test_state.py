@@ -41,7 +41,7 @@ class TestGatherState:
             assert isinstance(state, ProjectState)
 
     @patch("sentinel.state.subprocess.run", side_effect=_mock_run)
-    def test_no_toolkit_config_means_no_tests(self, mock_sub) -> None:
+    def test_no_touchstone_config_means_no_tests(self, mock_sub) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             state = gather_state(Path(tmpdir))
             assert state.tests_passed is None

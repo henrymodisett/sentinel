@@ -770,7 +770,7 @@ class Monitor:
         # Run all lens evaluations in parallel with a per-lens timeout
         # and exception isolation — one hung lens must not block the
         # pipeline or erase the six sibling lenses that already succeeded.
-        # Toolkit dogfood hit this: a Gemini sub-call ran 13+ minutes
+        # Touchstone dogfood hit this: a Gemini sub-call ran 13+ minutes
         # past its budget, and gather() kept waiting for it, so the
         # cycle died with zero persisted lens evaluations.
         #

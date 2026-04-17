@@ -853,7 +853,7 @@ def _build_pr_body(
             "",
             "> ⚠️ **No automated verification was run.** This project "
             "has no `lint_command` or `test_command` configured in "
-            "`.toolkit-config`, so sentinel could not independently "
+            "`.touchstone-config`, so sentinel could not independently "
             "verify the diff. The reviewer LLM still approved the "
             "change; please review carefully before merging.",
         ]

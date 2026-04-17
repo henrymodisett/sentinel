@@ -73,8 +73,8 @@ def _run(args: list[str], cwd: Path, timeout: int = 10) -> subprocess.CompletedP
     )
 
 
-def _read_toolkit_command(config_path: Path, key: str) -> str | None:
-    """Read a command from .toolkit-config."""
+def _read_touchstone_command(config_path: Path, key: str) -> str | None:
+    """Read a command from .touchstone-config."""
     if not config_path.exists():
         return None
     for line in config_path.read_text().splitlines():
@@ -281,9 +281,9 @@ def gather_state(project_path: Path) -> ProjectState:
     if goals_md.exists():
         state.goals_md = goals_md.read_text()[:3000]
 
-    # Test results — try toolkit-config first, then auto-detect
-    toolkit_config = project_path / ".toolkit-config"
-    test_cmd = _read_toolkit_command(toolkit_config, "test_command")
+    # Test results — try touchstone-config first, then auto-detect
+    touchstone_config = project_path / ".touchstone-config"
+    test_cmd = _read_touchstone_command(touchstone_config, "test_command")
     if not test_cmd:
         detected = detect_project_type(project_path)
         test_cmd = detected.get("test_command")
@@ -305,8 +305,8 @@ def gather_state(project_path: Path) -> ProjectState:
     else:
         state.test_output = "(no test command configured)"
 
-    # Lint results — try toolkit-config first, then auto-detect
-    lint_cmd = _read_toolkit_command(toolkit_config, "lint_command")
+    # Lint results — try touchstone-config first, then auto-detect
+    lint_cmd = _read_touchstone_command(touchstone_config, "lint_command")
     if not lint_cmd:
         detected = detect_project_type(project_path)
         lint_cmd = detected.get("lint_command")
