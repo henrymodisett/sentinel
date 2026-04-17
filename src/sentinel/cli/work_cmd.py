@@ -309,6 +309,14 @@ async def _run_single_cycle(
     if not config:
         return
 
+    # Snapshot daily spend at cycle start so --budget enforces this run's
+    # spend, not the daily running total. Without this, passing
+    # `--budget $5` on a day already at $4 of spend blocks the cycle
+    # before any work runs. Mirrors loop mode's session_spend_start.
+    cycle_spend_start = check_budget(
+        project, config.budget.daily_limit_usd, config.budget.warn_at_usd,
+    ).today_spent_usd
+
     # Pre-flight: any role configured for the local (ollama) provider
     # needs its model already pulled. Surfacing this as an actionable
     # `ollama pull X` message is much friendlier than letting the first
@@ -398,7 +406,8 @@ async def _run_single_cycle(
         while True:
             # Budget check
             budget_ok, reason = _check_all_budgets(
-                project, config, money_budget, start_time, time_budget_sec,
+                project, config, money_budget, cycle_spend_start,
+                start_time, time_budget_sec,
             )
             if not budget_ok:
                 console.print(f"\n[yellow]  Stopping: {reason}[/yellow]")
@@ -724,10 +733,16 @@ def _check_all_budgets(
     project: Path,
     config: SentinelConfig,
     money_budget: float | None,
+    cycle_spend_start: float,
     start_time: float,
     time_budget_sec: int | None,
 ) -> tuple[bool, str]:
-    """Check all budget constraints. Returns (ok, reason_if_not)."""
+    """Check all budget constraints. Returns (ok, reason_if_not).
+
+    `cycle_spend_start` is the daily spend snapshotted at cycle start, so
+    `--budget $X` enforces a per-run cap (this cycle's delta) rather than
+    a second daily cap. Daily limit from config still applies separately.
+    """
     # Daily money budget (from config)
     budget = check_budget(
         project, config.budget.daily_limit_usd, config.budget.warn_at_usd,
@@ -738,12 +753,15 @@ def _check_all_budgets(
             f"(${budget.today_spent_usd:.2f} / ${budget.daily_limit_usd:.2f})"
         )
 
-    # Per-work money budget (from --budget flag)
-    if money_budget is not None and budget.today_spent_usd >= money_budget:
-        return False, (
-            f"session money budget reached "
-            f"(${budget.today_spent_usd:.2f} / ${money_budget:.2f})"
-        )
+    # Per-run money budget (from --budget flag) — compares this cycle's
+    # spend, not the daily total. Mirrors loop mode's session_spend_start.
+    if money_budget is not None:
+        cycle_spent = budget.today_spent_usd - cycle_spend_start
+        if cycle_spent >= money_budget:
+            return False, (
+                f"per-run budget reached "
+                f"(${cycle_spent:.2f} / ${money_budget:.2f})"
+            )
 
     # Per-work time budget
     if time_budget_sec is not None:

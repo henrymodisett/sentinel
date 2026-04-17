@@ -44,9 +44,11 @@ def main() -> None:
     "--budget", "-b",
     default=None,
     help=(
-        "Budget cap. Money ($5, 10.50), time (10m, 1h, 30s), or both "
-        "comma-separated (10m,$5). For free providers (Gemini OAuth, "
-        "Ollama) the money cap is naturally a no-op since calls cost $0."
+        "Per-run cap on this cycle's spend (single mode) or session spend "
+        "(loop mode). Money ($5, 10.50), time (10m, 1h, 30s), or both "
+        "comma-separated (10m,$5). Independent of daily_limit_usd in "
+        "config.toml — daily cap still applies. For free providers "
+        "(Gemini OAuth, Ollama) the money cap is naturally a no-op."
     ),
 )
 @click.option(
