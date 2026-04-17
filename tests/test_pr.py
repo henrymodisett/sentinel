@@ -71,7 +71,7 @@ class TestShipPRSuccessPaths:
                 return _gh_result(stdout="auto-merge enabled")
             raise AssertionError(f"unexpected gh args: {args}")
 
-        with patch("sentinel.pr.run_git", side_effect=_push_ok), \
+        with patch("sentinel.pr.run_git_with_precommit_recovery", side_effect=_push_ok), \
              patch("sentinel.pr._gh", side_effect=fake_gh):
             result = asyncio.run(ship_pr(
                 worktree_path=tmp_path / "wt",
@@ -126,7 +126,7 @@ class TestShipPRSuccessPaths:
                 return _gh_result(returncode=1, stderr="Not Found")
             raise AssertionError(f"unexpected gh args: {args}")
 
-        with patch("sentinel.pr.run_git", side_effect=_push_ok), \
+        with patch("sentinel.pr.run_git_with_precommit_recovery", side_effect=_push_ok), \
              patch("sentinel.pr._gh", side_effect=fake_gh):
             result = asyncio.run(ship_pr(
                 worktree_path=tmp_path / "wt",
@@ -165,7 +165,7 @@ class TestShipPRIdempotency:
                 f"ship_pr made gh calls beyond `pr list` after finding existing PR: {args}",
             )
 
-        with patch("sentinel.pr.run_git", side_effect=_push_ok), \
+        with patch("sentinel.pr.run_git_with_precommit_recovery", side_effect=_push_ok), \
              patch("sentinel.pr._gh", side_effect=fake_gh):
             result = asyncio.run(ship_pr(
                 worktree_path=tmp_path / "wt",
@@ -188,7 +188,7 @@ class TestShipPRFailurePaths:
     def test_push_failure_surfaces_stderr(self, tmp_path: Path) -> None:
         """A failed push must return status='failed' with the git
         stderr in `error` — silent failure is the worst kind."""
-        with patch("sentinel.pr.run_git", side_effect=_push_fail):
+        with patch("sentinel.pr.run_git_with_precommit_recovery", side_effect=_push_fail):
             result = asyncio.run(ship_pr(
                 worktree_path=tmp_path / "wt",
                 project_path=tmp_path,
@@ -210,7 +210,7 @@ class TestShipPRFailurePaths:
                 return _gh_result(returncode=1, stderr="API rate limit exceeded")
             raise AssertionError(f"unexpected gh args: {args}")
 
-        with patch("sentinel.pr.run_git", side_effect=_push_ok), \
+        with patch("sentinel.pr.run_git_with_precommit_recovery", side_effect=_push_ok), \
              patch("sentinel.pr._gh", side_effect=fake_gh):
             result = asyncio.run(ship_pr(
                 worktree_path=tmp_path / "wt",
@@ -244,7 +244,7 @@ class TestShipPRSafety:
 
         huge_body = "# big body\n" + ("x" * 100_000)
 
-        with patch("sentinel.pr.run_git", side_effect=_push_ok), \
+        with patch("sentinel.pr.run_git_with_precommit_recovery", side_effect=_push_ok), \
              patch("sentinel.pr._gh", side_effect=fake_gh):
             asyncio.run(ship_pr(
                 worktree_path=tmp_path / "wt",
@@ -280,7 +280,7 @@ class TestShipPRSafety:
                 return _gh_result(returncode=1)
             raise AssertionError(f"unexpected gh args: {args}")
 
-        with patch("sentinel.pr.run_git", side_effect=fake_run_git), \
+        with patch("sentinel.pr.run_git_with_precommit_recovery", side_effect=fake_run_git), \
              patch("sentinel.pr._gh", side_effect=fake_gh):
             asyncio.run(ship_pr(
                 worktree_path=tmp_path / "wt",

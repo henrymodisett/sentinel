@@ -39,7 +39,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from sentinel.git_ops import run_git
+from sentinel.git_ops import run_git_with_precommit_recovery
 
 
 @dataclass
@@ -144,10 +144,14 @@ async def ship_pr(  # noqa: PLR0911 — explicit early-returns are clearer here
     """
     # 1. Push (use upstream tracking; --force-with-lease so a resumed
     # cycle can update the branch safely without clobbering remote work
-    # that wasn't there when we started).
-    push_result = run_git(
+    # that wasn't there when we started). Use the precommit-recovery
+    # wrapper: globally-installed `pre-commit` also registers a
+    # pre-push hook, and it aborts push in configless repos with the
+    # same signature the pre-commit hook uses. Dogfood on portfolio_new
+    # hit this after the commit path was fixed.
+    push_result = run_git_with_precommit_recovery(
         ["push", "--force-with-lease", "-u", "origin", branch],
-        worktree_path, check=False, timeout=120,
+        worktree_path, timeout=120,
     )
     if push_result.returncode != 0:
         return ShipResult(
