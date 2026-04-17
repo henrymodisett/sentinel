@@ -9,41 +9,19 @@ DEFAULT_RULES set when dogfood reveals a new failure mode.
 
 from __future__ import annotations
 
-import json
 import os
-import re
 from pathlib import Path
 
 from rich.console import Console
 from rich.table import Table
+
+from sentinel.journal import parse_journal_calls
 
 console = Console()
 
 
 def _runs_dir(project_path: Path) -> Path:
     return project_path / ".sentinel" / "runs"
-
-
-def _parse_journal(path: Path) -> list[dict]:
-    """Extract the JSONL provider-calls block from a journal markdown
-    file. Returns a list of call dicts. Empty list if the journal has
-    no provider calls or the file can't be parsed."""
-    try:
-        text = path.read_text()
-    except OSError:
-        return []
-    block = re.search(r"```jsonl\n(.*?)\n```", text, re.DOTALL)
-    if not block:
-        return []
-    calls: list[dict] = []
-    for line in block.group(1).splitlines():
-        if not line.strip():
-            continue
-        try:
-            calls.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    return calls
 
 
 def run_routing_show(
@@ -59,14 +37,18 @@ def run_routing_show(
         )
         return
 
-    journals = sorted(runs.glob("*.md"), reverse=True)[:limit]
+    # Sort by mtime so collision-suffixed journals (`...-2.md`) order
+    # correctly — see cost_cmd._print_by_role for the same fix and rationale.
+    journals = sorted(
+        runs.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True,
+    )[:limit]
     if not journals:
         console.print("[yellow]No run journals to inspect.[/yellow]")
         return
 
     overrides: list[tuple[str, dict]] = []
     for journal_path in journals:
-        for call in _parse_journal(journal_path):
+        for call in parse_journal_calls(journal_path):
             if call.get("routed_via"):
                 overrides.append((journal_path.stem, call))
 

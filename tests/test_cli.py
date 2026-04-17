@@ -1,5 +1,7 @@
 """Tests for CLI commands."""
 
+from pathlib import Path  # noqa: TC003 — runtime use via tmp_path
+
 from click.testing import CliRunner
 
 from sentinel.cli.main import main
@@ -88,6 +90,165 @@ class TestStatusCommand:
         assert result.exit_code == 0, result.output
         assert "State:" in result.output
         assert "Spend (today):" in result.output
+
+
+class TestCostByRole:
+    """`sentinel cost --by-role` aggregates spend across recent
+    journals. Single-cycle by-role tables already work (rendered into
+    each journal); this rolls them up across runs."""
+
+    def _seed(self, project: Path, journals: list[str]) -> None:
+        runs = project / ".sentinel" / "runs"
+        runs.mkdir(parents=True, exist_ok=True)
+        for i, body in enumerate(journals):
+            (runs / f"2026-04-16-{i:06d}.md").write_text(body)
+
+    def _config(self, project: Path) -> None:
+        sentinel_dir = project / ".sentinel"
+        sentinel_dir.mkdir(exist_ok=True)
+        (sentinel_dir / "config.toml").write_text(
+            f'[project]\nname = "test"\npath = "{project}"\ntype = "python"\n'
+            '[roles.monitor]\nprovider = "gemini"\nmodel = "gemini-2.5-flash"\n'
+            '[roles.researcher]\nprovider = "gemini"\nmodel = "gemini-2.5-pro"\n'
+            '[roles.planner]\nprovider = "claude"\nmodel = "claude-opus-4-6"\n'
+            '[roles.coder]\nprovider = "claude"\nmodel = "claude-sonnet-4-6"\n'
+            '[roles.reviewer]\nprovider = "gemini"\nmodel = "gemini-2.5-pro"\n'
+            "[budget]\ndaily_limit_usd = 15.0\nwarn_at_usd = 10.0\n",
+        )
+
+    def test_aggregates_cost_per_role_across_journals(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        self._config(tmp_path)
+        # Two journals, each with calls tagged by role
+        self._seed(tmp_path, [
+            "## Provider calls\n\n```jsonl\n"
+            '{"phase":"scan","provider":"gemini","model":"flash","latency_ms":100,'
+            '"in":1000,"out":200,"cost":0.01,"role":"monitor"}\n'
+            '{"phase":"scan","provider":"gemini","model":"pro","latency_ms":300,'
+            '"in":500,"out":100,"cost":0.05,"role":"researcher"}\n'
+            "```\n",
+            "## Provider calls\n\n```jsonl\n"
+            '{"phase":"execute","provider":"claude","model":"sonnet","latency_ms":2000,'
+            '"in":5000,"out":2000,"cost":0.10,"role":"coder"}\n'
+            '{"phase":"scan","provider":"gemini","model":"flash","latency_ms":50,'
+            '"in":1500,"out":300,"cost":0.015,"role":"monitor"}\n'
+            "```\n",
+        ])
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(main, ["cost", "--by-role"])
+        assert result.exit_code == 0, result.output
+        # All three roles appear; costs aggregated
+        assert "monitor" in result.output
+        assert "researcher" in result.output
+        assert "coder" in result.output
+        # Aggregate: monitor = 0.01 + 0.015 = 0.025
+        assert "$0.0250" in result.output
+        # Total = 0.01 + 0.05 + 0.10 + 0.015 = 0.175
+        assert "$0.1750" in result.output
+
+    def test_no_journals_prints_friendly_message(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        self._config(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(main, ["cost", "--by-role"])
+        assert result.exit_code == 0
+        assert "No run journals" in result.output
+
+    def test_negative_cycles_rejected_by_click(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """Codex flagged: a negative `--cycles` would slice nothing
+        and silently report empty without rejecting the input. The
+        IntRange constraint refuses at the CLI layer."""
+        self._config(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(main, ["cost", "--by-role", "-n", "-1"])
+        assert result.exit_code != 0
+        assert "Invalid value" in result.output or "is not in" in result.output
+
+    def test_selects_recent_cycles_by_mtime_not_filename(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """Regression: collision-suffixed journals sort
+        lexicographically as `<ts>-2.md` < `<ts>.md` because '-' < '.'.
+        With reverse-name sort, `--cycles 1` would pick the unsuffixed
+        original (the FIRST written), not the latest suffixed write.
+        Sort must use mtime instead."""
+        import os as _os
+        self._config(tmp_path)
+        runs = tmp_path / ".sentinel" / "runs"
+        runs.mkdir(parents=True)
+
+        # First-written: the unsuffixed file with role=monitor
+        (runs / "2026-04-16-120000.md").write_text(
+            "## Provider calls\n\n```jsonl\n"
+            '{"phase":"x","provider":"p","model":"m","latency_ms":1,'
+            '"in":0,"out":0,"cost":0.01,"role":"monitor"}\n'
+            "```\n",
+        )
+        # Last-written: the collision-suffixed file with role=coder
+        # Set mtimes explicitly so the test is deterministic.
+        last = runs / "2026-04-16-120000-2.md"
+        last.write_text(
+            "## Provider calls\n\n```jsonl\n"
+            '{"phase":"y","provider":"p","model":"m","latency_ms":1,'
+            '"in":0,"out":0,"cost":0.99,"role":"coder"}\n'
+            "```\n",
+        )
+        _os.utime(runs / "2026-04-16-120000.md", (1000, 1000))
+        _os.utime(last, (2000, 2000))
+
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(main, ["cost", "--by-role", "-n", "1"])
+        assert result.exit_code == 0, result.output
+        # Only the latest (suffixed, role=coder, $0.99) should land
+        assert "coder" in result.output
+        assert "$0.9900" in result.output
+        # The earlier monitor entry must NOT be in the table
+        assert "monitor" not in result.output
+
+
+class TestRoutingShowMtimeOrder:
+    """Same regression as TestCostByRole — routing show -n N must
+    select journals by mtime so collision-suffixed entries don't
+    misorder."""
+
+    def test_selects_recent_cycles_by_mtime(self, tmp_path, monkeypatch) -> None:
+        import os as _os
+        runs = tmp_path / ".sentinel" / "runs"
+        runs.mkdir(parents=True)
+
+        # Older (unsuffixed): no overrides
+        (runs / "2026-04-16-120000.md").write_text(
+            "## Provider calls\n\n```jsonl\n"
+            '{"phase":"x","provider":"p","model":"m","latency_ms":1,'
+            '"in":0,"out":0,"cost":0.0}\n'
+            "```\n",
+        )
+        # Newer (suffixed): contains an override
+        last = runs / "2026-04-16-120000-2.md"
+        last.write_text(
+            "## Provider calls\n\n```jsonl\n"
+            '{"phase":"x","provider":"p","model":"pro","latency_ms":1,'
+            '"in":0,"out":0,"cost":0.0,"routed_via":"my-rule"}\n'
+            "```\n",
+        )
+        _os.utime(runs / "2026-04-16-120000.md", (1000, 1000))
+        _os.utime(last, (2000, 2000))
+
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(main, ["routing", "show", "-n", "1"])
+        assert result.exit_code == 0, result.output
+        # Should find the override from the suffixed (newer) journal,
+        # not give "no overrides" because it picked the unsuffixed one.
+        assert "my-rule" in result.output
 
 
 class TestCycleMaxItemsRefusal:

@@ -37,6 +37,46 @@ from pathlib import Path  # noqa: TC003 — runtime use for fs writes
 
 logger = logging.getLogger(__name__)
 
+
+def parse_journal_calls(path: Path) -> list[dict]:
+    """Extract the JSONL provider-calls block from a journal markdown file.
+
+    Returns a list of call dicts (each with phase, provider, model,
+    latency_ms, in, out, cost, optional role/routed_via/error). Empty
+    list if the journal has no provider calls or the file can't be
+    parsed. Used by `sentinel routing show`, `sentinel cost --by-role`,
+    and any future per-cycle introspection that wants the call data.
+    """
+    import re as _re
+    try:
+        text = path.read_text()
+    except OSError as e:
+        # A journal we can't read isn't fatal — downstream callers
+        # treat empty results as "no calls" — but log so the
+        # underlying file/permission problem is visible rather than
+        # masquerading as an empty journal.
+        logger.warning("could not read journal %s: %s", path, e)
+        return []
+    block = _re.search(r"```jsonl\n(.*?)\n```", text, _re.DOTALL)
+    if not block:
+        return []
+    calls: list[dict] = []
+    for ln_no, line in enumerate(block.group(1).splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            calls.append(json.loads(line))
+        except json.JSONDecodeError as e:
+            # Same logic — partial parse is better than crash, but
+            # silent partial would let cost/routing under-report.
+            logger.warning(
+                "could not parse JSONL line %d of %s: %s",
+                ln_no, path, e,
+            )
+            continue
+    return calls
+
+
 # Stderr is rendered into the journal markdown only for failed calls. We
 # truncate at render time (not at capture) so any future tooling can read
 # the full payload from the in-memory ProviderCall, while the on-disk

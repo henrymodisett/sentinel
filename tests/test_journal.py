@@ -424,6 +424,48 @@ class TestJournalShape:
             set_current_journal(None)
             set_current_role("")
 
+    def test_parse_journal_calls_logs_on_unreadable_file(
+        self, tmp_path: Path, caplog,
+    ) -> None:
+        """Regression: silent return on read errors would let cost/
+        routing aggregations under-report without any operator-visible
+        warning. Must log so the broken file is visible."""
+        import logging
+
+        from sentinel.journal import parse_journal_calls
+
+        missing = tmp_path / "does-not-exist.md"
+        with caplog.at_level(logging.WARNING, logger="sentinel.journal"):
+            result = parse_journal_calls(missing)
+        assert result == []
+        assert any("could not read" in rec.message for rec in caplog.records)
+
+    def test_parse_journal_calls_logs_on_malformed_jsonl(
+        self, tmp_path: Path, caplog,
+    ) -> None:
+        """Same contract for invalid JSONL — partial parse is fine
+        (continue past the bad line) but must log so the corruption
+        is visible."""
+        import logging
+
+        from sentinel.journal import parse_journal_calls
+
+        path = tmp_path / "journal.md"
+        path.write_text(
+            "## Provider calls\n\n```jsonl\n"
+            '{"phase":"scan","provider":"p","model":"m","latency_ms":1,"cost":0.01}\n'
+            "this is not json at all\n"
+            '{"phase":"scan","provider":"p","model":"m","latency_ms":2,"cost":0.02}\n'
+            "```\n",
+        )
+        with caplog.at_level(logging.WARNING, logger="sentinel.journal"):
+            calls = parse_journal_calls(path)
+        # Two valid lines come through; the malformed one is skipped
+        assert len(calls) == 2
+        assert any(
+            "could not parse JSONL" in rec.message for rec in caplog.records
+        )
+
     def test_role_jsonl_includes_role_when_tagged(
         self, tmp_path: Path,
     ) -> None:
