@@ -64,7 +64,25 @@ def main() -> None:
     "--auto", is_flag=True,
     help="Skip the confirmation prompt before executing.",
 )
-def work(budget: str | None, every: str | None, dry_run: bool, auto: bool) -> None:
+@click.option(
+    "--cortex-journal/--no-cortex-journal",
+    "cortex_journal",
+    default=None,
+    help=(
+        "Force on/off the Cortex T1.6 integration for this cycle — "
+        "write (or skip) a `.cortex/journal/<date>-sentinel-cycle-<id>.md` "
+        "entry at cycle end. Overrides `.sentinel/config.toml`'s "
+        "`[integrations.cortex] enabled`. Default (no flag): auto-detect "
+        "by `.cortex/` presence."
+    ),
+)
+def work(
+    budget: str | None,
+    every: str | None,
+    dry_run: bool,
+    auto: bool,
+    cortex_journal: bool | None,
+) -> None:
     """Work on this project. One cycle, or loop with --every.
 
     Examples:
@@ -75,7 +93,10 @@ def work(budget: str | None, every: str | None, dry_run: bool, auto: bool) -> No
     from sentinel.cli.work_cmd import run_work
 
     asyncio.run(
-        run_work(budget_str=budget, dry_run=dry_run, auto=auto, every=every),
+        run_work(
+            budget_str=budget, dry_run=dry_run, auto=auto, every=every,
+            cortex_journal=cortex_journal,
+        ),
     )
 
 

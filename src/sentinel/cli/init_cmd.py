@@ -331,10 +331,15 @@ def _run_wizard(
     dict[RoleName, tuple[ProviderName, str]],
     float,
     bool,
+    str,
 ]:
     """Doctrine 0002 wizard. Flags skip their corresponding prompts.
 
-    Returns (active_providers, role_assignments, daily_budget, run_scan).
+    Returns (active_providers, role_assignments, daily_budget,
+    run_scan, cortex_enabled). ``cortex_enabled`` is one of
+    ``auto|on|off`` and controls
+    ``[integrations.cortex] enabled`` in the generated config — see the
+    T1.6 integration plan, Success Criterion #10.
     """
     # 1. Providers multi-select (skipped if --providers passed)
     if flags.get("providers_set") is not None:
@@ -480,6 +485,28 @@ def _run_wizard(
             "  Run a scan now?", default=False,
         )
 
+    # 8. Cortex T1.6 integration — write Cortex journal entries at
+    # cycle end? Default reflects `.cortex/` presence at init time per
+    # autumn-garage/.cortex/plans/sentinel-cortex-t16-integration.md
+    # Success Criterion #10. The flag/config lands in
+    # `.sentinel/config.toml` as `[integrations.cortex] enabled`
+    # (`auto`/`on`/`off`). `project_path` comes from the caller (via
+    # flags) so the wizard stays independent of the surrounding init
+    # flow's filesystem probing.
+    project_path = flags.get("project_path")
+    cortex_dir_present = False
+    if project_path is not None:
+        cortex_dir_present = (project_path / ".cortex").is_dir()
+    cortex_integration_choice = flags.get("cortex_integration")  # None | "auto" | "on" | "off"
+    if cortex_integration_choice is None and flags["interactive"]:
+        default = cortex_dir_present
+        answer = click.confirm(
+            "  Write Cortex journal entries at cycle end?",
+            default=default,
+        )
+        cortex_integration_choice = "on" if answer else "off"
+    flags["cortex_integration"] = cortex_integration_choice or "auto"
+
     # Re-run the pair-independence check one last time for any case where
     # a flag combo landed coder == reviewer without an explicit warning
     # firing above (e.g. --coder claude --yes with only claude available).
@@ -498,7 +525,10 @@ def _run_wizard(
             "violates Doctrine 0002 cross-provider review.[/yellow]",
         )
 
-    return active, assignments, daily_budget, run_scan
+    return (
+        active, assignments, daily_budget, run_scan,
+        flags.get("cortex_integration") or "auto",
+    )
 
 
 def _print_equivalent_flag_form(
@@ -639,6 +669,11 @@ def run_init(
         active = {prov for prov, _ in role_assignments.values()}
         console.print(f"Using preset: [bold]{preset}[/bold]\n")
         run_scan_final = run_scan if run_scan is not None else False
+        # Presets default cortex integration to `auto` — the plan's
+        # Success Criterion #10 only requires a wizard prompt. Presets
+        # are explicitly scripted, so honoring auto-detection without a
+        # prompt is the least-surprising behavior here.
+        cortex_enabled = "auto"
     else:
         # --- Wizard path (interactive or flag-driven) ---
         providers_set = _parse_providers_flag(providers, available_set)
@@ -652,8 +687,12 @@ def run_init(
             "reviewer": reviewer_parsed,
             "budget": budget,
             "run_scan": run_scan,
+            "project_path": project,
         }
-        active, role_assignments, daily_budget, run_scan_final = _run_wizard(
+        (
+            active, role_assignments, daily_budget,
+            run_scan_final, cortex_enabled,
+        ) = _run_wizard(
             available_set, dict(statuses), ollama_models, flags,
         )
 
@@ -663,7 +702,10 @@ def run_init(
     console.print()
 
     # Write files
-    _write_config(project, project_type, role_assignments, daily_budget)
+    _write_config(
+        project, project_type, role_assignments, daily_budget,
+        cortex_enabled=cortex_enabled,
+    )
     _write_sentinel_gitignore(project)
     _install_claude_templates(project)
     _ensure_gitignore_entries(project)
@@ -776,6 +818,8 @@ def _write_config(
     project_type: str,
     role_assignments: dict[RoleName, tuple[ProviderName, str]],
     daily_budget: float,
+    *,
+    cortex_enabled: str = "auto",
 ) -> None:
     sentinel_dir = project / ".sentinel"
     sentinel_dir.mkdir(exist_ok=True)
@@ -806,6 +850,11 @@ def _write_config(
             "warn_at_usd": round(warn_at, 2),
         },
         "scan": {"max_lenses": 10, "evaluate_per_lens": True},
+        # Cortex T1.6 integration — write Sentinel-cycle journal
+        # entries at cycle end. `auto` honors `.cortex/` presence at
+        # runtime (default); `on`/`off` force the behavior. Runtime
+        # override via `--cortex-journal` / `--no-cortex-journal`.
+        "integrations": {"cortex": {"enabled": cortex_enabled}},
     }
     config_path.write_bytes(tomli_w.dumps(config_dict).encode())
     console.print("  [green]✓[/green] Created .sentinel/config.toml")

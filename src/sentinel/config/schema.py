@@ -8,6 +8,7 @@ Goals are derived from CLAUDE.md/README/GitHub — not stored here.
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -127,6 +128,32 @@ class ProjectConfig(BaseModel):
     path: str
 
 
+class CortexIntegrationConfig(BaseModel):
+    """Control over the Cortex T1.6 sentinel-cycle journal integration.
+
+    ``auto`` (default) — write entries iff ``.cortex/`` is present at
+    the project root. ``on`` — always write (useful when Cortex is
+    managed out-of-tree). ``off`` — never write.
+
+    The CLI flags ``--cortex-journal`` / ``--no-cortex-journal`` on
+    ``sentinel work`` override this value per-invocation (flag > config
+    > auto-detect). See ``sentinel.integrations.cortex.resolve_enabled``.
+    """
+
+    enabled: Literal["auto", "on", "off"] = "auto"
+
+
+class IntegrationsConfig(BaseModel):
+    """Composition with Autumn Garage sibling tools (cortex, touchstone).
+
+    Each sibling is opt-in-by-presence: Sentinel detects the sibling's
+    file-contract marker at the repo root and composes automatically.
+    These settings are the override knobs for the default auto-detect.
+    """
+
+    cortex: CortexIntegrationConfig = Field(default_factory=CortexIntegrationConfig)
+
+
 class SentinelConfig(BaseModel):
     project: ProjectConfig
     roles: RolesConfig
@@ -135,3 +162,4 @@ class SentinelConfig(BaseModel):
     scan: ScanConfig = Field(default_factory=ScanConfig)
     coder: CoderConfig = Field(default_factory=CoderConfig)
     retention: RetentionConfig = Field(default_factory=RetentionConfig)
+    integrations: IntegrationsConfig = Field(default_factory=IntegrationsConfig)
