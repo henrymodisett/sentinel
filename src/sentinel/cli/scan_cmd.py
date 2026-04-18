@@ -174,9 +174,31 @@ def _persist_scan(project_path: Path, result: ScanResult) -> Path:
         lines.append(f"**Kind:** {kind}")
         lines.append(f"**Lens:** {a.get('lens', '')}")
         lines.append(f"**Why:** {a.get('why', '')}")
-        if a.get("files"):
-            lines.append(f"**Files:** {', '.join(a['files'])}")
         lines.append(f"**Impact:** {a.get('impact', '')}")
+        if a.get("files"):
+            lines.append("**Files:**")
+            for f in a["files"]:
+                if isinstance(f, dict):
+                    path = f.get("path", "")
+                    rationale = f.get("rationale", "")
+                    if rationale:
+                        lines.append(f"- `{path}` — {rationale}")
+                    else:
+                        lines.append(f"- `{path}`")
+                else:
+                    lines.append(f"- `{f}`")
+        if a.get("acceptance_criteria"):
+            lines.append("**Acceptance criteria:**")
+            for j, criterion in enumerate(a["acceptance_criteria"], 1):
+                lines.append(f"{j}. {criterion}")
+        if a.get("verification"):
+            lines.append("**Verification:**")
+            for cmd in a["verification"]:
+                lines.append(f"- `{cmd}`")
+        if a.get("out_of_scope"):
+            lines.append("**Out of scope:**")
+            for item in a["out_of_scope"]:
+                lines.append(f"- {item}")
         lines.append("")
 
     lines += ["## Lens Evaluations", ""]
