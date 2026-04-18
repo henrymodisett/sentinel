@@ -33,7 +33,7 @@ def main() -> None:
         sentinel cycle            — alias for `work`
         sentinel cost             — spend history
         sentinel providers        — LLM provider status
-        sentinel init             — manual initialization
+        sentinel init             — first-run interactive setup
     """
 
 
@@ -64,7 +64,25 @@ def main() -> None:
     "--auto", is_flag=True,
     help="Skip the confirmation prompt before executing.",
 )
-def work(budget: str | None, every: str | None, dry_run: bool, auto: bool) -> None:
+@click.option(
+    "--cortex-journal/--no-cortex-journal",
+    "cortex_journal",
+    default=None,
+    help=(
+        "Force on/off the Cortex T1.6 integration for this cycle — "
+        "write (or skip) a `.cortex/journal/<date>-sentinel-cycle-<id>.md` "
+        "entry at cycle end. Overrides `.sentinel/config.toml`'s "
+        "`[integrations.cortex] enabled`. Default (no flag): auto-detect "
+        "by `.cortex/` presence."
+    ),
+)
+def work(
+    budget: str | None,
+    every: str | None,
+    dry_run: bool,
+    auto: bool,
+    cortex_journal: bool | None,
+) -> None:
     """Work on this project. One cycle, or loop with --every.
 
     Examples:
@@ -75,7 +93,10 @@ def work(budget: str | None, every: str | None, dry_run: bool, auto: bool) -> No
     from sentinel.cli.work_cmd import run_work
 
     asyncio.run(
-        run_work(budget_str=budget, dry_run=dry_run, auto=auto, every=every),
+        run_work(
+            budget_str=budget, dry_run=dry_run, auto=auto, every=every,
+            cortex_journal=cortex_journal,
+        ),
     )
 
 
@@ -89,8 +110,8 @@ def status() -> None:
 
 # --- ADVANCED / GRANULAR ---
 
-@main.command(hidden=True)
-@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+@main.command()
+@click.option("--yes", "-y", is_flag=True, help="Skip all prompts, use defaults.")
 @click.option(
     "--preset",
     type=click.Choice(
@@ -100,10 +121,62 @@ def status() -> None:
     default=None,
     help="Use a named preset instead of interactive questions.",
 )
-def init(yes: bool, preset: str | None) -> None:
-    """Initialize Sentinel in the current project (usually auto-run by work).
+@click.option(
+    "--providers",
+    default=None,
+    help=(
+        "Comma-separated list of provider CLIs to enable "
+        "(e.g. claude,codex,gemini,ollama). Skips the wizard's providers "
+        "multi-select step."
+    ),
+)
+@click.option(
+    "--coder",
+    default=None,
+    help=(
+        "Coder provider[:model], e.g. `claude` or `claude:claude-sonnet-4-6`. "
+        "Skips the wizard's coder prompts."
+    ),
+)
+@click.option(
+    "--reviewer",
+    default=None,
+    help=(
+        "Reviewer provider[:model], e.g. `codex` or `codex:gpt-5.4`. "
+        "Skips the wizard's reviewer prompts."
+    ),
+)
+@click.option(
+    "--budget",
+    type=float,
+    default=None,
+    help="Daily budget cap in USD. Default 15.0.",
+)
+@click.option(
+    "--scan/--no-scan",
+    "run_scan",
+    default=None,
+    help="Run an initial scan after init. Default off.",
+)
+def init(
+    yes: bool,
+    preset: str | None,
+    providers: str | None,
+    coder: str | None,
+    reviewer: str | None,
+    budget: float | None,
+    run_scan: bool | None,
+) -> None:
+    """Initialize Sentinel in the current project (first-run entry point).
 
-    Presets (skip interactive prompts):
+    Interactive on a TTY — walks you through providers, coder/reviewer
+    selection, budget, and an optional first scan (Doctrine 0002).
+
+    Flags override individual prompts; --yes skips the whole wizard with
+    defaults. The wizard prints its equivalent flag-form at the end so
+    the same config can be reproduced in CI.
+
+    Presets (skip all prompts):
       recommended  — smart defaults per role (the default)
       simple       — use claude for everything
       cheap        — prefer local / gemini-flash where possible
@@ -113,7 +186,11 @@ def init(yes: bool, preset: str | None) -> None:
     """
     from sentinel.cli.init_cmd import run_init
 
-    run_init(auto_yes=yes, preset=preset)
+    run_init(
+        auto_yes=yes, preset=preset,
+        providers=providers, coder=coder, reviewer=reviewer,
+        budget=budget, run_scan=run_scan,
+    )
 
 
 @main.command(hidden=True)

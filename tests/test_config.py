@@ -43,7 +43,7 @@ class TestRoleDefaults:
         assert ROLE_DEFAULTS[RoleName.RESEARCHER].provider == ProviderName.GEMINI
         assert ROLE_DEFAULTS[RoleName.PLANNER].provider == ProviderName.CLAUDE
         assert ROLE_DEFAULTS[RoleName.CODER].provider == ProviderName.CLAUDE
-        assert ROLE_DEFAULTS[RoleName.REVIEWER].provider == ProviderName.GEMINI
+        assert ROLE_DEFAULTS[RoleName.REVIEWER].provider == ProviderName.OPENAI
 
     def test_reviewer_differs_from_coder(self) -> None:
         assert ROLE_DEFAULTS[RoleName.REVIEWER].provider != ROLE_DEFAULTS[RoleName.CODER].provider

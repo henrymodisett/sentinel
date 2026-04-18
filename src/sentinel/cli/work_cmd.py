@@ -38,6 +38,13 @@ from sentinel.cli.plan_cmd import (
 )
 from sentinel.cli.scan_cmd import _load_config, _persist_scan
 from sentinel.config.schema import SentinelConfig  # noqa: TC001 — runtime type
+from sentinel.integrations.cortex import (
+    build_cycle_data_from_journal,
+    cycle_id_from_run_path,
+    detect_cortex,
+    resolve_enabled,
+    write_cortex_journal_entry,
+)
 from sentinel.providers.router import Router
 from sentinel.roles.coder import Coder
 from sentinel.roles.monitor import Monitor
@@ -242,20 +249,119 @@ async def run_work(
     dry_run: bool = False,
     auto: bool = False,
     every: str | None = None,
+    cortex_journal: bool | None = None,
 ) -> None:
     """The one command.
 
     Single mode (default): runs one cycle of work and exits.
     Loop mode (--every): keeps running cycles with sleep between, until
     Ctrl-C, budget hit, or max cycles.
+
+    ``cortex_journal`` maps to ``--cortex-journal`` / ``--no-cortex-journal``.
+    Forwarded to each cycle so loop-mode honors the flag every tick; the
+    per-cycle resolution consults config and auto-detect when None.
     """
     if every is None:
         # Single cycle — just run it and return
-        await _run_single_cycle(project_path, budget_str, dry_run, auto)
+        await _run_single_cycle(
+            project_path, budget_str, dry_run, auto,
+            cortex_journal=cortex_journal,
+        )
         return
 
     # Loop mode
-    await _run_loop(project_path, budget_str, dry_run, auto, every)
+    await _run_loop(
+        project_path, budget_str, dry_run, auto, every,
+        cortex_journal=cortex_journal,
+    )
+
+
+def _emit_cortex_t16_entry(
+    project: Path,
+    journal,  # type: ignore[no-untyped-def]  # sentinel.journal.Journal at runtime
+    journal_path: Path | None,
+    *,
+    cli_flag: bool | None,
+    config: SentinelConfig | None,
+    overall_score: int | None,
+    lens_scores: list[tuple[str, int]],
+    refinement_count: int,
+    expansion_count: int,
+) -> None:
+    """Operationalize Cortex Protocol T1.6 at the cycle-end hook.
+
+    Resolution precedence (cli_flag > config > auto-detect) is handled
+    inside `resolve_enabled`. When the write is attempted, we honor the
+    plan's non-blocking failure mode: a warning on stderr, a structured
+    line in `.sentinel/state/cortex-write-errors.jsonl`, and the cycle
+    exits 0 on an otherwise-successful cycle regardless.
+    """
+    presence = detect_cortex(project)
+
+    config_value: str | None = None
+    if config is not None:
+        # `integrations.cortex.enabled` is always set because
+        # IntegrationsConfig has a default factory; reading it here
+        # defensively guards against a partially-constructed config in
+        # tests that mint SentinelConfig by hand.
+        integrations = getattr(config, "integrations", None)
+        cortex_cfg = getattr(integrations, "cortex", None) if integrations else None
+        config_value = getattr(cortex_cfg, "enabled", None)
+
+    enabled = resolve_enabled(
+        cli_flag=cli_flag,
+        config_value=config_value,
+        cortex_present=presence.dir_present,
+    )
+    if not enabled:
+        # `--no-cortex-journal` or config `off` or auto-detect miss —
+        # all three are deliberate silent skips. Only speak up when the
+        # user explicitly asked for a write and we can't do it.
+        if cli_flag is True and not presence.dir_present:
+            console.print(
+                "  [yellow]--cortex-journal set but .cortex/ not found — "
+                "writing anyway (forced); first run will scaffold the "
+                "journal directory.[/yellow]"
+            )
+            # Forced write continues below — fall through.
+        else:
+            return
+
+    # Derive cycle_id from the run-journal filename so the sentinel run
+    # and cortex entry are joinable by substring. Fallback to the
+    # journal's timestamp when the run journal couldn't be written.
+    if journal_path is not None:
+        cycle_id = cycle_id_from_run_path(journal_path)
+    else:
+        from datetime import datetime as _dt
+        cycle_id = _dt.fromtimestamp(journal.started_at).strftime("%Y-%m-%d-%H%M%S")
+
+    cycle_data = build_cycle_data_from_journal(
+        journal,
+        cycle_id=cycle_id,
+        project_dir=project,
+        overall_score=overall_score,
+        lens_scores=lens_scores,
+        refinement_count=refinement_count,
+        expansion_count=expansion_count,
+    )
+
+    force = cli_flag is True and not presence.dir_present
+    result = write_cortex_journal_entry(project, cycle_data, force=force)
+
+    if result.status == "written" and result.path is not None:
+        try:
+            rel = result.path.relative_to(project)
+            console.print(f"  [dim]Cortex journal: {rel}[/dim]")
+        except ValueError:
+            console.print(f"  [dim]Cortex journal: {result.path}[/dim]")
+    elif result.status == "skipped_existing":
+        # Rare (timestamp-based cycle IDs); surface per the plan so the
+        # operator notices clock anomalies.
+        console.print(f"  [yellow]{result.warning}[/yellow]")
+    elif result.status == "failed":
+        # Non-blocking — warn loudly, keep the cycle exit code clean.
+        console.print(f"  [yellow]{result.warning}[/yellow]")
 
 
 async def _run_single_cycle(
@@ -263,6 +369,8 @@ async def _run_single_cycle(
     budget_str: str | None = None,
     dry_run: bool = False,
     auto: bool = False,
+    *,
+    cortex_journal: bool | None = None,
 ) -> None:
     """Run exactly one cycle of work and return."""
     project = Path(project_path or os.getcwd()).resolve()
@@ -301,8 +409,18 @@ async def _run_single_cycle(
 
     # --- 1. Initialize if needed ---
     if not (project / ".sentinel" / "config.toml").exists():
+        # Doctrine 0002 — `sentinel init` is the canonical first-run
+        # entry. `sentinel work` still auto-inits for backward compat,
+        # but prints a visible warning so users discover the explicit
+        # command. No hard-fail: preserving the running flow matters
+        # more than enforcing discoverability at this exact moment.
+        console.print(
+            "[yellow]WARNING: .sentinel/config.toml not found; running "
+            "implicit init with defaults. Run [bold]sentinel init[/bold] "
+            "next time for interactive setup.[/yellow]\n",
+        )
         console.print("[bold cyan]→ Initializing[/bold cyan]\n")
-        run_init(str(project))
+        run_init(str(project), implicit=True)
         console.print()
 
     config = _load_config(project)
@@ -403,6 +521,16 @@ async def _run_single_cycle(
     items_rejected = 0
     items_failed = 0
 
+    # Cycle-scope accumulators for the cortex T1.6 hook. Populated as
+    # phases complete so the finally-block write has the full picture
+    # even if the cycle aborts mid-loop. (The cortex entry summarizes a
+    # cycle regardless of whether it shipped work — per the plan, the
+    # entry is the cycle's end-of-life record.)
+    cortex_overall_score: int | None = None
+    cortex_lens_scores: list[tuple[str, int]] = []
+    cortex_refinement_count = 0
+    cortex_expansion_count = 0
+
     try:
         while True:
             # Budget check
@@ -460,6 +588,15 @@ async def _run_single_cycle(
 
                 _persist_scan(project, scan_result)
                 journal.end_phase("scan")
+                # Capture for the cortex T1.6 entry. Prefer the live
+                # scan over the on-disk one because the persisted file
+                # stores lens scores in a form we'd have to reparse.
+                cortex_overall_score = scan_result.overall_score
+                cortex_lens_scores = [
+                    (ev.lens_name, ev.score)
+                    for ev in scan_result.evaluations
+                    if not ev.error
+                ]
                 console.print(
                     f"  [green]✓[/green] Health: {scan_result.overall_score}/100 "
                     f"(${scan_result.total_cost_usd:.4f})\n"
@@ -490,6 +627,8 @@ async def _run_single_cycle(
                     if a.get("kind", "refine") == "refine"
                 ]
                 expansions = [a for a in actions if a.get("kind") == "expand"]
+                cortex_refinement_count = len(refinements)
+                cortex_expansion_count = len(expansions)
                 console.print(
                     f"  [green]✓[/green] {len(refinements)} refinements, "
                     f"{len(expansions)} expansion proposals"
@@ -625,6 +764,25 @@ async def _run_single_cycle(
             )
         except OSError as e:
             console.print(f"  [yellow]Could not write run journal: {e}[/yellow]")
+            journal_path = None
+
+        # --- Cortex T1.6 hook ---
+        # Fired at the same moment `.sentinel/runs/<ts>.md` is
+        # finalized (single source of truth for "cycle ended"). Writes
+        # a conformant `.cortex/journal/<date>-sentinel-cycle-<id>.md`
+        # entry when resolve_enabled() says yes. Failure is non-blocking
+        # per the plan: a bad write logs to
+        # `.sentinel/state/cortex-write-errors.jsonl`, prints a warning,
+        # and the cycle exit code is unaffected.
+        _emit_cortex_t16_entry(
+            project, journal, journal_path,
+            cli_flag=cortex_journal,
+            config=config,
+            overall_score=cortex_overall_score,
+            lens_scores=cortex_lens_scores,
+            refinement_count=cortex_refinement_count,
+            expansion_count=cortex_expansion_count,
+        )
         set_current_journal(None)
 
     # --- Summary ---
@@ -1338,6 +1496,8 @@ async def _run_loop(
     dry_run: bool,
     auto: bool,
     every: str,
+    *,
+    cortex_journal: bool | None = None,
 ) -> None:
     """Run cycles continuously until stopped."""
     import asyncio
@@ -1378,6 +1538,7 @@ async def _run_loop(
                 budget_str=None,  # session budget is tracked outside
                 dry_run=dry_run,
                 auto=True,  # loop mode bypasses confirmation
+                cortex_journal=cortex_journal,
             )
 
             # Session bounds check

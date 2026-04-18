@@ -460,6 +460,57 @@ class TestAutoGitignore:
         assert ".gitignore" in latest_files
 
 
+class TestSentinelDirGitignore:
+    """sentinel init writes .sentinel/.gitignore so runtime state (state/)
+    never gets staged when a user does `git add .sentinel/`. Durable
+    artifacts (config.toml, lenses.md, runs/, etc.) remain trackable."""
+
+    def test_auto_init_via_work_writes_sentinel_gitignore(
+        self, fake_cli_env, isolated_home,
+    ):
+        """Fresh `sentinel work --dry-run` auto-inits and must drop
+        .sentinel/.gitignore excluding the ephemeral state/ dir.
+
+        The downstream scan may fail against stub providers — we only
+        care that the auto-init step ran and wrote the gitignore.
+        """
+        fake_cli_env(claude=True, gemini=True)
+        CliRunner().invoke(main, ["work", "--dry-run"])
+
+        gitignore_path = isolated_home / ".sentinel" / ".gitignore"
+        assert gitignore_path.exists(), (
+            "auto-init must create .sentinel/.gitignore"
+        )
+        contents = gitignore_path.read_text()
+        assert "state/" in contents, (
+            f"ephemeral state/ must be ignored; got:\n{contents}"
+        )
+
+    def test_init_writes_sentinel_gitignore(
+        self, fake_cli_env, isolated_home,
+    ):
+        """Explicit `sentinel init` also writes the .sentinel/.gitignore."""
+        fake_cli_env(claude=True)
+        CliRunner().invoke(main, ["init", "--yes"])
+        gitignore_path = isolated_home / ".sentinel" / ".gitignore"
+        assert gitignore_path.exists()
+        assert "state/" in gitignore_path.read_text()
+
+    def test_does_not_overwrite_user_customized_gitignore(
+        self, fake_cli_env, isolated_home,
+    ):
+        """If .sentinel/.gitignore already exists, init must leave it
+        alone — user may have customized it."""
+        fake_cli_env(claude=True)
+        sentinel_dir = isolated_home / ".sentinel"
+        sentinel_dir.mkdir()
+        gitignore_path = sentinel_dir / ".gitignore"
+        gitignore_path.write_text("# my custom rules\nfoo/\n")
+
+        CliRunner().invoke(main, ["init", "--yes"])
+        assert gitignore_path.read_text() == "# my custom rules\nfoo/\n"
+
+
 class TestNoGoalsTemplate:
     """Sentinel reads whatever project docs exist — no dedicated goals file."""
 
@@ -533,3 +584,190 @@ class TestReinit:
 
         CliRunner().invoke(main, ["init", "--yes"])
         assert goals_path.read_text() == "# my custom goals\n"
+
+
+# ---------- Doctrine 0002 — interactive-by-default wizard ----------
+
+class TestDoctrine0002Defaults:
+    """Fresh `sentinel init --yes` produces a config that satisfies
+    Doctrine 0002's cross-provider review invariant: reviewer provider
+    must differ from coder provider whenever a different provider is
+    installed.
+    """
+
+    def test_yes_with_claude_and_codex_picks_codex_reviewer(
+        self, fake_cli_env, isolated_home,
+    ):
+        """The doctrine-aligned default — when both claude and codex are
+        installed, coder=claude, reviewer=codex (OPENAI provider name in
+        the config).
+        """
+        fake_cli_env(claude=True, codex=True)
+        result = CliRunner().invoke(main, ["init", "--yes"])
+        assert result.exit_code == 0, result.output
+        config = _read_config(isolated_home)
+        assert config["roles"]["coder"]["provider"] == "claude"
+        assert config["roles"]["reviewer"]["provider"] == "openai"
+
+    def test_yes_with_claude_only_warns_about_same_provider(
+        self, fake_cli_env, isolated_home,
+    ):
+        """Single-provider install: reviewer falls back to the coder's
+        provider (claude). The wizard must print a warning rather than
+        block, so the user can still proceed on a minimal setup.
+        """
+        fake_cli_env(claude=True)
+        result = CliRunner().invoke(main, ["init", "--yes"])
+        assert result.exit_code == 0
+        config = _read_config(isolated_home)
+        assert config["roles"]["coder"]["provider"] == "claude"
+        assert config["roles"]["reviewer"]["provider"] == "claude"
+        # Warning must surface — users need to know about the violation
+        assert (
+            "Doctrine 0002" in result.output
+            or "cross-provider" in result.output
+        )
+
+    def test_yes_idempotent_on_existing_config(
+        self, fake_cli_env, isolated_home,
+    ):
+        """`sentinel init --yes` called again on an initialized project
+        is a no-op — the existing config is preserved.
+        """
+        fake_cli_env(claude=True, codex=True)
+        CliRunner().invoke(main, ["init", "--yes"])
+        config_path = isolated_home / ".sentinel" / "config.toml"
+        first = config_path.read_text()
+
+        # Hand-edit so we can detect any overwrite
+        edited = first.replace(
+            'daily_limit_usd = 15.0', 'daily_limit_usd = 42.0',
+        )
+        config_path.write_text(edited)
+
+        result = CliRunner().invoke(main, ["init", "--yes"])
+        assert result.exit_code == 0
+        assert config_path.read_text() == edited, (
+            "init --yes on existing config must not overwrite"
+        )
+
+
+class TestImplicitWorkWarning:
+    """`sentinel work` on an uninitialized project auto-inits but must
+    print a visible warning recommending `sentinel init`.
+    """
+
+    def test_work_prints_implicit_init_warning(
+        self, fake_cli_env, isolated_home,
+    ):
+        fake_cli_env(claude=True, gemini=True)
+        result = CliRunner().invoke(main, ["work", "--dry-run"])
+        combined = (result.output or "") + (result.stderr or "")
+        # The visible warning must be there, naming the explicit command
+        assert "config.toml not found" in combined
+        assert "sentinel init" in combined
+        # And init did run — config exists afterwards
+        assert (isolated_home / ".sentinel" / "config.toml").exists()
+
+
+class TestInitFlagOverrides:
+    """New flags `--providers` / `--coder` / `--reviewer` / `--budget`
+    must take effect when passed explicitly (Doctrine 0002 §3 — flag
+    precedence).
+    """
+
+    def test_explicit_providers_flag(self, fake_cli_env, isolated_home):
+        fake_cli_env(claude=True, codex=True, gemini=True)
+        result = CliRunner().invoke(
+            main, ["init", "--yes", "--providers", "claude,codex"],
+        )
+        assert result.exit_code == 0, result.output
+        config = _read_config(isolated_home)
+        # Only claude + codex should be used; gemini/ollama must not
+        # appear in any role assignment
+        providers_in_use = {r["provider"] for r in config["roles"].values()}
+        assert providers_in_use <= {"claude", "openai"}
+
+    def test_explicit_coder_and_reviewer_flags(
+        self, fake_cli_env, isolated_home,
+    ):
+        fake_cli_env(claude=True, codex=True, gemini=True)
+        result = CliRunner().invoke(
+            main,
+            [
+                "init", "--yes",
+                "--coder", "claude:claude-sonnet-4-6",
+                "--reviewer", "codex:gpt-5.4",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        config = _read_config(isolated_home)
+        assert config["roles"]["coder"]["provider"] == "claude"
+        assert config["roles"]["coder"]["model"] == "claude-sonnet-4-6"
+        assert config["roles"]["reviewer"]["provider"] == "openai"
+        assert config["roles"]["reviewer"]["model"] == "gpt-5.4"
+
+    def test_explicit_budget_flag(self, fake_cli_env, isolated_home):
+        fake_cli_env(claude=True, codex=True)
+        result = CliRunner().invoke(
+            main, ["init", "--yes", "--budget", "42.0"],
+        )
+        assert result.exit_code == 0, result.output
+        config = _read_config(isolated_home)
+        assert config["budget"]["daily_limit_usd"] == 42.0
+
+    def test_unknown_provider_name_rejected(
+        self, fake_cli_env, isolated_home,
+    ):
+        fake_cli_env(claude=True)
+        result = CliRunner().invoke(
+            main, ["init", "--yes", "--providers", "nonexistent"],
+        )
+        assert result.exit_code != 0, (
+            "unknown provider name should fail cleanly with a BadParameter"
+        )
+
+    def test_equivalent_flag_form_printed_on_wizard(
+        self, fake_cli_env, isolated_home,
+    ):
+        """After `sentinel init --yes`, the equivalent single-line flag
+        command is printed so the user can paste it into CI.
+        """
+        fake_cli_env(claude=True, codex=True)
+        result = CliRunner().invoke(main, ["init", "--yes"])
+        assert result.exit_code == 0
+        assert "Equivalent to rerun" in result.output
+        assert "sentinel init" in result.output
+        assert "--providers" in result.output
+        assert "--coder" in result.output
+        assert "--reviewer" in result.output
+        assert "--budget" in result.output
+
+
+class TestImplicitInitSkipsWizardPrint:
+    """Auto-init from `sentinel work` is not a wizard — the equivalent-
+    flag-form line would be misleading there. Only explicit `sentinel
+    init` prints it.
+    """
+
+    def test_implicit_init_does_not_print_rerun_line(
+        self, fake_cli_env, isolated_home,
+    ):
+        fake_cli_env(claude=True, gemini=True)
+        result = CliRunner().invoke(main, ["work", "--dry-run"])
+        # work triggered auto-init; the "Equivalent to rerun" line is
+        # for explicit-init output only.
+        assert "Equivalent to rerun" not in (result.output or "")
+
+
+class TestNonTTYDoesNotHang:
+    """Non-TTY runs must not block on prompts — CliRunner simulates
+    this by feeding a closed stdin.
+    """
+
+    def test_non_tty_init_completes(self, fake_cli_env, isolated_home):
+        fake_cli_env(claude=True, codex=True)
+        # No --yes, no input provided → wizard must still complete
+        result = CliRunner().invoke(main, ["init"], input="")
+        assert result.exit_code == 0, result.output
+        assert (isolated_home / ".sentinel" / "config.toml").exists()

@@ -69,12 +69,13 @@ RECOMMENDED = {
         monthly_cost_estimate="$5-20",
     ),
     RoleName.REVIEWER: Recommendation(
-        provider=ProviderName.GEMINI,
-        model="gemini-2.5-pro",
+        provider=ProviderName.OPENAI,
+        model="gpt-5.4",
         rationale=(
-            "Must be a different provider than the coder for independence — "
-            "two models with different blind spots catch more issues. Gemini "
-            "Pro is strong at code review."
+            "Must be a different provider than the coder for independence "
+            "(Doctrine 0002 — cross-provider, not just cross-model). Codex "
+            "gives genuine independence from Claude-family blind spots; "
+            "falls back to Gemini when codex isn't installed."
         ),
         monthly_cost_estimate="$1-5",
     ),
@@ -130,6 +131,10 @@ def _fallback_order(
     """Pick substitute providers based on what this role needs.
 
     Coder prefers providers with real agentic_code support (claude, openai).
+    Reviewer prefers codex → gemini → local (in that order) so cross-
+    provider independence survives fallback; the final pair-independence
+    guarantee is enforced in apply_preset's recommended path.
+
     Other roles just need chat. If the preferred set is empty, every role
     falls back to whichever provider is installed — a degraded coder beats
     an empty config.
@@ -148,6 +153,20 @@ def _fallback_order(
             if p in available
         ]
         return agentic or generic
+
+    if role == RoleName.REVIEWER:
+        # Doctrine 0002 — cross-provider review. Preferred chain is
+        # codex → gemini → local, so the reviewer keeps its independence
+        # from claude (the typical coder) even when the ideal codex
+        # isn't installed.
+        reviewer_chain = [
+            p for p in [
+                ProviderName.OPENAI, ProviderName.GEMINI,
+                ProviderName.LOCAL, ProviderName.CLAUDE,
+            ]
+            if p in available
+        ]
+        return reviewer_chain or generic
 
     return generic
 
@@ -187,6 +206,24 @@ def _pick_local_model(available_models: list[str]) -> str:
     return available_models[0]
 
 
+def pick_reviewer_provider(
+    coder_provider: ProviderName, available: set[ProviderName],
+) -> tuple[ProviderName, bool]:
+    """Pick a reviewer provider that differs from the coder's.
+
+    Returns `(provider, violates_independence)` where
+    `violates_independence` is True only when no different provider is
+    installed — caller should surface a warning but still proceed (a
+    same-provider reviewer beats an empty config, and the user can
+    install a second provider later).
+    """
+    for alt in _fallback_order(RoleName.REVIEWER, available):
+        if alt != coder_provider:
+            return alt, False
+    # Single-provider install — fall back to same-as-coder with warning
+    return coder_provider, True
+
+
 def apply_preset(
     preset: str, available: set[ProviderName], ollama_models: list[str],
 ) -> dict[RoleName, tuple[ProviderName, str]]:
@@ -195,13 +232,28 @@ def apply_preset(
     Falls back intelligently when a preset's first choice isn't available.
     """
     if preset == "recommended":
-        return {
+        assignments = {
             role: (rec.provider, rec.model)
             for role, rec in (
                 (r, recommend_for_role(r, available, ollama_models))
                 for r in RoleName
             )
         }
+        # Doctrine 0002 — enforce reviewer ≠ coder. If fallback landed
+        # them on the same provider, walk the reviewer's preferred chain
+        # for the first different one. If none exists (single-provider
+        # install), leave the pair as-is — the wizard surfaces the
+        # violation as a warning rather than blocking init.
+        coder_prov = assignments[RoleName.CODER][0]
+        reviewer_prov = assignments[RoleName.REVIEWER][0]
+        if reviewer_prov == coder_prov:
+            for alt in _fallback_order(RoleName.REVIEWER, available):
+                if alt != coder_prov:
+                    assignments[RoleName.REVIEWER] = (
+                        alt, _default_model_for(alt, ollama_models),
+                    )
+                    break
+        return assignments
 
     if preset == "simple":
         # Use claude for everything if available; else first available

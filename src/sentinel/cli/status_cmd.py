@@ -17,6 +17,7 @@ from rich.panel import Panel
 
 from sentinel.budget import check_budget
 from sentinel.config.schema import SentinelConfig
+from sentinel.siblings import detect_siblings, format_sibling_line
 from sentinel.state import gather_state
 
 console = Console()
@@ -122,4 +123,11 @@ def run_status(project_path: str | None = None) -> None:
         console.print(
             "[dim]No cycles run yet — `sentinel work` to start.[/dim]"
         )
+    console.print()
+
+    # --- Autumn Garage siblings (cortex + touchstone) ---
+    # File-contract + CLI-shell-out detection only. Absence is normal.
+    console.print("[bold]Autumn Garage siblings:[/bold]")
+    for sibling in detect_siblings(project):
+        console.print(format_sibling_line(sibling))
     console.print()
