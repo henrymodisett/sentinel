@@ -966,7 +966,15 @@ def _ensure_gitignore_entries(project: Path) -> None:
     gitignore = project / ".gitignore"
     existing = gitignore.read_text() if gitignore.exists() else ""
 
-    if _SENTINEL_GITIGNORE_MARKER in existing:
+    # Whole-line equality on the marker line — NEVER a substring match.
+    # A user comment like "# sentinel artifacts I added myself" must not
+    # be mistaken for our generated marker (otherwise init would skip
+    # appending its own block, leaving .claude/ unmanaged).
+    has_managed_block = any(
+        line == _SENTINEL_GITIGNORE_MARKER_LINE
+        for line in existing.splitlines()
+    )
+    if has_managed_block:
         migrated = _migrate_stale_sentinel_gitignore_line(existing)
         if migrated is None:
             return

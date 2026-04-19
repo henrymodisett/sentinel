@@ -470,6 +470,13 @@ class TestAutoGitignore:
         assert "# sentinel artifacts I added myself" in after_lines
         # User's other content preserved.
         assert "node_modules/" in after_lines
+        # And because the user's comment is NOT the exact managed
+        # marker line, init recognized there was no managed block and
+        # appended its own — otherwise `.claude/` would go unmanaged.
+        assert (
+            "# sentinel artifacts — generated per-run, not source"
+            in after_lines
+        )
 
     def test_reinit_preserves_user_sentinel_line_below_generated_block(
         self, fake_cli_env, isolated_home,
