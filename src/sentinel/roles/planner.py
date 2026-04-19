@@ -35,6 +35,12 @@ class WorkItem:
     acceptance_criteria: list[str] = field(default_factory=list)
     lens: str = ""  # which lens surfaced this
     risk: str = ""
+    # "refine" = improve existing code (cited files must exist on HEAD).
+    # "expand" = net-new work (allowed to create files). The Coder enforces
+    # this distinction pre-execution: a refinement whose ``files`` cite
+    # paths absent from HEAD is rejected as a planner-grounding error.
+    # See sentinel/roles/coder.py::_check_refinement_grounding.
+    kind: Literal["refine", "expand"] = "refine"
 
 
 @dataclass

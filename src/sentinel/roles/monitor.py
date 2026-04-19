@@ -28,12 +28,22 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Lens:
-    """A custom analytical lens generated for this specific project."""
+    """A custom analytical lens generated for this specific project.
+
+    ``scope`` is an optional list of path globs. When non-empty, the
+    lens only "sees" files matching one of the globs during evaluation
+    — used to keep app-runtime constraints (e.g. "no cloud LLMs") from
+    leaking into dev-toolchain config (e.g. ``.sentinel/config.toml``,
+    ``setup.sh``). Empty (default) means global, matching pre-2026-04-19
+    behavior. Autumn-mail dogfood cycle 4 (Finding F2) surfaced the
+    conflation that motivated this field.
+    """
 
     name: str
     description: str
     what_to_look_for: str
     questions: list[str] = field(default_factory=list)
+    scope: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -417,12 +427,16 @@ CRITICAL: Every recommended action must be classified as `refine` or `expand`.
 
 **refine** (safe to execute autonomously):
 - Fixing bugs, silent failures, race conditions
-- Adding tests, improving coverage, docs
+- Adding tests to existing test files, improving coverage, fixing docs
 - Refactoring for clarity without changing behavior
 - Performance improvements to existing code paths
 - Security hardening of existing surfaces
 - Making timeouts/limits configurable without changing defaults
 - Removing dead code, unused deps, debug prints
+
+A refinement's anchor file(s) MUST already exist on HEAD — see the
+`files` field rules below. If the work centers on creating a brand-new
+file (a new test file, a new docs page), classify as `expand` instead.
 
 **expand** (requires user approval — sentinel will NOT auto-execute these):
 - Adding new features, endpoints, or user-facing capabilities
@@ -457,6 +471,18 @@ Every top_action MUST include these fields with high-signal content:
 path with a one-line reason it must be touched. Example:
   [{{"path": "src/sentinel/roles/monitor.py",
     "rationale": "owns SYNTHESIZE_SCHEMA — schema change goes here"}}]
+
+**HARD RULE for `refine` actions:** every path listed in `files` MUST already
+exist on HEAD. Refinements improve existing code; they may not cite paths
+that the planner expects the coder to create. If you need to add a brand-new
+file (a new test file, a new docs page, a new module), classify the action
+as `expand` — even a small new test file. The coder is allowed to create
+ancillary new files while servicing a refinement (e.g. spinning up a new
+test alongside an edit to existing source), but those ancillary files must
+NOT be in the `files` list of a refinement; only the existing-file edits
+that anchor the refinement go there. Cycle-4 dogfood (Finding F1) showed
+why: planner-cited paths absent from HEAD silently became net-new files,
+turning "harden existing code" diffs into "create from scratch" diffs.
 
 **acceptance_criteria** — list of testable conditions that must hold after the
 work is done. Use concrete, verifiable wording:
@@ -545,6 +571,7 @@ def _load_locked_lenses(project_path: Path) -> list[Lens] | None:
         description = ""
         what_to_look_for = ""
         questions: list[str] = []
+        scope: list[str] = []
 
         mode = "description"
         for line in lines[1:]:
@@ -555,6 +582,12 @@ def _load_locked_lenses(project_path: Path) -> list[Lens] | None:
             if s.startswith("### Questions"):
                 mode = "q"
                 continue
+            if s.startswith("### Scope"):
+                # Optional path-glob list — when non-empty, restricts
+                # which files the evaluator considers for this lens.
+                # Absent section = global (matches pre-scope behavior).
+                mode = "scope"
+                continue
             if s.startswith("###"):
                 mode = "other"
                 continue
@@ -564,6 +597,8 @@ def _load_locked_lenses(project_path: Path) -> list[Lens] | None:
                 what_to_look_for += (" " if what_to_look_for else "") + s
             elif mode == "q" and s.startswith("- "):
                 questions.append(s[2:].strip())
+            elif mode == "scope" and s.startswith("- "):
+                scope.append(s[2:].strip())
 
         if name and description:
             lenses.append(Lens(
@@ -571,9 +606,49 @@ def _load_locked_lenses(project_path: Path) -> list[Lens] | None:
                 description=description,
                 what_to_look_for=what_to_look_for or description,
                 questions=questions,
+                scope=scope,
             ))
 
     return lenses if lenses else None
+
+
+def _filter_file_tree_by_scope(file_tree: str, scope: list[str]) -> str:
+    """Return only the lines of ``file_tree`` matching one of ``scope``.
+
+    ``file_tree`` is the find-style newline-separated listing built by
+    ``state.gather_state`` (paths typically prefixed with ``./``).
+    ``scope`` is a list of path globs (e.g. ``Sources/**``).
+    Empty ``scope`` returns ``file_tree`` unchanged — that's how a lens
+    declares "I'm global."
+
+    Glob semantics use ``fnmatch.fnmatchcase`` over the leading-``./``-
+    stripped path. This treats ``*`` as matching across path separators
+    (the same loose semantics ``fnmatch`` always has), so a scope of
+    ``Sources/**`` matches every file under ``Sources/`` regardless of
+    nesting depth — which is the intuitive operator expectation for
+    keeping app-runtime lenses out of dev-toolchain config files.
+
+    Used by the monitor's per-lens evaluator to keep app-runtime lenses
+    (e.g. privacy-compliance "no cloud LLMs") from seeing dev-toolchain
+    files (e.g. ``.sentinel/config.toml``) that legitimately reference
+    a cloud LLM for review purposes.
+    """
+    if not scope:
+        return file_tree
+    if not file_tree.strip():
+        return file_tree
+
+    import fnmatch
+
+    def _matches_any(path_str: str) -> bool:
+        # Strip leading "./" since find emits it but globs typically don't.
+        cleaned = path_str.removeprefix("./")
+        if not cleaned:
+            return False
+        return any(fnmatch.fnmatchcase(cleaned, glob) for glob in scope)
+
+    kept = [line for line in file_tree.splitlines() if _matches_any(line.strip())]
+    return "\n".join(kept)
 
 
 def _save_locked_lenses(
@@ -599,6 +674,13 @@ def _save_locked_lenses(
         "Delete this file to regenerate from scratch on the next scan.",
         "Add/remove/rename lenses as you like — sentinel will use what you write here.",
         "",
+        "Each lens may declare an optional `### Scope` section listing path",
+        "globs (e.g. `Sources/**`). When present, the lens only evaluates",
+        "files matching those globs — useful for keeping app-runtime",
+        "constraints (e.g. \"no cloud LLMs\") from leaking into dev-toolchain",
+        "config (e.g. `.sentinel/config.toml`, `setup.sh`). Omit the section",
+        "for global lenses (the default).",
+        "",
         "---",
         "",
     ]
@@ -617,6 +699,14 @@ def _save_locked_lenses(
             lines.append("")
             for q in lens.questions:
                 lines.append(f"- {q}")
+            lines.append("")
+        if lens.scope:
+            # Path globs constraining which files the evaluator
+            # considers for this lens — empty/absent means global.
+            lines.append("### Scope")
+            lines.append("")
+            for glob in lens.scope:
+                lines.append(f"- {glob}")
             lines.append("")
         lines.append("---")
         lines.append("")
@@ -771,6 +861,16 @@ class Monitor:
                 "index": index,
                 "total": len(result.lenses),
             })
+            # Scope filter: when the lens declares an explicit scope,
+            # narrow the file_tree to matching paths so the evaluator
+            # doesn't consider out-of-scope files. Unscoped lenses see
+            # the full tree (legacy behavior). Cycle-4 finding F2
+            # showed why this matters: an app-runtime "no cloud LLMs"
+            # constraint was applied to dev-toolchain config that
+            # legitimately uses a cloud reviewer.
+            scoped_tree = _filter_file_tree_by_scope(
+                state.file_tree, lens.scope,
+            )
             eval_prompt = EVALUATE_PROMPT.format(
                 project_name=state.name,
                 lens_name=lens.name,
@@ -780,7 +880,7 @@ class Monitor:
                 questions="\n".join(f"- {q}" for q in lens.questions),
                 branch=state.branch,
                 uncommitted_files=state.uncommitted_files,
-                file_tree=state.file_tree[:1500],
+                file_tree=scoped_tree[:1500],
                 claude_md=state.claude_md[:2000],
                 test_output=state.test_output[:500],
             )

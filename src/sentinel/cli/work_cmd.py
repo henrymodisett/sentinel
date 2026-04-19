@@ -228,8 +228,15 @@ def _remaining_backlog_items(
 ) -> list[dict]:
     """Parse backlog + approved proposals and return executable items.
 
-    Order: refinements first (from scan), then approved expansions
-    (from proposals). Skips pending/rejected proposals.
+    Order: approved expansions (from proposals) first, then refinements
+    (from scan). Skips pending/rejected proposals.
+
+    User-marked ``Status: approved`` is an explicit "do this next"
+    signal — it must outrank planner-regenerated refinements that the
+    user has not vetted. Autumn-mail dogfood cycle 4 (Finding F3)
+    surfaced the inverted order: an approved proposal sat in the queue
+    while a freshly-regenerated refinement ran first, silently bypassing
+    the user signal.
 
     Filtering invariant: refinements pulled from the scan are run
     through the same registry + rejection-memory filters that
@@ -275,7 +282,11 @@ def _remaining_backlog_items(
 
     approved = _load_approved_proposals(project)
 
-    return refinements + approved
+    # Approved expansions run BEFORE refinements — user-marked
+    # ``Status: approved`` is an explicit "do this next" signal that
+    # outranks anything the planner regenerated this cycle. See the
+    # docstring for the cycle-4 finding that motivated this order.
+    return approved + refinements
 
 
 def _resolve_coder_timeout(

@@ -14,7 +14,7 @@ by `work_cmd` and stay; the rest of the original module is gone.
 from __future__ import annotations
 
 import subprocess
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from rich.console import Console
 
@@ -27,7 +27,20 @@ console = Console()
 
 
 def _action_to_work_item(action: dict, index: int) -> WorkItem:
-    """Convert a scan action (dict) into a WorkItem."""
+    """Convert a scan action (dict) into a WorkItem.
+
+    ``kind`` propagates from the action so the Coder can enforce
+    refinement vs. expansion semantics — refinements must cite
+    files present on HEAD; expansions may net-create files. Default
+    ``refine`` matches the planner default and the legacy behavior
+    where every action was treated as a refinement.
+    """
+    raw_kind = action.get("kind", "refine")
+    # Normalize to the WorkItem literal values; anything unknown
+    # falls back to "refine" so the strictest grounding check applies.
+    kind: Literal["refine", "expand"] = (
+        "expand" if raw_kind == "expand" else "refine"
+    )
     return WorkItem(
         id=f"cycle-{index}",
         title=action["title"],
@@ -40,6 +53,7 @@ def _action_to_work_item(action: dict, index: int) -> WorkItem:
             action.get("impact", ""),
         ],
         risk="",
+        kind=kind,
     )
 
 

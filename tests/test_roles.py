@@ -685,6 +685,11 @@ class TestCoderToleratesDictFiles:
                 {"path": "foo.py", "rationale": "entrypoint"},
                 {"path": "bar.py", "rationale": "helper"},
             ],
+            # Expansion so the refinement-grounding guard (added in the
+            # 2026-04-19 planner-grounding bundle) doesn't reject this
+            # test: the mock coder genuinely creates these files from
+            # scratch, so "expand" is the accurate kind.
+            kind="expand",
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -743,6 +748,11 @@ class TestCoderToleratesDictFiles:
                 "legacy.py",
                 {"path": "new.py", "rationale": "added by planner"},
             ],
+            # Expansion: the mock coder writes a brand-new file, and
+            # the cited paths don't yet exist on HEAD. The grounding
+            # check (added 2026-04-19) only enforces existence for
+            # refinements; "expand" is the accurate kind here.
+            kind="expand",
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
