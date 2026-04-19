@@ -1567,9 +1567,9 @@ async def _execute_and_review(
     if review.verdict == "approved":
         return "approved", verification.overall, ship_status, pr_url
 
-    # Non-approved verdict — memorialize it so the next cycle's planner
-    # doesn't regenerate the same item. See
-    # `sentinel.integrations.rejections` for the 30-day TTL behavior
+    # Non-approved verdict — memorialize it so the next cycle's
+    # planner doesn't regenerate the same item. See
+    # ``sentinel.integrations.rejections`` for the 30-day TTL behavior
     # and escape hatch. Suppressed on infrastructure failures (the
     # verdict isn't a verdict on the code, it's "reviewer crashed")
     # because persisting those would cost us a real item forever.
