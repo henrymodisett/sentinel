@@ -131,7 +131,7 @@ daily_limit_usd = 15.00
 Optional sections — see `src/sentinel/config/schema.py` for the full list:
 
 - `[scan]` — `max_lenses`, `evaluate_per_lens`, `provider_timeout_sec`
-- `[coder]` — `max_turns`
+- `[coder]` — `max_turns`, `timeout_seconds` (Coder Claude CLI timeout, 60-7200, default 600; override with `--coder-timeout` or `SENTINEL_CODER_TIMEOUT`)
 - `[local]` — `ollama_endpoint` for non-default Ollama hosts
 - `[retention]` — `runs_days` for how long cycle logs stick around
 

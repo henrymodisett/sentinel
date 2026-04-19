@@ -52,6 +52,99 @@ class TestRouter:
             router.get_provider("nonexistent")  # type: ignore[arg-type]
 
 
+class TestCoderTimeout:
+    """The Coder role owns its own CLI timeout (Cortex C5). The Router
+    must materialize a separate provider instance for the Coder so
+    setting `timeout_sec` on it doesn't bleed into other roles that
+    happen to share the same (provider, model) pair."""
+
+    def test_coder_timeout_overrides_scan_timeout(self) -> None:
+        cfg = SentinelConfig(
+            project={"name": "test", "path": "/tmp/test"},
+            roles={
+                "monitor": {"provider": "local", "model": "qwen2.5-coder:14b"},
+                "researcher": {"provider": "gemini", "model": "gemini-2.5-pro"},
+                "planner": {"provider": "claude", "model": "claude-opus-4-6"},
+                "coder": {"provider": "claude", "model": "claude-sonnet-4-6"},
+                "reviewer": {"provider": "gemini", "model": "gemini-2.5-pro"},
+            },
+            coder={"max_turns": 40, "timeout_seconds": 1200},
+        )
+        router = Router(cfg)
+        coder_provider = router.get_provider(RoleName.CODER)
+        assert coder_provider.timeout_sec == 1200
+
+    def test_coder_timeout_isolated_from_same_model_siblings(self) -> None:
+        """If the planner and coder share the same (provider, model),
+        the coder must still have its own instance so its custom
+        timeout doesn't also stretch the planner's calls."""
+        cfg = SentinelConfig(
+            project={"name": "test", "path": "/tmp/test"},
+            roles={
+                "monitor": {"provider": "local", "model": "qwen2.5-coder:14b"},
+                "researcher": {"provider": "gemini", "model": "gemini-2.5-pro"},
+                "planner": {"provider": "claude", "model": "claude-sonnet-4-6"},
+                "coder": {"provider": "claude", "model": "claude-sonnet-4-6"},
+                "reviewer": {"provider": "gemini", "model": "gemini-2.5-pro"},
+            },
+            coder={"max_turns": 40, "timeout_seconds": 1800},
+            scan={"max_lenses": 10, "evaluate_per_lens": True, "provider_timeout_sec": 600},
+        )
+        router = Router(cfg)
+        coder = router.get_provider(RoleName.CODER)
+        planner = router.get_provider(RoleName.PLANNER)
+        # Different instances (role-scoped cache key for coder)
+        assert coder is not planner
+        # Independent timeouts
+        assert coder.timeout_sec == 1800
+        assert planner.timeout_sec == 600
+
+    def test_coder_timeout_default_is_600(self) -> None:
+        cfg = SentinelConfig(
+            project={"name": "test", "path": "/tmp/test"},
+            roles={
+                "monitor": {"provider": "local", "model": "qwen2.5-coder:14b"},
+                "researcher": {"provider": "gemini", "model": "gemini-2.5-pro"},
+                "planner": {"provider": "claude", "model": "claude-opus-4-6"},
+                "coder": {"provider": "claude", "model": "claude-sonnet-4-6"},
+                "reviewer": {"provider": "gemini", "model": "gemini-2.5-pro"},
+            },
+        )
+        router = Router(cfg)
+        coder = router.get_provider(RoleName.CODER)
+        assert coder.timeout_sec == 600
+
+    def test_coder_timeout_below_min_rejected(self) -> None:
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError):
+            SentinelConfig(
+                project={"name": "test", "path": "/tmp/test"},
+                roles={
+                    "monitor": {"provider": "local", "model": "qwen2.5-coder:14b"},
+                    "researcher": {"provider": "gemini", "model": "gemini-2.5-pro"},
+                    "planner": {"provider": "claude", "model": "claude-opus-4-6"},
+                    "coder": {"provider": "claude", "model": "claude-sonnet-4-6"},
+                    "reviewer": {"provider": "gemini", "model": "gemini-2.5-pro"},
+                },
+                coder={"max_turns": 40, "timeout_seconds": 10},
+            )
+
+    def test_coder_timeout_above_max_rejected(self) -> None:
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError):
+            SentinelConfig(
+                project={"name": "test", "path": "/tmp/test"},
+                roles={
+                    "monitor": {"provider": "local", "model": "qwen2.5-coder:14b"},
+                    "researcher": {"provider": "gemini", "model": "gemini-2.5-pro"},
+                    "planner": {"provider": "claude", "model": "claude-opus-4-6"},
+                    "coder": {"provider": "claude", "model": "claude-sonnet-4-6"},
+                    "reviewer": {"provider": "gemini", "model": "gemini-2.5-pro"},
+                },
+                coder={"max_turns": 40, "timeout_seconds": 99999},
+            )
+
+
 class TestProviderDetection:
     def test_detect_all_returns_four_providers(self) -> None:
         results = Router.detect_all()

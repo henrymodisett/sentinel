@@ -850,6 +850,11 @@ def _write_config(
             "warn_at_usd": round(warn_at, 2),
         },
         "scan": {"max_lenses": 10, "evaluate_per_lens": True},
+        # Coder role tuning. `timeout_seconds` caps each agentic Claude
+        # CLI call — raise for complex refactors, slow networks, or
+        # large projects. Range: 60-7200. Overridable per-invocation
+        # via `--coder-timeout` / SENTINEL_CODER_TIMEOUT. (Cortex C5.)
+        "coder": {"timeout_seconds": 600},
         # Cortex T1.6 integration — write Sentinel-cycle journal
         # entries at cycle end. `auto` honors `.cortex/` presence at
         # runtime (default); `on`/`off` force the behavior. Runtime
