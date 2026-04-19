@@ -363,8 +363,19 @@ def filter_rejected(
     *,
     now: datetime | None = None,
     ttl_days: int = _TTL_DAYS,
+    exclude_cycle_id: str | None = None,
 ) -> RejectionFilterOutcome:
-    """Drop actions whose fingerprint matches an unexpired rejection."""
+    """Drop actions whose fingerprint matches an unexpired rejection.
+
+    ``exclude_cycle_id``: if provided, rejection records tagged with
+    that cycle are ignored by the filter. The executor sets this to
+    the current cycle id so an item rejected mid-cycle does not
+    retroactively filter its own list — which would shrink the live
+    ``items`` array under ``items[items_executed]`` indexing and
+    cause us to skip the next valid item. Cross-cycle rejections
+    still apply; intra-cycle rejections are deferred to the *next*
+    cycle, which is the intended cadence.
+    """
     index = load_index(project_dir, now=now, ttl_days=ttl_days)
     outcome = RejectionFilterOutcome()
     if not index.by_fingerprint:
@@ -374,8 +385,15 @@ def filter_rejected(
         record = index.matches(action)
         if record is None:
             outcome.kept.append(action)
-        else:
-            outcome.skipped.append((action, RejectionMatch(record=record)))
+            continue
+        if (
+            exclude_cycle_id is not None
+            and record.cycle_id == exclude_cycle_id
+        ):
+            # Same-cycle rejection — do not filter in this cycle.
+            outcome.kept.append(action)
+            continue
+        outcome.skipped.append((action, RejectionMatch(record=record)))
     return outcome
 
 

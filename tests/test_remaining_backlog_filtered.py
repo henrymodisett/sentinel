@@ -100,6 +100,54 @@ def test_remaining_backlog_items_filters_past_rejections(
     assert "Add retry logic to the Gmail poller" not in titles
 
 
+def test_same_cycle_rejection_does_not_shrink_live_list(
+    tmp_path: Path,
+) -> None:
+    """Regression for codex review finding on PR #78.
+
+    Scenario: the executor loop calls ``_remaining_backlog_items`` on
+    every iteration. When item A is rejected mid-cycle, the hook
+    writes to ``rejections.jsonl``; if the next iteration picks up
+    that rejection, the list shrinks from ``[A, B]`` to ``[B]`` and
+    ``items[items_executed]`` (where ``items_executed == 1``) now
+    points to index 1 — past the end — skipping item B entirely.
+
+    The cycle-id exclusion keeps same-cycle rejections from affecting
+    the current run; they apply from the next cycle onward.
+    """
+    _seed_project(tmp_path, cortex_present=False)
+
+    # Simulate item A rejected during cycle "2026-04-18-181350".
+    record_rejection(
+        tmp_path,
+        cycle_id="2026-04-18-181350",
+        work_item={
+            "title": "Automate Sentinel Cycle Journaling",
+            "lens": "toolchain-dogfood",
+            "why": "Runs not being journaled — need a cortex journal entry"
+                   " for each sentinel run (t1.6).",
+            "impact": "high",
+            "files": [],
+        },
+        review_verdict="rejected",
+        reviewer_reason="tautology loop",
+    )
+
+    # Same cycle id — filter must not drop the item.
+    with_same_cycle = _remaining_backlog_items(
+        tmp_path, current_cycle_id="2026-04-18-181350",
+    )
+    titles_same = [i["title"] for i in with_same_cycle]
+    assert "Automate Sentinel Cycle Journaling" in titles_same
+
+    # Different cycle id — filter drops the item.
+    with_next_cycle = _remaining_backlog_items(
+        tmp_path, current_cycle_id="2026-04-18-200000",
+    )
+    titles_next = [i["title"] for i in with_next_cycle]
+    assert "Automate Sentinel Cycle Journaling" not in titles_next
+
+
 def test_remaining_backlog_items_preserves_unfiltered(tmp_path: Path) -> None:
     """When nothing matches the filters, every refinement survives."""
     _seed_project(tmp_path, cortex_present=False)
