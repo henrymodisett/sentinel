@@ -917,6 +917,14 @@ def _install_claude_templates(project: Path) -> None:
 
 
 _SENTINEL_GITIGNORE_MARKER = "# sentinel artifacts"
+# The exact full-line marker the legacy sentinel-init generator wrote.
+# `_migrate_stale_sentinel_gitignore_line` requires this exact string
+# (not just the substring) before stripping, so a user's custom comment
+# that happens to start with "# sentinel artifacts" can never be matched
+# as a migration target.
+_SENTINEL_GITIGNORE_MARKER_LINE = (
+    "# sentinel artifacts — generated per-run, not source"
+)
 # R5.2 (autumn-garage journal 2026-04-18-r5-findings-from-fresh-scaffold):
 # we deliberately do NOT blanket-ignore ``.sentinel/`` at the project root.
 # ``.sentinel/`` holds durable artifacts meant to be committed (config.toml,
@@ -999,9 +1007,19 @@ def _migrate_stale_sentinel_gitignore_line(existing: str) -> str | None:
     with no trailing blank delimiter, which means we can't use a blank
     line as the lower bound of the block — users who appended their own
     ``.sentinel/`` below ``.claude/`` without an intervening blank would
-    have that line eaten by a naive scan. To stay safe we only strip a
-    ``.sentinel/`` line that sits on the line directly following the
-    marker comment and is directly followed by the ``.claude/`` line.
+    have that line eaten by a naive scan. Matching must also be exact
+    on the marker line itself (not a substring match): a user's own
+    comment that starts with "# sentinel artifacts" (e.g. "# sentinel
+    artifacts I added myself") must never be mistaken for the legacy
+    generator's marker.
+
+    So we strip ``.sentinel/`` only when the following three-line
+    signature matches exactly::
+
+        <full legacy marker line>
+        .sentinel/
+        .claude/
+
     That signature uniquely identifies the legacy generated block and
     leaves every user-authored entry alone.
     """
@@ -1009,7 +1027,7 @@ def _migrate_stale_sentinel_gitignore_line(existing: str) -> str | None:
     try:
         marker_idx = next(
             i for i, line in enumerate(lines)
-            if _SENTINEL_GITIGNORE_MARKER in line
+            if line.rstrip("\n") == _SENTINEL_GITIGNORE_MARKER_LINE
         )
     except StopIteration:
         return None

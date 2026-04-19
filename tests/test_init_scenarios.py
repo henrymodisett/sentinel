@@ -441,6 +441,36 @@ class TestAutoGitignore:
         # No duplicate block appended.
         assert after.count("# sentinel artifacts") == 1
 
+    def test_reinit_does_not_match_user_comment_with_marker_prefix(
+        self, fake_cli_env, isolated_home,
+    ):
+        """R5.2 migration must exact-match the legacy marker line, not
+        substring-match. A user's custom comment that happens to start
+        with "# sentinel artifacts" must not be treated as the legacy
+        generator's marker — otherwise we would delete their
+        `.sentinel/` entry from a block they wrote themselves.
+        """
+        user_block = (
+            "# sentinel artifacts I added myself\n"
+            ".sentinel/\n"
+            ".claude/\n"
+            "node_modules/\n"
+        )
+        (isolated_home / ".gitignore").write_text(user_block)
+
+        fake_cli_env(claude=True)
+        result = CliRunner().invoke(main, ["init", "--yes"])
+        assert result.exit_code == 0, result.output
+
+        after_lines = (isolated_home / ".gitignore").read_text().splitlines()
+        # User's own `.sentinel/` line below their custom comment is
+        # preserved — migration did not false-positive on the prefix.
+        assert ".sentinel/" in after_lines
+        # User's custom comment preserved verbatim.
+        assert "# sentinel artifacts I added myself" in after_lines
+        # User's other content preserved.
+        assert "node_modules/" in after_lines
+
     def test_reinit_preserves_user_sentinel_line_below_generated_block(
         self, fake_cli_env, isolated_home,
     ):
