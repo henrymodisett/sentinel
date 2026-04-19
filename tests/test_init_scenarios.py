@@ -379,6 +379,68 @@ class TestAutoGitignore:
         # Marker appears exactly once
         assert second.count("# sentinel artifacts") == 1
 
+    def test_reinit_migrates_stale_sentinel_line(
+        self, fake_cli_env, isolated_home,
+    ):
+        """R5.2 upgrade path: projects initialized with an older sentinel
+        have a stale `.sentinel/` line inside the generated block. Re-
+        running `sentinel init` must strip that line in-place so the bug
+        this PR fixes actually gets repaired on existing projects (not
+        just freshly-scaffolded ones).
+
+        The marker comment is preserved (so the block stays recognizable
+        as sentinel-managed) and unrelated user content is untouched.
+        """
+        # Simulate a .gitignore produced by an older sentinel version.
+        stale = (
+            "node_modules/\n"
+            "\n"
+            "# sentinel artifacts — generated per-run, not source\n"
+            ".sentinel/\n"
+            ".claude/\n"
+        )
+        (isolated_home / ".gitignore").write_text(stale)
+
+        fake_cli_env(claude=True)
+        result = CliRunner().invoke(main, ["init", "--yes"])
+        assert result.exit_code == 0, result.output
+
+        migrated = (isolated_home / ".gitignore").read_text()
+        # Stale blanket is gone.
+        assert ".sentinel/" not in migrated.splitlines()
+        # `.claude/` still ignored (it's Claude Code's per-user cache).
+        assert ".claude/" in migrated.splitlines()
+        # Marker preserved so the block remains recognizable.
+        assert "# sentinel artifacts — generated per-run, not source" in migrated
+        # User's unrelated content preserved.
+        assert "node_modules/" in migrated.splitlines()
+
+    def test_reinit_leaves_user_sentinel_line_alone(
+        self, fake_cli_env, isolated_home,
+    ):
+        """R5.2 migration must only strip `.sentinel/` from inside the
+        sentinel-generated block. A `.sentinel/` line the user wrote
+        elsewhere in their own .gitignore is their prerogative and must
+        stay put."""
+        user_owned = (
+            ".sentinel/\n"  # user's own line, outside our block
+            "node_modules/\n"
+            "\n"
+            "# sentinel artifacts — generated per-run, not source\n"
+            ".claude/\n"
+        )
+        (isolated_home / ".gitignore").write_text(user_owned)
+
+        fake_cli_env(claude=True)
+        result = CliRunner().invoke(main, ["init", "--yes"])
+        assert result.exit_code == 0, result.output
+
+        after = (isolated_home / ".gitignore").read_text()
+        # User's own `.sentinel/` line above our block is preserved.
+        assert after.splitlines()[0] == ".sentinel/"
+        # No duplicate block appended.
+        assert after.count("# sentinel artifacts") == 1
+
     def test_gitignore_change_is_committed_in_git_repo(
         self, fake_cli_env, isolated_home,
     ):

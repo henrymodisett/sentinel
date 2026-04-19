@@ -938,9 +938,18 @@ def _ensure_gitignore_entries(project: Path) -> None:
     """Append sentinel artifact paths to the target project's .gitignore.
 
     Without this, every `git status` / `open-pr.sh` run warns about
-    uncommitted .sentinel/ and .claude/ files — friction that makes
-    users either ignore warnings (bad) or commit the artifacts (worse).
+    uncommitted .claude/ files — friction that makes users either
+    ignore warnings (bad) or commit the artifacts (worse).
     Idempotent: checks for our marker comment before appending.
+
+    R5.2 migration: earlier sentinel versions wrote a `.sentinel/` line
+    into the generated block, which silently hid every durable artifact
+    (config.toml, runs/, proposals/, scans/, backlog.md, lenses.md,
+    domain_brief.md). When we detect an existing generated block that
+    still contains the stale `.sentinel/` line, we remove just that
+    line — leaving the rest of the user's .gitignore untouched — so
+    re-running `sentinel init` on an already-initialized project
+    actually repairs the bug this PR was written to fix.
 
     Commits the .gitignore change if we're inside a git repo, because
     otherwise `sentinel work`'s `_reset_and_checkout` would wipe the
@@ -948,7 +957,17 @@ def _ensure_gitignore_entries(project: Path) -> None:
     """
     gitignore = project / ".gitignore"
     existing = gitignore.read_text() if gitignore.exists() else ""
+
     if _SENTINEL_GITIGNORE_MARKER in existing:
+        migrated = _migrate_stale_sentinel_gitignore_line(existing)
+        if migrated is None:
+            return
+        gitignore.write_text(migrated)
+        console.print(
+            "  [green]✓[/green] Migrated .gitignore: removed stale "
+            "`.sentinel/` blanket entry (R5.2)",
+        )
+        _commit_gitignore_if_in_repo(project)
         return
 
     # Preserve the existing file's trailing newline situation; append
@@ -962,6 +981,46 @@ def _ensure_gitignore_entries(project: Path) -> None:
     )
 
     _commit_gitignore_if_in_repo(project)
+
+
+def _migrate_stale_sentinel_gitignore_line(existing: str) -> str | None:
+    """Remove a stale ``.sentinel/`` line from within the sentinel-generated
+    block of an existing .gitignore.
+
+    Returns the migrated text if a change is needed, ``None`` if the
+    file is already compliant. Only strips a line whose stripped value
+    is exactly ``.sentinel/`` and that sits within the sentinel block
+    (between our marker comment and the next blank line or EOF). We
+    never touch ``.sentinel/`` entries the user may have written
+    outside the generated block.
+    """
+    lines = existing.splitlines(keepends=True)
+    try:
+        marker_idx = next(
+            i for i, line in enumerate(lines)
+            if _SENTINEL_GITIGNORE_MARKER in line
+        )
+    except StopIteration:
+        return None
+
+    # Find the end of the generated block: next blank line, or EOF.
+    end_idx = len(lines)
+    for i in range(marker_idx + 1, len(lines)):
+        if lines[i].strip() == "":
+            end_idx = i
+            break
+
+    changed = False
+    new_lines: list[str] = []
+    for i, line in enumerate(lines):
+        if marker_idx <= i < end_idx and line.strip() == ".sentinel/":
+            changed = True
+            continue
+        new_lines.append(line)
+
+    if not changed:
+        return None
+    return "".join(new_lines)
 
 
 def _commit_gitignore_if_in_repo(project: Path) -> None:
