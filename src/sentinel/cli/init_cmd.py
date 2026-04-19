@@ -917,10 +917,19 @@ def _install_claude_templates(project: Path) -> None:
 
 
 _SENTINEL_GITIGNORE_MARKER = "# sentinel artifacts"
+# R5.2 (autumn-garage journal 2026-04-18-r5-findings-from-fresh-scaffold):
+# we deliberately do NOT blanket-ignore ``.sentinel/`` at the project root.
+# ``.sentinel/`` holds durable artifacts meant to be committed (config.toml,
+# runs/, proposals/, scans/, backlog.md, lenses.md, domain_brief.md). The
+# ephemeral subtree (``state/``) is excluded by the per-directory
+# ``.sentinel/.gitignore`` that ``_write_sentinel_gitignore`` installs
+# alongside this call. Blanket-ignoring ``.sentinel/`` at the root overrides
+# that design and silently hides every durable artifact from git.
+# ``.claude/`` stays here because it's Claude Code's per-user cache,
+# correctly project-external.
 _SENTINEL_GITIGNORE_BLOCK = """\
 
 # sentinel artifacts — generated per-run, not source
-.sentinel/
 .claude/
 """
 

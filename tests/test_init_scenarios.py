@@ -340,15 +340,21 @@ class TestPresets:
 # ---------- Goals.md nudge (not a blocker) ----------
 
 class TestAutoGitignore:
-    """sentinel init appends .sentinel/ and .claude/ to the target's
-    .gitignore so every open-pr.sh / git status doesn't warn about
-    untracked sentinel artifacts."""
+    """sentinel init appends .claude/ to the target's .gitignore so every
+    open-pr.sh / git status doesn't warn about Claude Code's per-user
+    cache. R5.2: `.sentinel/` is NOT blanket-ignored here — the
+    per-directory `.sentinel/.gitignore` written by
+    `_write_sentinel_gitignore` handles `state/` exclusion so that
+    durable artifacts (config.toml, runs/, proposals/, scans/,
+    backlog.md, lenses.md, domain_brief.md) stay committable."""
 
     def test_creates_gitignore_when_absent(self, fake_cli_env, isolated_home):
         fake_cli_env(claude=True)
         CliRunner().invoke(main, ["init", "--yes"])
         gitignore = (isolated_home / ".gitignore").read_text()
-        assert ".sentinel/" in gitignore
+        # R5.2: `.sentinel/` must NOT be blanket-ignored at the root.
+        assert ".sentinel/" not in gitignore.splitlines()
+        # `.claude/` is Claude Code's per-user cache — project-external.
         assert ".claude/" in gitignore
 
     def test_appends_to_existing_gitignore(self, fake_cli_env, isolated_home):
@@ -358,8 +364,9 @@ class TestAutoGitignore:
         gitignore = (isolated_home / ".gitignore").read_text()
         # Existing entries preserved
         assert "node_modules/" in gitignore
-        # New sentinel entries added
-        assert ".sentinel/" in gitignore
+        # New sentinel artifacts entry added (.claude/ only — R5.2 scope).
+        assert ".claude/" in gitignore
+        assert ".sentinel/" not in gitignore.splitlines()
 
     def test_idempotent_on_reinit(self, fake_cli_env, isolated_home):
         """Running init twice must not duplicate the sentinel block."""
