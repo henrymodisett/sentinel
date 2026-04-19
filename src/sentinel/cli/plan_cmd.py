@@ -447,11 +447,11 @@ async def run_plan(project_path: str | None = None, sync_github: bool = False) -
         )
         return
 
-    refinements = [a for a in actions if a.get("kind", "refine") == "refine"]
+    all_refinements = [a for a in actions if a.get("kind", "refine") == "refine"]
     expansions = [a for a in actions if a.get("kind") == "expand"]
     console.print(
         f"  [green]✓[/green] Extracted {len(actions)} work items "
-        f"[dim]({len(refinements)} refine, {len(expansions)} expand)[/dim]"
+        f"[dim]({len(all_refinements)} refine, {len(expansions)} expand)[/dim]"
     )
 
     # Load config so the registry filter can inspect integration
@@ -459,13 +459,28 @@ async def run_plan(project_path: str | None = None, sync_github: bool = False) -
     # optional — planner runs fine without it, the registry just
     # loses signal on the opt-out axis.
     from sentinel.cli.scan_cmd import _load_config
+    from sentinel.integrations.registry import filter_actions
+    from sentinel.integrations.rejections import filter_rejected
     config = _load_config(project)
+
+    # Apply the same filter stack _write_backlog uses, so the CLI
+    # summary, --sync-github, and the on-disk backlog all agree on
+    # what made the cut. Without this mirror the summary advertises
+    # items that never reached the backlog, and --sync-github opens
+    # GitHub issues for built-in or previously-rejected work.
+    registry_outcome = filter_actions(all_refinements, project, config)
+    rejection_outcome = filter_rejected(registry_outcome.kept, project)
+    refinements = rejection_outcome.kept
+    skipped_total = (
+        len(registry_outcome.skipped) + len(rejection_outcome.skipped)
+    )
 
     # Write backlog.md (refinements only — autonomously executable)
     backlog_path = _write_backlog(project, actions, scan_file, config=config)
+    extra = f", {skipped_total} skipped by filters" if skipped_total else ""
     console.print(
         f"  [green]✓[/green] Wrote {backlog_path.relative_to(project)} "
-        f"[dim]({len(refinements)} refinements)[/dim]"
+        f"[dim]({len(refinements)} refinements{extra})[/dim]"
     )
 
     # Write proposals (expansions — require user approval)

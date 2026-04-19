@@ -226,8 +226,19 @@ def _remaining_backlog_items(project: Path) -> list[dict]:
 
     Order: refinements first (from scan), then approved expansions
     (from proposals). Skips pending/rejected proposals.
+
+    Filtering invariant: refinements pulled from the scan are run
+    through the same registry + rejection-memory filters that
+    ``_write_backlog`` uses. Without this, the scan-derived list would
+    leak built-in / previously-rejected items into execution even
+    though the backlog markdown correctly omits them. The two call
+    sites must apply identical filters or the executor drifts from
+    the file the user sees.
     """
     from sentinel.cli.cycle_cmd import _load_approved_proposals
+    from sentinel.cli.scan_cmd import _load_config
+    from sentinel.integrations.registry import filter_actions
+    from sentinel.integrations.rejections import filter_rejected
 
     backlog = project / ".sentinel" / "backlog.md"
     if not backlog.exists():
@@ -238,6 +249,15 @@ def _remaining_backlog_items(project: Path) -> list[dict]:
 
     actions = _parse_actions_from_scan(scan)
     refinements = [a for a in actions if a.get("kind", "refine") == "refine"]
+
+    # Apply the same filter stack the planner uses before writing the
+    # backlog. Config load is best-effort — missing config just means
+    # the registry can't check opt-out, which is a conservative fail-
+    # closed (might leave items in; never removes legit work).
+    config = _load_config(project)
+    refinements = filter_actions(refinements, project, config).kept
+    refinements = filter_rejected(refinements, project).kept
+
     approved = _load_approved_proposals(project)
 
     return refinements + approved
