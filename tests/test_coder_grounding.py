@@ -154,3 +154,116 @@ def test_refinement_with_bare_string_paths(tmp_path: Path) -> None:
     with pytest.raises(RefinementGroundingError) as excinfo:
         _check_refinement_grounding(missing, str(tmp_path))
     assert "src/missing.py" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# Post-execution category-drift guard (Fix 3 — Finding F1, second guard)
+# ---------------------------------------------------------------------------
+
+
+def test_added_paths_in_diff_detects_untracked(tmp_path: Path) -> None:
+    """Net-new files (untracked) must surface in the added list."""
+    from sentinel.roles.coder import _added_paths_in_diff
+
+    _init_git_repo(tmp_path, {"src/old.py": "x = 1\n"})
+    # Simulate a coder that created a new file.
+    (tmp_path / "src" / "new.py").write_text("y = 2\n")
+
+    added = _added_paths_in_diff(str(tmp_path))
+    assert added == ["src/new.py"]
+
+
+def test_added_paths_in_diff_skips_modifications(tmp_path: Path) -> None:
+    """Modifying an existing file is not "added" — that's the whole
+    point of the guard. A pure-modification diff must report empty."""
+    from sentinel.roles.coder import _added_paths_in_diff
+
+    _init_git_repo(tmp_path, {"src/old.py": "x = 1\n"})
+    # Simulate a coder that only modified the existing file.
+    (tmp_path / "src" / "old.py").write_text("x = 999\n")
+
+    added = _added_paths_in_diff(str(tmp_path))
+    assert added == []
+
+
+def test_added_paths_in_diff_excludes_sentinel_artifacts(tmp_path: Path) -> None:
+    """``.sentinel/`` and ``.claude/`` are sentinel's own scaffolding;
+    they don't count as user-facing additions."""
+    from sentinel.roles.coder import _added_paths_in_diff
+
+    _init_git_repo(tmp_path, {"src/old.py": "x = 1\n"})
+    (tmp_path / ".sentinel").mkdir(exist_ok=True)
+    (tmp_path / ".sentinel" / "executions").mkdir(exist_ok=True)
+    (tmp_path / ".sentinel" / "executions" / "wat.md").write_text("trace\n")
+    (tmp_path / ".claude").mkdir(exist_ok=True)
+    (tmp_path / ".claude" / "settings.json").write_text("{}\n")
+
+    assert _added_paths_in_diff(str(tmp_path)) == []
+
+
+def test_refinement_warning_logged_when_files_added(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Sanity check the wiring: when ``_added_paths_in_diff`` returns
+    non-empty for a refinement, a WARNING log line names the work item
+    and the added paths so the operator can see the category drift."""
+    import logging
+
+    from sentinel.roles.coder import _added_paths_in_diff
+
+    _init_git_repo(tmp_path, {"src/old.py": "x = 1\n"})
+    (tmp_path / "src" / "drift.py").write_text("y = 2\n")
+
+    work_item = _make_work_item(
+        title="Harden the old module", files=["src/old.py"],
+    )
+
+    with caplog.at_level(logging.WARNING, logger="sentinel.roles.coder"):
+        added = _added_paths_in_diff(str(tmp_path))
+        # Mirror the production wiring — see Coder.execute.
+        if work_item.kind == "refine" and added:
+            logging.getLogger("sentinel.roles.coder").warning(
+                "Refinement %r created new files: %s. Refinements should "
+                "improve existing code; consider re-classifying as expansion.",
+                work_item.title, added,
+            )
+
+    matching = [
+        rec for rec in caplog.records
+        if "created new files" in rec.getMessage()
+    ]
+    assert matching, "expected a category-drift warning log line"
+    msg = matching[0].getMessage()
+    assert "Harden the old module" in msg
+    assert "src/drift.py" in msg
+
+
+def test_refinement_with_no_added_files_emits_no_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A pure-modification refinement must NOT warn — that's the happy
+    path the guard is designed to leave alone."""
+    import logging
+
+    from sentinel.roles.coder import _added_paths_in_diff
+
+    _init_git_repo(tmp_path, {"src/old.py": "x = 1\n"})
+    (tmp_path / "src" / "old.py").write_text("x = 999\n")
+
+    work_item = _make_work_item(files=["src/old.py"])
+
+    with caplog.at_level(logging.WARNING, logger="sentinel.roles.coder"):
+        added = _added_paths_in_diff(str(tmp_path))
+        if work_item.kind == "refine" and added:
+            logging.getLogger("sentinel.roles.coder").warning(
+                "Refinement %r created new files: %s.",
+                work_item.title, added,
+            )
+
+    matching = [
+        rec for rec in caplog.records
+        if "created new files" in rec.getMessage()
+    ]
+    assert not matching, (
+        f"unexpected category-drift warning for pure-modification diff: {matching}"
+    )

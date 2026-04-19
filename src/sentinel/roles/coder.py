@@ -258,6 +258,51 @@ def _files_changed(project_path: str) -> list[str]:
     return sorted(_git_status_snapshot(project_path))
 
 
+def _added_paths_in_diff(working_directory: str) -> list[str]:
+    """Return paths the working tree has *added* (untracked or staged-add).
+
+    Drives the post-execution refinement-creates-files guard. Uses
+    `git status --porcelain -z` so we can read both index status (X)
+    and worktree status (Y) per entry — a path is "added" if either
+    column is `A` (staged add) or both are `?` (untracked).
+
+    Sentinel's own artifacts are excluded for the same reason
+    ``_git_status_snapshot`` excludes them: they don't represent user
+    work and our reset/clean cycle ignores them.
+
+    Returns paths sorted for deterministic test output.
+    """
+    result = _run_git(
+        ["status", "--porcelain", "-z",
+         "--untracked-files=all", "--no-renames"],
+        working_directory,
+    )
+    if result.returncode != 0:
+        # Match the snapshot helper's policy: log + return empty so the
+        # caller sees "no added files" rather than a hidden git failure.
+        # The post-exec call site decides whether silence is acceptable.
+        import logging
+        logging.getLogger(__name__).warning(
+            "git status failed in %s (rc=%s): %s",
+            working_directory, result.returncode,
+            (result.stderr or result.stdout or "(no output)").strip(),
+        )
+        return []
+    added: list[str] = []
+    for entry in result.stdout.split("\0"):
+        if len(entry) < 4:
+            continue
+        # Format: "XY PATH" — X is index, Y is worktree.
+        x, y = entry[0], entry[1]
+        path = entry[3:]
+        if path.startswith(".sentinel/") or path.startswith(".claude/"):
+            continue
+        # `A` in either column = staged add; `??` = untracked = net-new.
+        if x == "A" or y == "A" or (x == "?" and y == "?"):
+            added.append(path)
+    return sorted(added)
+
+
 def _commit_files(
     project_path: str,
     files: list[str],
@@ -725,6 +770,25 @@ class Coder:
                 ad, work_item, prompt, response, result,
             )
             return result
+
+        # Post-execution category-drift guard: a refinement that
+        # net-creates files contradicts its own kind. The pre-execution
+        # check (Fix 2) catches the planner-level miscategorization;
+        # this post-execution check catches drift introduced by the
+        # coder itself (e.g. it decided to "extract a helper module"
+        # when the work item said "harden existing code"). Warning,
+        # not error — the work may still be salvageable; the reviewer
+        # can weigh in.
+        if work_item.kind == "refine":
+            added = _added_paths_in_diff(wd)
+            if added:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Refinement %r created new files: %s. Refinements "
+                    "should improve existing code; consider re-classifying "
+                    "as expansion.",
+                    work_item.title, added,
+                )
 
         # Run tests to verify. The touchstone-config lives at the project
         # root (artifacts_directory), not the worktree — config is
