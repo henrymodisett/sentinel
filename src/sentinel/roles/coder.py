@@ -48,6 +48,46 @@ def _slug(title: str) -> str:
     return s[:50]  # cap at 50 chars
 
 
+def _file_label(item: object) -> str:
+    """Render a single `WorkItem.files` entry as a human-readable string.
+
+    The planner's current scan parser (plan_cmd._parse_actions_from_scan)
+    emits each file as `{"path": ..., "rationale": ...}`, but legacy
+    callers (hand-authored WorkItems in tests, older scans) pass bare
+    strings. Must tolerate both without crashing.
+
+    Returns the best-effort label:
+      - str          -> the string itself
+      - {"path":...} -> "path — rationale" if rationale present, else "path"
+      - anything else -> `str(item)` (visible failure mode, not silent)
+    """
+    if isinstance(item, str):
+        return item
+    if isinstance(item, dict):
+        path = item.get("path") or item.get("file") or ""
+        rationale = item.get("rationale") or item.get("note") or ""
+        if path and rationale:
+            return f"{path} — {rationale}"
+        if path:
+            return path
+        # Dict with no recognized keys — surface the raw shape rather than
+        # silently dropping it, so the bug is debuggable from prompt text.
+        return str(item)
+    return str(item)
+
+
+def _format_files_for_prompt(files: list) -> str:
+    """Render `WorkItem.files` as the prompt's Files section.
+
+    Used to be `", ".join(files)`, which crashes with TypeError when
+    planner emits list[dict]. This helper is the single consumer-side
+    adapter for the `list[str | dict]` contract declared on WorkItem.files.
+    """
+    if not files:
+        return "(let coder determine)"
+    return ", ".join(_file_label(f) for f in files)
+
+
 def _run_git(
     args: list[str], cwd: str,
 ) -> subprocess.CompletedProcess[str]:
@@ -483,7 +523,7 @@ class Coder:
         # stateless across calls: each invocation rebuilds the prompt
         # from the live work item + (for revisions) the review findings.
         criteria = "\n".join(f"- {c}" for c in work_item.acceptance_criteria) or "(none)"
-        files = ", ".join(work_item.files) or "(let coder determine)"
+        files = _format_files_for_prompt(work_item.files)
         # Project name comes from the artifacts dir (the main project),
         # NOT the working dir (the worktree, whose path includes the
         # `.sentinel/worktrees/wi-N` suffix).

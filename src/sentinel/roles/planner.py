@@ -23,7 +23,15 @@ class WorkItem:
     type: Literal["feature", "bugfix", "refactor", "test", "docs", "chore"]
     priority: Literal["critical", "high", "medium", "low"]
     complexity: int  # 1-5
-    files: list[str] = field(default_factory=list)
+    # Files this work item is scoped to. Two shapes are accepted:
+    #   - list[str]: bare paths (legacy scans + hand-authored items).
+    #   - list[dict]: {"path": ..., "rationale": ...} — current planner
+    #     output. The richer shape lets downstream consumers (coder prompt,
+    #     reviewer context) carry a per-file note. See
+    #     sentinel/cli/plan_cmd.py::_parse_actions_from_scan for the
+    #     producer side. Consumers must call `_file_path(item)` /
+    #     `_file_label(item)` helpers rather than string-casting directly.
+    files: list[str | dict] = field(default_factory=list)
     acceptance_criteria: list[str] = field(default_factory=list)
     lens: str = ""  # which lens surfaced this
     risk: str = ""

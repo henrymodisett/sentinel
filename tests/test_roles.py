@@ -634,6 +634,159 @@ class TestCoderCommitsToFeatureBranch:
             )
 
 
+class TestCoderToleratesDictFiles:
+    """Regression for v0.3.0 production crash:
+        File "sentinel/roles/coder.py", line 486, in execute
+            files = ", ".join(work_item.files) or "(let coder determine)"
+        TypeError: sequence item 0: expected str instance, dict found
+
+    The planner's scan parser (plan_cmd._parse_actions_from_scan) emits
+    files as list[{path, rationale}] dicts. The coder used to assume
+    list[str] and crashed the entire cycle before the coder could do
+    any work. The WorkItem.files contract is list[str | dict]; this
+    test locks in that the consumer handles both.
+    """
+
+    @pytest.mark.asyncio
+    async def test_dict_files_does_not_crash_execute(self) -> None:
+        """A WorkItem with list[dict] files (current planner output)
+        must reach the provider call without a TypeError.
+
+        Uses the same file-writing mock as the other Coder tests so
+        we exercise the real prompt-formatting code path. Asserts
+        the run completes with a real commit (fix must not regress
+        the "commits even when tests fail" guarantee) AND the rendered
+        prompt contains the path and rationale text (the richer dict
+        shape exists to carry context into the prompt, not just to
+        avoid the crash)."""
+        import subprocess as _sp
+
+        class FileWritingMock(MockProvider):
+            async def code(self, prompt, options=None, **kwargs):
+                self.code_calls.append(prompt)
+                wd = kwargs.get("working_directory", ".")
+                (Path(wd) / "foo.py").write_text("print('ok')\n")
+                return ChatResponse(
+                    content="done", provider=self.name, cost_usd=0.01,
+                )
+
+        provider = FileWritingMock()
+        provider.capabilities = ProviderCapabilities(
+            chat=True, agentic_code=True,
+        )
+        router = _mock_router(provider)
+        coder = Coder(router)
+
+        work_item = WorkItem(
+            id="wi-dict", title="dict files regression",
+            description="planner emitted list[dict]",
+            type="fix", priority="high", complexity=1,
+            files=[
+                {"path": "foo.py", "rationale": "entrypoint"},
+                {"path": "bar.py", "rationale": "helper"},
+            ],
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _sp.run(["git", "init", "-q", "-b", "main"], cwd=tmpdir, check=True)
+            _sp.run(
+                ["git", "-c", "user.email=a@b", "-c", "user.name=t",
+                 "commit", "--allow-empty", "-m", "init", "-q"],
+                cwd=tmpdir, check=True,
+            )
+
+            # Must not raise TypeError — this was the v0.3.0 crash.
+            result = await coder.execute(work_item, **_coder_kwargs(tmpdir))
+
+            assert result.status in ("success", "partial"), (
+                f"dict files must not short-circuit the cycle; got "
+                f"status={result.status!r} error={result.error!r}"
+            )
+            # The richer shape should carry through into the prompt so
+            # the coder sees the rationale, not just paths.
+            assert provider.code_calls, "provider.code must have been called"
+            rendered = provider.code_calls[0]
+            assert "foo.py" in rendered
+            assert "bar.py" in rendered
+            assert "entrypoint" in rendered
+            assert "helper" in rendered
+
+    @pytest.mark.asyncio
+    async def test_mixed_str_and_dict_files(self) -> None:
+        """Defense-in-depth: handle legacy bare-string entries mixed
+        with current dict entries in the same WorkItem. This shape
+        can arise when a hand-edited backlog.md sits next to a
+        freshly-planned item."""
+        import subprocess as _sp
+
+        class FileWritingMock(MockProvider):
+            async def code(self, prompt, options=None, **kwargs):
+                self.code_calls.append(prompt)
+                wd = kwargs.get("working_directory", ".")
+                (Path(wd) / "out.py").write_text("x = 1\n")
+                return ChatResponse(
+                    content="done", provider=self.name, cost_usd=0.01,
+                )
+
+        provider = FileWritingMock()
+        provider.capabilities = ProviderCapabilities(
+            chat=True, agentic_code=True,
+        )
+        router = _mock_router(provider)
+        coder = Coder(router)
+
+        work_item = WorkItem(
+            id="wi-mixed", title="mixed files",
+            description="",
+            type="fix", priority="low", complexity=1,
+            files=[
+                "legacy.py",
+                {"path": "new.py", "rationale": "added by planner"},
+            ],
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _sp.run(["git", "init", "-q", "-b", "main"], cwd=tmpdir, check=True)
+            _sp.run(
+                ["git", "-c", "user.email=a@b", "-c", "user.name=t",
+                 "commit", "--allow-empty", "-m", "init", "-q"],
+                cwd=tmpdir, check=True,
+            )
+
+            result = await coder.execute(work_item, **_coder_kwargs(tmpdir))
+            assert result.status in ("success", "partial")
+            rendered = provider.code_calls[0]
+            assert "legacy.py" in rendered
+            assert "new.py" in rendered
+
+    def test_file_label_helper_shapes(self) -> None:
+        """Unit-level invariant: the helper must return a string for
+        every shape declared in the WorkItem.files contract, and fall
+        back visibly (not silently) for malformed input."""
+        from sentinel.roles.coder import _file_label, _format_files_for_prompt
+
+        # Legacy string entry — passthrough.
+        assert _file_label("foo.py") == "foo.py"
+        # Current dict entry — "path — rationale".
+        assert _file_label({"path": "foo.py", "rationale": "note"}) == (
+            "foo.py — note"
+        )
+        # Dict with path but no rationale — just the path.
+        assert _file_label({"path": "foo.py"}) == "foo.py"
+        # Alternate key names tolerated (defense vs. minor producer drift).
+        assert _file_label({"file": "foo.py", "note": "x"}) == "foo.py — x"
+        # Malformed: no recognized keys — must return a string, not crash.
+        assert isinstance(_file_label({"weird": 1}), str)
+        # Non-string, non-dict: must not crash.
+        assert isinstance(_file_label(42), str)
+
+        # Aggregate helper invariants.
+        assert _format_files_for_prompt([]) == "(let coder determine)"
+        assert _format_files_for_prompt(
+            [{"path": "a.py", "rationale": "r"}, "b.py"],
+        ) == "a.py — r, b.py"
+
+
 class TestCoderCommitPathspecIsolation:
     """Codex review caught: _commit_files() ran `git add` + `git commit -m`
     without a pathspec, so anything in the user's staged index got
