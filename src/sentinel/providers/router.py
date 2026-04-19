@@ -130,19 +130,39 @@ class Router:
             RoleName.REVIEWER: config.roles.reviewer,
         }
         for role_name, role_config in roles.items():
-            provider = self._materialize(role_config.provider.value, role_config.model)
+            provider = self._materialize(
+                role_config.provider.value, role_config.model, role=role_name,
+            )
             self._role_map[role_name] = provider
 
-    def _materialize(self, provider_name: str, model: str) -> Provider:
+    def _materialize(
+        self,
+        provider_name: str,
+        model: str,
+        *,
+        role: RoleName | None = None,
+    ) -> Provider:
         """Return a Provider instance for (provider_name, model), cached
-        across the router's lifetime. Same (provider, model) pair is
-        always the same instance — both for memory and for sharing the
-        Coder's max_turns / scan timeout that we set on instances."""
-        key = f"{provider_name}:{model}"
+        across the router's lifetime.
+
+        Normally the same (provider, model) pair is a single shared
+        instance — memory-efficient and lets us set max_turns / timeout
+        once on the instance. Exception: the Coder role owns its own
+        timeout (`config.coder.timeout_seconds`, per Cortex C5) which
+        can legitimately differ from the scan timeout. If we shared the
+        instance with, say, the reviewer, setting the coder timeout on
+        it would silently stretch the reviewer's timeout too. We key
+        the coder's instance separately so timeouts stay role-scoped.
+        """
+        coder_scoped = role == RoleName.CODER
+        key = f"coder:{provider_name}:{model}" if coder_scoped else f"{provider_name}:{model}"
         if key in self._providers:
             return self._providers[key]
         provider = _create_provider(provider_name, model, self._config)
-        provider.timeout_sec = self._config.scan.provider_timeout_sec
+        if coder_scoped:
+            provider.timeout_sec = self._config.coder.timeout_seconds
+        else:
+            provider.timeout_sec = self._config.scan.provider_timeout_sec
         provider.max_turns = self._config.coder.max_turns
         self._providers[key] = provider
         return provider

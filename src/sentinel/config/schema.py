@@ -10,7 +10,15 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+# Bounds on the Coder's Claude CLI timeout. Floor keeps a misconfigured
+# 5s timeout from silently breaking every cycle; ceiling keeps a typo'd
+# 99999 from wedging a cycle for a day. Documented here so the same
+# bounds apply at config parse, CLI flag, and env-var resolution points.
+CODER_TIMEOUT_MIN_SEC = 60
+CODER_TIMEOUT_MAX_SEC = 7200
+CODER_TIMEOUT_DEFAULT_SEC = 600
 
 
 class ProviderName(StrEnum):
@@ -99,6 +107,39 @@ class CoderConfig(BaseModel):
     # or multi-file refactors — Claude uses ~4 turns just reading files
     # before it edits anything. 40 is a safer default for real work.
     max_turns: int = 40
+
+    # Per-call timeout (seconds) for the Coder's agentic CLI invocation.
+    # Autumn-mail's first real cycle (2026-04-18, Cortex finding C5) hit
+    # the old hard-coded 600s cap on its third revision pass — complex
+    # revisions can legitimately run longer. This decouples the Coder
+    # from `scan.provider_timeout_sec` so the Coder can be given a
+    # longer leash without also lengthening monitor/scan timeouts.
+    # Precedence at `sentinel work` time: `--coder-timeout` flag >
+    # `SENTINEL_CODER_TIMEOUT` env var > this config > default 600s.
+    timeout_seconds: int = Field(
+        default=CODER_TIMEOUT_DEFAULT_SEC,
+        ge=CODER_TIMEOUT_MIN_SEC,
+        le=CODER_TIMEOUT_MAX_SEC,
+        description=(
+            f"Coder CLI timeout in seconds "
+            f"(min {CODER_TIMEOUT_MIN_SEC}, max {CODER_TIMEOUT_MAX_SEC})."
+        ),
+    )
+
+    @field_validator("timeout_seconds")
+    @classmethod
+    def _validate_timeout(cls, v: int) -> int:
+        # Pydantic's ge/le already clamp at parse time, but we re-assert
+        # here with a friendlier error — config validation errors surface
+        # directly in `sentinel work` output and the default message
+        # ("Input should be greater than or equal to 60") is less
+        # actionable than naming the key and the valid range.
+        if v < CODER_TIMEOUT_MIN_SEC or v > CODER_TIMEOUT_MAX_SEC:
+            raise ValueError(
+                f"timeout_seconds={v} out of range "
+                f"[{CODER_TIMEOUT_MIN_SEC}, {CODER_TIMEOUT_MAX_SEC}]",
+            )
+        return v
 
 
 class RetentionConfig(BaseModel):

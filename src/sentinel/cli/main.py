@@ -76,19 +76,34 @@ def main() -> None:
         "by `.cortex/` presence."
     ),
 )
+@click.option(
+    "--coder-timeout",
+    "coder_timeout",
+    type=int,
+    default=None,
+    help=(
+        "Per-call timeout (seconds) for the Coder's Claude CLI invocation. "
+        "Overrides the SENTINEL_CODER_TIMEOUT env var and "
+        "`[coder] timeout_seconds` in .sentinel/config.toml. Range: "
+        "60-7200. Default 600s. Raise for complex refactors / long "
+        "revision passes (autumn-mail Cortex C5)."
+    ),
+)
 def work(
     budget: str | None,
     every: str | None,
     dry_run: bool,
     auto: bool,
     cortex_journal: bool | None,
+    coder_timeout: int | None,
 ) -> None:
     """Work on this project. One cycle, or loop with --every.
 
     Examples:
-      sentinel work                      one cycle and exit
-      sentinel work --every 10m          loop, 10 min between cycles
-      sentinel work --every 1h -b $20    loop with $20 session cap
+      sentinel work                          one cycle and exit
+      sentinel work --every 10m              loop, 10 min between cycles
+      sentinel work --every 1h -b $20        loop with $20 session cap
+      sentinel work --coder-timeout 1200     give Coder 20 minutes per call
     """
     from sentinel.cli.work_cmd import run_work
 
@@ -96,6 +111,7 @@ def work(
         run_work(
             budget_str=budget, dry_run=dry_run, auto=auto, every=every,
             cortex_journal=cortex_journal,
+            coder_timeout=coder_timeout,
         ),
     )
 

@@ -243,6 +243,50 @@ def _remaining_backlog_items(project: Path) -> list[dict]:
     return refinements + approved
 
 
+def _resolve_coder_timeout(
+    *,
+    cli_value: int | None,
+    env_value: str | None,
+    config_value: int,
+) -> int:
+    """Resolve the Coder CLI timeout from the three precedence levels.
+
+    Precedence: CLI flag > env var (SENTINEL_CODER_TIMEOUT) > config
+    (`[coder] timeout_seconds`) > default. Each layer is independently
+    validated against `[CODER_TIMEOUT_MIN_SEC, CODER_TIMEOUT_MAX_SEC]`.
+
+    Raising `click.BadParameter` on out-of-range / unparseable values
+    at the CLI boundary keeps the misconfiguration visible to the
+    operator rather than silently falling back to the next layer — a
+    typo in --coder-timeout should fail loudly, not quietly ignore.
+    """
+    from sentinel.config.schema import (
+        CODER_TIMEOUT_MAX_SEC,
+        CODER_TIMEOUT_MIN_SEC,
+    )
+
+    def _check(label: str, v: int) -> int:
+        if v < CODER_TIMEOUT_MIN_SEC or v > CODER_TIMEOUT_MAX_SEC:
+            raise click.BadParameter(
+                f"{label}={v} out of range "
+                f"[{CODER_TIMEOUT_MIN_SEC}, {CODER_TIMEOUT_MAX_SEC}]",
+            )
+        return v
+
+    if cli_value is not None:
+        return _check("--coder-timeout", cli_value)
+    if env_value is not None and env_value.strip():
+        try:
+            parsed = int(env_value.strip())
+        except ValueError as e:
+            raise click.BadParameter(
+                f"SENTINEL_CODER_TIMEOUT={env_value!r} is not a valid integer",
+            ) from e
+        return _check("SENTINEL_CODER_TIMEOUT", parsed)
+    # Config value has already been validated by pydantic at load time.
+    return config_value
+
+
 async def run_work(
     project_path: str | None = None,
     budget_str: str | None = None,
@@ -250,6 +294,7 @@ async def run_work(
     auto: bool = False,
     every: str | None = None,
     cortex_journal: bool | None = None,
+    coder_timeout: int | None = None,
 ) -> None:
     """The one command.
 
@@ -260,12 +305,17 @@ async def run_work(
     ``cortex_journal`` maps to ``--cortex-journal`` / ``--no-cortex-journal``.
     Forwarded to each cycle so loop-mode honors the flag every tick; the
     per-cycle resolution consults config and auto-detect when None.
+
+    ``coder_timeout`` maps to ``--coder-timeout <seconds>`` and overrides
+    both `SENTINEL_CODER_TIMEOUT` and `[coder] timeout_seconds`. When
+    None we fall through to env → config → default.
     """
     if every is None:
         # Single cycle — just run it and return
         await _run_single_cycle(
             project_path, budget_str, dry_run, auto,
             cortex_journal=cortex_journal,
+            coder_timeout=coder_timeout,
         )
         return
 
@@ -273,6 +323,7 @@ async def run_work(
     await _run_loop(
         project_path, budget_str, dry_run, auto, every,
         cortex_journal=cortex_journal,
+        coder_timeout=coder_timeout,
     )
 
 
@@ -371,6 +422,7 @@ async def _run_single_cycle(
     auto: bool = False,
     *,
     cortex_journal: bool | None = None,
+    coder_timeout: int | None = None,
 ) -> None:
     """Run exactly one cycle of work and return."""
     project = Path(project_path or os.getcwd()).resolve()
@@ -426,6 +478,22 @@ async def _run_single_cycle(
     config = _load_config(project)
     if not config:
         return
+
+    # Resolve the Coder CLI timeout (Cortex C5). Precedence:
+    # --coder-timeout flag > SENTINEL_CODER_TIMEOUT env > config > default.
+    # Applied in-place on config.coder so the downstream Router picks it
+    # up without extra plumbing — single code path, no second source.
+    resolved_coder_timeout = _resolve_coder_timeout(
+        cli_value=coder_timeout,
+        env_value=os.environ.get("SENTINEL_CODER_TIMEOUT"),
+        config_value=config.coder.timeout_seconds,
+    )
+    if resolved_coder_timeout != config.coder.timeout_seconds:
+        console.print(
+            f"  [dim]Coder CLI timeout: {resolved_coder_timeout}s "
+            f"(was {config.coder.timeout_seconds}s in config)[/dim]"
+        )
+    config.coder.timeout_seconds = resolved_coder_timeout
 
     # Snapshot daily spend at cycle start so --budget enforces this run's
     # spend, not the daily running total. Without this, passing
@@ -617,7 +685,7 @@ async def _run_single_cycle(
                     console.print("  [red]No scan to plan from[/red]")
                     break
                 actions = _parse_actions_from_scan(scan_file)
-                _write_backlog(project, actions, scan_file)
+                _write_backlog(project, actions, scan_file, config=config)
                 # Write expansion proposals so user can approve later
                 from sentinel.cli.plan_cmd import _write_proposals
                 proposals = _write_proposals(project, actions, scan_file)
@@ -675,6 +743,14 @@ async def _run_single_cycle(
                         f"  {i}. [{color}][{kind}][/{color}] {a['title']}"
                     )
                 console.print()
+                # Surface the resolved Coder timeout so --dry-run is a
+                # useful configuration-probe: users (and tests) can
+                # verify the flag/env/config resolution without actually
+                # invoking the Claude CLI.
+                console.print(
+                    f"  [dim]Resolved coder timeout: "
+                    f"{config.coder.timeout_seconds}s[/dim]"
+                )
                 console.print("[yellow]  Dry run — stopping[/yellow]")
                 journal.exit_reason = "dry_run"
                 break
@@ -698,6 +774,9 @@ async def _run_single_cycle(
                 next_item, items_executed + 1,
                 project, original_branch,
                 coder, reviewer, config,
+                cycle_id=datetime.fromtimestamp(
+                    journal.started_at,
+                ).strftime("%Y-%m-%d-%H%M%S"),
             )
             journal.end_phase(phase_label, status=success or "unknown")
             _print_cycle_spend(
@@ -1293,6 +1372,8 @@ async def _execute_and_review(
     coder: Coder,
     reviewer: Reviewer,
     config: SentinelConfig,
+    *,
+    cycle_id: str = "",
 ) -> tuple[str, str | None, str, str]:
     """Execute one work item in its own worktree, review it, verify
     against project checks, and ship a PR if both gates pass.
@@ -1485,6 +1566,45 @@ async def _execute_and_review(
 
     if review.verdict == "approved":
         return "approved", verification.overall, ship_status, pr_url
+
+    # Non-approved verdict — memorialize it so the next cycle's planner
+    # doesn't regenerate the same item. See
+    # `sentinel.integrations.rejections` for the 30-day TTL behavior
+    # and escape hatch. Suppressed on infrastructure failures (the
+    # verdict isn't a verdict on the code, it's "reviewer crashed")
+    # because persisting those would cost us a real item forever.
+    if not getattr(review, "infrastructure_failure", False):
+        verdict_token = (
+            "changes_requested"
+            if review.verdict == "changes-requested"
+            else "rejected"
+        )
+        try:
+            from sentinel.integrations.rejections import record_rejection
+            record_rejection(
+                project,
+                cycle_id=cycle_id,
+                work_item={
+                    "title": action.get("title", work_item.title),
+                    "lens": action.get("lens", ""),
+                    "why": action.get("why", ""),
+                    "impact": action.get("impact", ""),
+                    "files": action.get("files", []),
+                },
+                review_verdict=verdict_token,
+                reviewer_reason=review.summary or (
+                    "; ".join(review.blocking_issues[:3])
+                    if review.blocking_issues else ""
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 — never block on memory
+            # Loud but nonblocking; the reviewer verdict already
+            # stands, and the rejection log is a best-effort guard.
+            console.print(
+                f"  [yellow]Could not record rejection for "
+                f"planner memory: {exc}[/yellow]"
+            )
+
     if review.verdict == "changes-requested":
         return "changes", verification.overall, ship_status, pr_url
     return "rejected", verification.overall, ship_status, pr_url
@@ -1498,6 +1618,7 @@ async def _run_loop(
     every: str,
     *,
     cortex_journal: bool | None = None,
+    coder_timeout: int | None = None,
 ) -> None:
     """Run cycles continuously until stopped."""
     import asyncio
@@ -1539,6 +1660,7 @@ async def _run_loop(
                 dry_run=dry_run,
                 auto=True,  # loop mode bypasses confirmation
                 cortex_journal=cortex_journal,
+                coder_timeout=coder_timeout,
             )
 
             # Session bounds check
