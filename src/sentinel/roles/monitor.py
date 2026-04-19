@@ -629,10 +629,7 @@ def _filter_file_tree_by_scope(file_tree: str, scope: list[str]) -> str:
         cleaned = path_str.removeprefix("./")
         if not cleaned:
             return False
-        for glob in scope:
-            if fnmatch.fnmatchcase(cleaned, glob):
-                return True
-        return False
+        return any(fnmatch.fnmatchcase(cleaned, glob) for glob in scope)
 
     kept = [line for line in file_tree.splitlines() if _matches_any(line.strip())]
     return "\n".join(kept)

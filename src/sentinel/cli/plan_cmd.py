@@ -329,15 +329,182 @@ def _slug(title: str) -> str:
     return s[:40]
 
 
+# Tunable threshold for the near-duplicate guard. Computed as Jaccard
+# similarity over keyword sets drawn from each proposal's title +
+# rationale. Picked empirically: 0.6 catches the autumn-mail "three
+# flavors of gws CLI wrapper" cluster (Finding F4) while sparing
+# genuinely distinct proposals (e.g., "gws wrapper" vs "MLX inference"
+# share at most 0.1 — well under the threshold). Tunable by editing
+# the constant; not a config knob until we have a second project's
+# data point arguing for a different default.
+_PROPOSAL_DEDUP_THRESHOLD = 0.6
+
+# A small, language-agnostic set of high-frequency tokens that add
+# noise rather than signal to the similarity score. Kept tiny on
+# purpose — a heavy stopword list would be tuned to English prose,
+# but proposal titles are usually short technical phrases.
+_PROPOSAL_DEDUP_STOPWORDS = frozenset({
+    "the", "a", "an", "of", "for", "in", "with", "to", "and", "or",
+    "is", "be", "as", "by", "on", "at", "from", "into", "via",
+    "this", "that", "these", "those", "it", "its",
+})
+
+
+def _proposal_keyword_set(text: str) -> frozenset[str]:
+    """Tokenize ``text`` into a comparable bag-of-words set.
+
+    Lowercases, splits on non-alphanumerics, drops short tokens
+    (length < 3 — too noisy for similarity) and stopwords. Returns a
+    frozenset so callers can compute Jaccard cheaply via set algebra.
+
+    Used by the planner pre-flight dedupe (Finding F4): proposals
+    whose ``title + why`` token set overlaps strongly with an existing
+    proposal are skipped before write to prevent the autumn-mail
+    "three flavors of gws CLI wrapper" accumulation pattern.
+    """
+    import re
+    tokens = re.findall(r"[a-z0-9]+", text.lower())
+    return frozenset(
+        t for t in tokens
+        if len(t) >= 3 and t not in _PROPOSAL_DEDUP_STOPWORDS
+    )
+
+
+def _jaccard_similarity(a: frozenset[str], b: frozenset[str]) -> float:
+    """Standard Jaccard: |intersection| / |union|.
+
+    Returns 0.0 when both sets are empty rather than raising — an
+    empty proposal vs. an empty proposal isn't a "duplicate" worth
+    skipping, it's a different bug (planner emitted no rationale).
+    """
+    if not a and not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def _load_all_proposals(project_path: Path) -> list[dict]:
+    """Load every proposal under .sentinel/proposals/, regardless of Status.
+
+    The dedupe pre-flight needs *all* prior proposals to compare
+    against, not just approved ones. Pending proposals are the most
+    important class to dedupe against — they're the ones the planner
+    keeps regenerating in slightly different shapes.
+
+    Returns a list of dicts with at least ``title`` and ``why`` (used
+    for similarity); other fields included opportunistically. Failures
+    on individual files are logged and skipped — one malformed
+    proposal must not silently disable the whole guard.
+    """
+    import logging
+    import re
+
+    proposals_dir = project_path / ".sentinel" / "proposals"
+    if not proposals_dir.exists():
+        return []
+
+    log = logging.getLogger(__name__)
+    items: list[dict] = []
+    for path in sorted(proposals_dir.glob("*.md")):
+        try:
+            content = path.read_text()
+        except OSError as exc:
+            log.warning("Skipping proposal %s during dedupe load: %s", path, exc)
+            continue
+        title_match = re.search(r"^# Proposal:\s*(.+)$", content, re.MULTILINE)
+        why_match = re.search(
+            r"## Why\s*\n\s*\n(.+?)(?=\n##|\Z)", content, re.DOTALL,
+        )
+        items.append({
+            "title": title_match.group(1).strip() if title_match else path.stem,
+            "why": why_match.group(1).strip() if why_match else "",
+            "path": str(path),
+        })
+    return items
+
+
+def _filter_near_duplicate_proposals(
+    new_actions: list[dict],
+    existing_proposals: list[dict],
+    *,
+    threshold: float = _PROPOSAL_DEDUP_THRESHOLD,
+) -> tuple[list[dict], list[tuple[dict, dict, float]]]:
+    """Drop new_actions whose title+rationale resembles an existing proposal.
+
+    Returns ``(kept, skipped)`` where ``skipped`` is a list of
+    ``(new_action, matching_existing, similarity)`` tuples — handed
+    back so the caller can log per-skip rationale rather than the
+    helper printing directly.
+
+    Picks the *single best* existing match per new action (highest
+    similarity) so the skip log names a concrete prior proposal.
+    """
+    if not existing_proposals:
+        return list(new_actions), []
+
+    existing_token_sets = [
+        (item, _proposal_keyword_set(
+            f"{item.get('title', '')} {item.get('why', '')}",
+        ))
+        for item in existing_proposals
+    ]
+
+    kept: list[dict] = []
+    skipped: list[tuple[dict, dict, float]] = []
+    for action in new_actions:
+        action_tokens = _proposal_keyword_set(
+            f"{action.get('title', '')} {action.get('why', '')}",
+        )
+        # Empty token bags can't be meaningfully compared — let them
+        # through and surface the lack of rationale separately.
+        if not action_tokens:
+            kept.append(action)
+            continue
+
+        best: tuple[dict, float] | None = None
+        for existing_item, existing_tokens in existing_token_sets:
+            sim = _jaccard_similarity(action_tokens, existing_tokens)
+            if best is None or sim > best[1]:
+                best = (existing_item, sim)
+
+        if best is not None and best[1] > threshold:
+            skipped.append((action, best[0], best[1]))
+        else:
+            kept.append(action)
+    return kept, skipped
+
+
 def _write_proposals(
     project_path: Path, actions: list[dict], scan_file: Path,
 ) -> list[Path]:
     """Write expansion items as individual proposals awaiting user approval."""
+    import logging
+    log = logging.getLogger(__name__)
+
     proposals_dir = project_path / ".sentinel" / "proposals"
     proposals_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y-%m-%d")
 
     expansions = [a for a in actions if a.get("kind") == "expand"]
+
+    # Pre-flight semantic dedupe — Finding F4 from autumn-mail dogfood
+    # cycle 4. Before, the planner accumulated ~3 flavors of "gws CLI
+    # wrapper for Gmail" because rejection memory only catches exact
+    # title matches. Now: skip new proposals whose title+rationale
+    # token set overlaps an existing proposal (any status) above the
+    # tuned threshold.
+    existing = _load_all_proposals(project_path)
+    expansions, dedup_skipped = _filter_near_duplicate_proposals(
+        expansions, existing,
+    )
+    for new_action, match, sim in dedup_skipped:
+        log.debug(
+            "Skipping near-duplicate proposal: %s (similar to %s, "
+            "similarity=%.2f)",
+            new_action.get("title", "(untitled)"),
+            match.get("title", "(untitled)"),
+            sim,
+        )
+
     written = []
 
     for action in expansions:
