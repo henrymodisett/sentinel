@@ -12,6 +12,8 @@ Produces: file changes + a commit on a feature branch.
 from __future__ import annotations
 
 import datetime as _dt
+import re
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -19,10 +21,17 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from sentinel.config.schema import CoderConfig
     from sentinel.providers.interface import ChatResponse
     from sentinel.providers.router import Router
     from sentinel.roles.planner import WorkItem
     from sentinel.roles.reviewer import ReviewResult
+
+
+# Cap on captured output per `<cli> --help` invocation. Some tools dump
+# hundreds of lines (e.g. `git --help`); 200 is enough to learn the arg
+# shape without ballooning the coder's prompt by tens of KB per probe.
+CLI_HELP_MAX_LINES = 200
 
 
 @dataclass
@@ -502,6 +511,264 @@ def _write_execution_transcript(
         return None
 
 
+# ---------------------------------------------------------------------------
+# CLI surface awareness (Finding F7)
+# ---------------------------------------------------------------------------
+#
+# Cycle 5 of the autumn-mail dogfood surfaced a coder that emitted
+# `gws gmail +read <id>` and `gws gmail +reply <id>` — the installed
+# gws 0.22.5 actually wants `--id <ID>`, `--message-id <ID>`, etc.
+# Codex (the reviewer) caught it by *running* `gws gmail +read --dry-run`
+# and observing the argument-validation error. The coder shouldn't need
+# the reviewer to dry-run binaries to find arg shape — pre-loading the
+# tool's `--help` output into the prompt eliminates a whole class of
+# guess-the-flag-shape errors.
+#
+# Constraint: the allowlist is conservative. Work-item text is LLM
+# output — we never `subprocess.run` a token from it without filtering
+# through the configured allowlist. The schema validator (see
+# CoderConfig._validate_allowlist) further restricts entries to
+# `[A-Za-z0-9._+-]+`.
+
+
+# Token shape we accept as a CLI name or subcommand. Mirrors the schema
+# validator's restriction (`[A-Za-z0-9._+-]+`) plus the `+` prefix that
+# tools like gws use for action verbs (`gws gmail +read`).
+_CLI_TOKEN = r"[A-Za-z+][A-Za-z0-9._+-]*"
+
+
+def _detect_cli_invocations(
+    text: str,
+    allowlist: set[str],
+    *,
+    max_subcommands: int,
+) -> list[tuple[str, ...]]:
+    """Find probe targets in `text`, restricted by `allowlist`.
+
+    Returns a list of tuples — `(cli,)` for top-level probes and
+    `(cli, sub1)` or `(cli, sub1, sub2)` for subcommand probes. Order
+    is stable: top-level CLIs first (deduped, in first-seen order), then
+    subcommand probes in first-seen order capped at `max_subcommands`.
+
+    The coder needs the top-level help even when only a subcommand was
+    referenced — `<cli> --help` shows the global flag set (-V, --json,
+    etc.) that subcommand help often elides.
+
+    Implementation: build a single pattern that anchors on the
+    allowlist tokens (so non-allowlisted nouns like "Use" or "shell"
+    don't consume the match window). `re.escape` each entry so a
+    config-supplied tool name with a literal `.` or `+` is treated
+    literally, not as a regex meta.
+    """
+    if not allowlist or not text:
+        return []
+
+    # Escape allowlist entries to keep regex-meta chars literal, sort by
+    # length descending so a longer prefix wins over a shorter one
+    # (`pnpm` should win over a hypothetical `pn`).
+    escaped = sorted((re.escape(a) for a in allowlist), key=len, reverse=True)
+    cli_alternation = "|".join(escaped)
+    pattern = re.compile(
+        rf"\b(?P<cli>{cli_alternation})\b"
+        rf"(?:[ \t]+(?P<sub1>{_CLI_TOKEN}))?"
+        rf"(?:[ \t]+(?P<sub2>{_CLI_TOKEN}))?",
+    )
+
+    # English fillers we routinely see between a CLI mention and the
+    # next noun in prose ("use gws to fetch …", "run swift and tests").
+    # Without this, "gws to fetch" silently turns into a probe for
+    # `gws to fetch --help`. Worse than an empty probe — it misleads
+    # the coder about what the tool actually accepts.
+    prose_fillers = frozenset({
+        "to", "the", "a", "an", "and", "or", "but", "with", "from",
+        "into", "onto", "for", "of", "in", "on", "at", "by", "is",
+        "are", "be", "as", "via", "then", "when", "if", "so",
+    })
+
+    seen_cli: list[str] = []
+    seen_cli_set: set[str] = set()
+    sub_probes: list[tuple[str, ...]] = []
+    sub_probes_seen: set[tuple[str, ...]] = set()
+
+    for match in pattern.finditer(text):
+        cli = match.group("cli")
+        if cli not in seen_cli_set:
+            seen_cli.append(cli)
+            seen_cli_set.add(cli)
+
+        sub1 = match.group("sub1")
+        sub2 = match.group("sub2")
+
+        # Only record a subcommand probe when sub1 is a plausible
+        # subcommand token, NOT English filler. The prose-filler check
+        # handles the dominant false-positive ("use gws to fetch …" →
+        # `to` is filler → only top-level probe). Subcommand probes are
+        # also bounded by `max_subcommands`, so even if a few extra
+        # slip through we won't explode into dozens of subprocess calls.
+        if (
+            sub1
+            and not sub1.startswith("-")
+            and sub1 not in prose_fillers
+            and len(sub_probes) < max_subcommands
+        ):
+            probe: tuple[str, ...]
+            if (
+                sub2
+                and not sub2.startswith("-")
+                and sub2 not in prose_fillers
+            ):
+                probe = (cli, sub1, sub2)
+            else:
+                probe = (cli, sub1)
+            if probe not in sub_probes_seen:
+                sub_probes.append(probe)
+                sub_probes_seen.add(probe)
+
+    probes: list[tuple[str, ...]] = [(c,) for c in seen_cli]
+    probes.extend(sub_probes)
+    return probes
+
+
+def _capture_cli_help(
+    probe: tuple[str, ...], *, timeout_sec: int,
+) -> str | None:
+    """Run `<probe...> --help` and return up to CLI_HELP_MAX_LINES lines.
+
+    Fail-soft: any subprocess failure (timeout, non-zero exit, missing
+    binary, OS error) is logged at DEBUG and returns None so the caller
+    can simply omit the section. Never raises — a help-fetch failure
+    must not abort the coder cycle.
+
+    The `shutil.which(cli)` check is the caller's responsibility — by
+    the time we reach here, the tool is known installed and on the
+    allowlist. We still pass the binary by full PATH-resolved name
+    (subprocess.run does that automatically with list-form args).
+    """
+    import logging
+    cmd = [*probe, "--help"]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True, text=True, timeout=timeout_sec,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError, ValueError) as exc:
+        logging.getLogger(__name__).debug(
+            "CLI help probe %s failed: %s", " ".join(cmd), exc,
+        )
+        return None
+    # Some tools (e.g. `pytest --help`) write to stdout; others (busybox
+    # variants, some Go tools) write `--help` to stderr. Prefer stdout
+    # but fall back to stderr so we don't return a useless empty section
+    # when the tool just chose stderr.
+    output = result.stdout or result.stderr or ""
+    if not output.strip():
+        return None
+    lines = output.splitlines()
+    if len(lines) > CLI_HELP_MAX_LINES:
+        lines = lines[:CLI_HELP_MAX_LINES]
+        lines.append(
+            f"... [truncated at {CLI_HELP_MAX_LINES} lines — "
+            f"run `{' '.join(cmd)}` for the full output]",
+        )
+    return "\n".join(lines)
+
+
+def _build_cli_help_section(
+    work_item: WorkItem,
+    *,
+    coder_config: CoderConfig | None,
+) -> str:
+    """Return a Markdown block of `--help` outputs for the coder prompt.
+
+    Empty string when:
+      - coder_config is None (legacy callers, e.g. tests with no config);
+      - the allowlist is empty (feature disabled per-project);
+      - no detected CLI from the work item is both allowlisted and
+        installed;
+      - every probed `--help` invocation failed (fail-soft).
+
+    The block is meant to be prepended to the prompt, before the work-
+    item details, so the coder sees the surface up-front rather than
+    after deciding what to write.
+    """
+    if coder_config is None:
+        return ""
+    allowlist = set(coder_config.cli_help_allowlist)
+    if not allowlist:
+        return ""
+
+    # Build the probe corpus from work-item fields the coder will read
+    # anyway. WorkItem doesn't have a `verification` attribute today —
+    # the planner emits it as `acceptance_criteria` text. Tests cited
+    # both for completeness, so we accept either.
+    parts: list[str] = []
+    parts.append(work_item.title or "")
+    parts.append(work_item.description or "")
+    if work_item.acceptance_criteria:
+        parts.extend(str(c) for c in work_item.acceptance_criteria)
+    if work_item.files:
+        for entry in work_item.files:
+            label = _file_label(entry)
+            if label:
+                parts.append(label)
+    # Defensive `getattr`: if a future planner adds a `verification`
+    # field (tests reference one in the spec), pick it up automatically
+    # instead of needing a second code change here.
+    extra = getattr(work_item, "verification", None)
+    if extra:
+        parts.append(str(extra))
+    text = "\n".join(parts)
+
+    probes = _detect_cli_invocations(
+        text, allowlist,
+        max_subcommands=coder_config.cli_help_max_subcommands,
+    )
+    if not probes:
+        return ""
+
+    # Drop probes whose root CLI isn't installed in this environment.
+    # `shutil.which` is the simplest "is this on PATH and executable"
+    # check — same primitive sentinel uses for provider detection.
+    installed_probes: list[tuple[str, ...]] = []
+    seen_missing: set[str] = set()
+    import logging
+    log = logging.getLogger(__name__)
+    for probe in probes:
+        cli = probe[0]
+        if shutil.which(cli) is None:
+            if cli not in seen_missing:
+                log.debug("CLI %r not installed; skipping help probe", cli)
+                seen_missing.add(cli)
+            continue
+        installed_probes.append(probe)
+
+    if not installed_probes:
+        return ""
+
+    sections: list[str] = []
+    for probe in installed_probes:
+        captured = _capture_cli_help(
+            probe, timeout_sec=coder_config.cli_help_timeout_sec,
+        )
+        if captured is None:
+            continue
+        header = " ".join(probe) + " --help"
+        sections.append(f"### {header}\n\n```\n{captured}\n```")
+
+    if not sections:
+        return ""
+
+    body = "\n\n".join(sections)
+    return (
+        "## Installed CLI surfaces\n\n"
+        "The following CLI tools are installed in this environment. "
+        "Use the documented argument shapes from `--help` output rather "
+        "than guessing flag names or positional shapes:\n\n"
+        f"{body}\n\n---\n\n"
+    )
+
+
 BUILD_PROMPT = """\
 You are executing this work item for the {project_name} project.
 
@@ -604,6 +871,7 @@ class Coder:
         artifacts_directory: str,
         branch: str,
         review_feedback: ReviewResult | None = None,
+        coder_config: CoderConfig | None = None,
     ) -> ExecutionResult:
         """Execute a work item via the coder provider's agentic mode.
 
@@ -719,6 +987,29 @@ class Coder:
                 blocking_issues=blocking,
                 non_blocking=non_blocking_section,
             )
+
+        # CLI surface awareness (Finding F7): prepend `--help` text for
+        # installed tools the work item references. Fail-soft — any
+        # subprocess error (timeout, missing tool, OS error) just omits
+        # the section, never aborts the cycle. Disabled when the
+        # allowlist is empty (configurable per-project) or no caller
+        # threaded `coder_config` (legacy callers).
+        try:
+            help_section = _build_cli_help_section(
+                work_item, coder_config=coder_config,
+            )
+        except Exception as exc:  # noqa: BLE001 — defense in depth
+            # The helper already swallows per-probe errors; a top-level
+            # exception means a programming bug in the helper itself.
+            # Log loudly but don't block the work — the coder can still
+            # do its job without the help section.
+            import logging
+            logging.getLogger(__name__).warning(
+                "CLI help pre-load failed (continuing without): %s", exc,
+            )
+            help_section = ""
+        if help_section:
+            prompt = help_section + prompt
 
         # Execute via provider's agentic code mode — runs in `wd`,
         # which is the worktree path in worktree-managed mode and

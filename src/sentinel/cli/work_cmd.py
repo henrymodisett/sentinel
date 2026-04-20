@@ -1495,6 +1495,7 @@ async def _execute_and_review(
             working_directory=str(ctx.path),
             artifacts_directory=str(project),
             branch=ctx.branch,
+            coder_config=config.coder,
         )
 
         if exec_result.cost_usd > 0:
