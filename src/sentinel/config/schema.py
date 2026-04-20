@@ -100,6 +100,12 @@ class ScanConfig(BaseModel):
     provider_timeout_sec: int = 600
 
 
+DEFAULT_CLI_HELP_ALLOWLIST: list[str] = [
+    "gws", "swift", "swiftc", "xcrun", "go", "cargo", "rustc",
+    "node", "npm", "pnpm", "uv", "pip", "pytest", "ruff", "mypy",
+]
+
+
 class CoderConfig(BaseModel):
     """Configuration for the Coder role's agentic execution."""
     # Max tool-use turns Claude Code / Codex can take per work item.
@@ -126,6 +132,47 @@ class CoderConfig(BaseModel):
         ),
     )
 
+    # Max coder↔reviewer iterations per work item before sentinel bails
+    # with a post-mortem (F8). Default 3 preserves the historical
+    # hardcoded value. Cap at 10 — past that, runaway-cost risk
+    # outweighs any plausible "the coder will get there eventually"
+    # signal. Floor at 1 = no revision (initial pass only).
+    max_iterations: int = Field(
+        default=3, ge=1, le=10,
+        description="Max coder iterations per work item (1-10).",
+    )
+
+    # CLI surface awareness (F7): allowlist of CLI tools whose `--help`
+    # output should be pre-loaded into the coder's prompt when the work
+    # item references them. Allowlist (not freeform) prevents work-item
+    # text from injecting `rm -rf` style "tools" into a shell-out.
+    # Empty list disables the feature entirely.
+    cli_help_allowlist: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_CLI_HELP_ALLOWLIST),
+        description=(
+            "CLI tool names whose --help text is pre-loaded into the "
+            "coder's prompt when the work item references them. Empty "
+            "list disables the pre-load entirely."
+        ),
+    )
+    # Cap on detected `<cli> <subcommand> --help` calls per work item.
+    # We always probe `<cli> --help` (cheap, single call); subcommand
+    # probes are bounded so a long acceptance-criteria block can't
+    # explode into dozens of subprocess invocations.
+    cli_help_max_subcommands: int = Field(
+        default=3, ge=0, le=20,
+        description=(
+            "Max `<cli> <subcommand> --help` probes per work item, "
+            "in addition to the top-level `<cli> --help`."
+        ),
+    )
+    # Per-help-call subprocess timeout. Fail-soft: a slow tool just
+    # gets dropped from the prompt — never blocks the cycle.
+    cli_help_timeout_sec: int = Field(
+        default=5, ge=1, le=60,
+        description="Timeout for each `<cli> --help` subprocess call.",
+    )
+
     @field_validator("timeout_seconds")
     @classmethod
     def _validate_timeout(cls, v: int) -> int:
@@ -140,6 +187,36 @@ class CoderConfig(BaseModel):
                 f"[{CODER_TIMEOUT_MIN_SEC}, {CODER_TIMEOUT_MAX_SEC}]",
             )
         return v
+
+    @field_validator("cli_help_allowlist")
+    @classmethod
+    def _validate_allowlist(cls, v: list[str]) -> list[str]:
+        # Conservative shape: each entry must be a non-empty string of
+        # `[A-Za-z0-9._-]+` (no spaces, slashes, shell metas). The
+        # allowlist is ultimately spliced into `subprocess.run([cli, ...])`
+        # — list-form `subprocess` is already shell-meta-safe, but a
+        # malformed entry like "rm -rf /" would still try to invoke a
+        # binary literally named "rm -rf /", failing noisily later. Reject
+        # at config load time so the failure is in the right place.
+        import re
+        pattern = re.compile(r"^[A-Za-z0-9._+-]+$")
+        cleaned: list[str] = []
+        for entry in v:
+            if not isinstance(entry, str):
+                raise ValueError(
+                    f"cli_help_allowlist entries must be strings; got "
+                    f"{type(entry).__name__}: {entry!r}",
+                )
+            stripped = entry.strip()
+            if not stripped:
+                continue  # silently drop blanks — common toml authoring slip
+            if not pattern.match(stripped):
+                raise ValueError(
+                    f"cli_help_allowlist entry {stripped!r} contains "
+                    f"disallowed characters; only [A-Za-z0-9._+-] permitted.",
+                )
+            cleaned.append(stripped)
+        return cleaned
 
 
 class RetentionConfig(BaseModel):
