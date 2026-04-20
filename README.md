@@ -131,9 +131,33 @@ daily_limit_usd = 15.00
 Optional sections — see `src/sentinel/config/schema.py` for the full list:
 
 - `[scan]` — `max_lenses`, `evaluate_per_lens`, `provider_timeout_sec`
-- `[coder]` — `max_turns`, `timeout_seconds` (Coder Claude CLI timeout, 60-7200, default 600; override with `--coder-timeout` or `SENTINEL_CODER_TIMEOUT`)
+- `[coder]` — `max_turns`, `timeout_seconds` (Coder Claude CLI timeout, 60-7200, default 600; override with `--coder-timeout` or `SENTINEL_CODER_TIMEOUT`), `max_iterations` (coder↔reviewer cap per work item, 1-10, default 3), `cli_help_allowlist` / `cli_help_max_subcommands` / `cli_help_timeout_sec` (pre-load `<tool> --help` text into the coder's prompt when the work item references an allowlisted CLI — defaults cover `gws`, `swift`, `go`, `cargo`, `pytest`, etc.; empty list disables the feature for that project)
 - `[local]` — `ollama_endpoint` for non-default Ollama hosts
 - `[retention]` — `runs_days` for how long cycle logs stick around
+
+When the coder↔reviewer loop hits `max_iterations` without an approved verdict (or when two rounds produce identical findings), sentinel prints a post-mortem and writes a Markdown copy to `.sentinel/exhaustions/<timestamp>-<slug>.md` so you don't have to dig through reviewer transcripts. The block names the branch, the last verdict, the unaddressed findings, and concrete next steps:
+
+```
+### Coder iterations exhausted
+
+  Work item: harden Gmail client retries
+  Branch: sentinel/wi-42-harden-gmail-client-retries
+  Iterations: 3/3
+  Last reviewer verdict: changes-requested
+
+  Last reviewer findings:
+    - retry policy still misses 429 responses
+    - test_retries.py asserts on stale fixture
+
+Suggested next step:
+  1. Inspect the branch: git checkout sentinel/wi-42-...
+  2. Apply the findings manually
+  3. Push as a regular PR via scripts/open-pr.sh
+Or:
+  1. Reduce work item scope (split into smaller items)
+  2. Reject this proposal: edit
+     `.sentinel/proposals/<file>` → Status: rejected
+```
 
 Project context — what it is, current stage, what matters most right now — lives in your existing `README.md`, `CLAUDE.md`, `AGENTS.md`, and any strategic docs (architecture, vision, principles). Sentinel reads them every scan.
 
