@@ -28,6 +28,7 @@ import pytest
 
 from sentinel.config.schema import DEFAULT_CLI_HELP_ALLOWLIST, CoderConfig
 from sentinel.roles.coder import (
+    CLI_SAFE_SUBCOMMANDS,
     _build_cli_help_section,
     _capture_cli_help,
     _detect_cli_invocations,
@@ -121,6 +122,150 @@ class TestDetectCliInvocations:
             "use gws and swift", allowlist=set(), max_subcommands=3,
         )
         assert probes == []
+
+
+class TestSubcommandSafetyGate:
+    """Codex review (PR #82) flagged that generic `<cli> <token> --help`
+    probes can EXECUTE user code for tools whose first positional arg
+    is a script or file (`node server.js --help` runs server.js;
+    `go run main.go --help` compiles + runs main.go; etc.).
+
+    These tests encode the gate: subcommand probes are gated by a
+    per-tool known-safe-verb whitelist (`CLI_SAFE_SUBCOMMANDS`).
+    """
+
+    def test_node_script_path_does_not_become_a_probe(self) -> None:
+        """Critical regression test: `node server.js` must NOT produce
+        `(node, server.js, --help)` — that would execute server.js."""
+        probes = _detect_cli_invocations(
+            "shell out via node server.js after build",
+            allowlist={"node"}, max_subcommands=3,
+        )
+        # Only the top-level node probe; nothing that would execute
+        # server.js.
+        assert probes == [("node",)]
+        for probe in probes:
+            assert "server.js" not in probe
+
+    def test_go_run_main_go_does_not_become_a_probe(self) -> None:
+        """`go run main.go` would compile + execute main.go. The safe
+        whitelist for `go` includes `build/fmt/vet/version/...` but
+        NOT `run` — so `go run main.go` only produces `(go,)`."""
+        probes = _detect_cli_invocations(
+            "go run main.go to start the server",
+            allowlist={"go"}, max_subcommands=3,
+        )
+        assert probes == [("go",)]
+
+    def test_cargo_run_app_does_not_become_a_probe(self) -> None:
+        """Same hazard for cargo: `cargo run app` would execute the
+        compiled binary. `run` is not in the safe set."""
+        probes = _detect_cli_invocations(
+            "cargo run app and observe behavior",
+            allowlist={"cargo"}, max_subcommands=3,
+        )
+        # `cargo` top-level, no `cargo run app`.
+        assert probes == [("cargo",)]
+
+    def test_npm_run_lint_does_not_become_a_probe(self) -> None:
+        """`npm run lint` would execute the lint script defined in
+        package.json. `npm install`/`list`/`view` are safe; `run` is
+        deliberately omitted."""
+        probes = _detect_cli_invocations(
+            "npm run lint to check formatting",
+            allowlist={"npm"}, max_subcommands=3,
+        )
+        assert probes == [("npm",)]
+
+    def test_pytest_test_path_does_not_become_a_probe(self) -> None:
+        """`pytest tests/foo.py --help` would execute the test
+        collection on tests/foo.py before printing help. pytest is in
+        the no-subcommand-probes set."""
+        probes = _detect_cli_invocations(
+            "pytest tests/foo.py to run",
+            allowlist={"pytest"}, max_subcommands=3,
+        )
+        assert probes == [("pytest",)]
+
+    def test_safe_verb_for_cargo_does_become_a_probe(self) -> None:
+        """Counterpoint: `cargo build` IS a safe verb (no execution),
+        so it SHOULD produce a subcommand probe. Without this, the
+        feature would over-conservatively skip useful probes."""
+        probes = _detect_cli_invocations(
+            "cargo build the workspace",
+            allowlist={"cargo"}, max_subcommands=3,
+        )
+        assert ("cargo",) in probes
+        assert ("cargo", "build") in probes
+
+    def test_safe_verb_for_go_does_become_a_probe(self) -> None:
+        probes = _detect_cli_invocations(
+            "use go fmt before committing",
+            allowlist={"go"}, max_subcommands=3,
+        )
+        assert ("go", "fmt") in probes
+
+    def test_unknown_tool_in_allowlist_top_level_only(self) -> None:
+        """A user adds `custom-tool` to their allowlist — we don't know
+        its subcommand shape. Default to top-level probe only."""
+        probes = _detect_cli_invocations(
+            "use custom-tool deploy production",
+            allowlist={"custom-tool"}, max_subcommands=3,
+        )
+        # No subcommand probe because `custom-tool` isn't in the
+        # safe-subcommands map.
+        assert probes == [("custom-tool",)]
+
+    def test_gws_action_verb_still_works(self) -> None:
+        """Sanity: the original F7 case (`gws gmail +list`) must still
+        produce both probes after the safety gate."""
+        probes = _detect_cli_invocations(
+            "shell out to gws gmail +list",
+            allowlist={"gws"}, max_subcommands=3,
+        )
+        assert ("gws",) in probes
+        assert ("gws", "gmail", "+list") in probes
+
+    def test_safe_verb_drops_unsafe_second_positional(self) -> None:
+        """`swift build MyTarget` — `build` is safe, but `MyTarget`
+        looks like an arbitrary target name. Probe `(swift, build)` —
+        not `(swift, build, MyTarget)`. Ensures we don't accidentally
+        execute `swift build MyTarget --help` which could run the
+        build step before printing help."""
+        probes = _detect_cli_invocations(
+            "swift build MyTarget",
+            allowlist={"swift"}, max_subcommands=3,
+        )
+        # Top-level + safe-verb probe; no third token.
+        assert ("swift", "build") in probes
+        assert ("swift", "build", "MyTarget") not in probes
+
+    def test_safe_subcommands_table_has_dangerous_tools_marked(self) -> None:
+        """Locks the security-critical tool list against silent
+        regressions — these MUST stay either absent or empty in the
+        safe-subcommands table."""
+        # Tools that take a script/file as first positional must not
+        # have safe-verb subcommand probes enabled.
+        for tool in ("node", "swiftc", "rustc", "pytest", "mypy", "xcrun"):
+            assert CLI_SAFE_SUBCOMMANDS.get(tool, frozenset()) == frozenset(), (
+                f"{tool!r} has safe-verb subcommand probes enabled; this "
+                f"would let `{tool} <script> --help` execute the script."
+            )
+
+        # Tools where dangerous verbs MUST be excluded from the safe
+        # set (the tool is in the table but `run` etc. are absent).
+        for tool, banned in (
+            ("go", "run"),
+            ("cargo", "run"),
+            ("npm", "run"),
+            ("pnpm", "run"),
+            ("uv", "run"),
+            ("swift", "run"),
+        ):
+            assert banned not in CLI_SAFE_SUBCOMMANDS.get(tool, frozenset()), (
+                f"{tool!r} safe-verb set must not contain {banned!r} — "
+                f"`{tool} {banned} <thing>` executes user code."
+            )
 
 
 # ---------------------------------------------------------------------------

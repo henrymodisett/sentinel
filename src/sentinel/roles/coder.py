@@ -537,31 +537,101 @@ def _write_execution_transcript(
 _CLI_TOKEN = r"[A-Za-z+][A-Za-z0-9._+-]*"
 
 
+# Per-tool whitelist of subcommand tokens we consider safe to probe.
+#
+# SECURITY: Codex review (PR #82, 2026-04-19) flagged that a generic
+# `<cli> <token> --help` probe can EXECUTE user code for tools whose
+# first positional arg is a script or file:
+#   - `node server.js --help`  → runs server.js (Node ignores trailing --help)
+#   - `go run main.go --help`  → compiles + runs main.go
+#   - `cargo run app --help`   → executes the `app` binary
+#   - `python script.py --help`→ runs script.py
+# The fix is to be EXPLICIT about which subcommand verbs we know respond
+# safely to `--help`. Tools whose entire CLI shape is "verb + flags"
+# (like `gws`, `swift`, `cargo`) get an explicit allowlist of known-safe
+# verbs. Tools whose first positional is a script (`node`, `pytest`)
+# get the `_NO_SUBCOMMAND_PROBES` sentinel — top-level `--help` only.
+#
+# Conservative defaults: when in doubt, omit. A missing entry costs us
+# at worst one extra line in the prompt; including a wrong entry could
+# execute arbitrary user code.
+_NO_SUBCOMMAND_PROBES: frozenset[str] = frozenset()
+
+CLI_SAFE_SUBCOMMANDS: dict[str, frozenset[str]] = {
+    # gws — Henry's gmail/calendar/drive wrapper. Action verbs are
+    # prefixed with `+` (like `+list`, `+read`); the leading verb is a
+    # plain noun (`gmail`, `calendar`, `drive`, `auth`). All `gws`
+    # operations are pure command verbs, no script execution path.
+    "gws": frozenset({
+        "gmail", "calendar", "drive", "auth", "config", "version",
+        "help", "tasks", "people", "docs", "sheets", "slides", "forms",
+    }),
+    # swift — `swift build/test/run/package` are all safe; we omit
+    # `swift run` because the second positional is the executable
+    # name, and `swift run myapp --help` runs `myapp` with `--help`.
+    "swift": frozenset({"build", "test", "package", "version"}),
+    "swiftc": _NO_SUBCOMMAND_PROBES,  # compiler — first arg is .swift file
+    "xcrun": _NO_SUBCOMMAND_PROBES,   # toolchain dispatcher; runs binaries
+    # go — same caveat as swift: `go run` and `go test ./pkg/...` would
+    # potentially execute. Stick to read-only build/dependency verbs.
+    "go": frozenset({
+        "build", "fmt", "vet", "version", "env", "mod", "tool",
+        "doc", "list", "help",
+    }),
+    # cargo — Rust's package manager. Same hazard as go: `cargo run`
+    # builds AND executes. Stick to inspection/build verbs.
+    "cargo": frozenset({
+        "build", "check", "test", "fmt", "version", "metadata",
+        "tree", "search", "help",
+    }),
+    "rustc": _NO_SUBCOMMAND_PROBES,  # compiler — first arg is source file
+    # node — first arg is ALWAYS a script path. Top-level only.
+    "node": _NO_SUBCOMMAND_PROBES,
+    # npm — `npm install foo` is safe (no execution), `npm run script`
+    # is NOT (executes the script). Limit to inspection verbs.
+    "npm": frozenset({"install", "list", "view", "version", "help"}),
+    "pnpm": frozenset({"install", "list", "view", "version", "help"}),
+    # uv — astral's Python toolchain. `uv run` executes; `uv pip` and
+    # `uv venv` are pure commands.
+    "uv": frozenset({"pip", "venv", "version", "help", "lock", "sync"}),
+    "pip": frozenset({"install", "list", "show", "freeze", "help"}),
+    "pytest": _NO_SUBCOMMAND_PROBES,  # first arg is a test path → executes
+    "ruff": frozenset({"check", "format", "version", "help", "rule"}),
+    "mypy": _NO_SUBCOMMAND_PROBES,  # first arg is a path → type-checks code
+}
+
+
 def _detect_cli_invocations(
     text: str,
     allowlist: set[str],
     *,
     max_subcommands: int,
+    safe_subcommands: dict[str, frozenset[str]] | None = None,
 ) -> list[tuple[str, ...]]:
     """Find probe targets in `text`, restricted by `allowlist`.
 
     Returns a list of tuples — `(cli,)` for top-level probes and
-    `(cli, sub1)` or `(cli, sub1, sub2)` for subcommand probes. Order
-    is stable: top-level CLIs first (deduped, in first-seen order), then
+    `(cli, sub1)` or `(cli, sub1, sub2)` for subcommand probes.
+
+    SECURITY: subcommand probes are gated by a per-tool known-safe
+    verb whitelist (`safe_subcommands`, default `CLI_SAFE_SUBCOMMANDS`).
+    A subcommand token that doesn't appear in its tool's safe set is
+    NOT probed — even though the top-level `<cli> --help` still runs.
+    Without this gate, `node server.js --help` (and other "first
+    positional is a script" tools) would execute user code instead of
+    fetching help text. Codex caught this on PR #82.
+
+    Order: top-level CLIs first (deduped, in first-seen order), then
     subcommand probes in first-seen order capped at `max_subcommands`.
 
-    The coder needs the top-level help even when only a subcommand was
-    referenced — `<cli> --help` shows the global flag set (-V, --json,
-    etc.) that subcommand help often elides.
-
     Implementation: build a single pattern that anchors on the
-    allowlist tokens (so non-allowlisted nouns like "Use" or "shell"
-    don't consume the match window). `re.escape` each entry so a
-    config-supplied tool name with a literal `.` or `+` is treated
-    literally, not as a regex meta.
+    allowlist tokens. `re.escape` each entry so a config-supplied tool
+    name with a literal `.` or `+` is treated literally.
     """
     if not allowlist or not text:
         return []
+
+    safe_subs = safe_subcommands if safe_subcommands is not None else CLI_SAFE_SUBCOMMANDS
 
     # Escape allowlist entries to keep regex-meta chars literal, sort by
     # length descending so a longer prefix wins over a shorter one
@@ -576,9 +646,6 @@ def _detect_cli_invocations(
 
     # English fillers we routinely see between a CLI mention and the
     # next noun in prose ("use gws to fetch …", "run swift and tests").
-    # Without this, "gws to fetch" silently turns into a probe for
-    # `gws to fetch --help`. Worse than an empty probe — it misleads
-    # the coder about what the tool actually accepts.
     prose_fillers = frozenset({
         "to", "the", "a", "an", "and", "or", "but", "with", "from",
         "into", "onto", "for", "of", "in", "on", "at", "by", "is",
@@ -599,30 +666,53 @@ def _detect_cli_invocations(
         sub1 = match.group("sub1")
         sub2 = match.group("sub2")
 
-        # Only record a subcommand probe when sub1 is a plausible
-        # subcommand token, NOT English filler. The prose-filler check
-        # handles the dominant false-positive ("use gws to fetch …" →
-        # `to` is filler → only top-level probe). Subcommand probes are
-        # also bounded by `max_subcommands`, so even if a few extra
-        # slip through we won't explode into dozens of subprocess calls.
-        if (
-            sub1
-            and not sub1.startswith("-")
-            and sub1 not in prose_fillers
-            and len(sub_probes) < max_subcommands
-        ):
-            probe: tuple[str, ...]
-            if (
-                sub2
-                and not sub2.startswith("-")
-                and sub2 not in prose_fillers
-            ):
-                probe = (cli, sub1, sub2)
-            else:
-                probe = (cli, sub1)
-            if probe not in sub_probes_seen:
-                sub_probes.append(probe)
-                sub_probes_seen.add(probe)
+        # Subcommand probing is GATED by per-tool safe-verb whitelist.
+        # A user-supplied CLI in the allowlist with no entry in
+        # `safe_subs` gets no subcommand probes (top-level only) —
+        # safer to probe one less thing than to execute user code.
+        tool_safe_subs = safe_subs.get(cli)
+        if tool_safe_subs is None:
+            continue  # unknown tool → top-level probe only
+        if not tool_safe_subs:
+            continue  # explicit "no subcommand probes" sentinel
+
+        # Filter prose fillers, flag-shaped tokens, and tokens absent
+        # from the safe set. The `+` prefix is gws-specific action-verb
+        # syntax — these are always safe (they're literal arguments to
+        # the gws subcommand, not script paths).
+        if not sub1 or sub1.startswith("-") or sub1 in prose_fillers:
+            continue
+
+        is_action_verb = sub1.startswith("+")
+        if not is_action_verb and sub1 not in tool_safe_subs:
+            # The first positional after the CLI is not in the safe-verb
+            # set. For tools like `go`, this means the work item said
+            # `go run main.go` — we skip the probe entirely rather than
+            # risk executing main.go.
+            continue
+        if len(sub_probes) >= max_subcommands:
+            continue
+
+        # Second positional handling. Three cases:
+        #   - sub2 absent / flag-shaped / filler → probe is (cli, sub1).
+        #   - sub2 present and starts with `+` (gws-style action verb) →
+        #     safe to probe `(cli, sub1, sub2)`.
+        #   - sub2 looks like a target/path (e.g. `swift build MyTarget`)
+        #     → drop sub2 and only probe `(cli, sub1)` to avoid triggering
+        #     a build step before --help is read.
+        sub2_is_safe_action_verb = bool(
+            sub2
+            and sub2.startswith("+")
+            and not sub2.startswith("-")
+            and sub2 not in prose_fillers
+        )
+        probe: tuple[str, ...] = (
+            (cli, sub1, sub2) if sub2_is_safe_action_verb else (cli, sub1)
+        )
+
+        if probe not in sub_probes_seen:
+            sub_probes.append(probe)
+            sub_probes_seen.add(probe)
 
     probes: list[tuple[str, ...]] = [(c,) for c in seen_cli]
     probes.extend(sub_probes)
