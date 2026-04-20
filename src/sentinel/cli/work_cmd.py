@@ -1292,6 +1292,10 @@ def _build_pr_body(
     return "\n".join(lines)
 
 
+# Legacy default — preserved for tests that import this symbol and for
+# callers that don't pass a CoderConfig. The runtime path resolves the
+# active cap from `config.coder.max_iterations` (Finding F8) which has
+# the same default value but is now project-configurable.
 MAX_CODER_ITERATIONS = 3
 
 
@@ -1323,6 +1327,116 @@ def _issue_set(issues: object) -> frozenset[str]:
     return frozenset(out)
 
 
+def _format_exhaustion_postmortem(
+    *,
+    work_item,
+    branch: str,
+    iterations: int,
+    max_iterations: int,
+    review,
+    reason: str = "exhausted",
+) -> str:
+    """Build the exhaustion / no-progress post-mortem block.
+
+    Returns a single Markdown string. Two `reason` modes:
+      - `exhausted`: hit the iteration cap with a non-approved verdict.
+      - `no_progress`: stopped early because two consecutive reviewer
+        rounds produced identical findings.
+
+    The block is emitted both to stdout (via console.print) and persisted
+    to ``.sentinel/exhaustions/<timestamp>-<slug>.md`` so operators can
+    grep it later. Identical content in both places — duplicating would
+    drift, so the writer formats once and the printer renders the same
+    text.
+    """
+    findings = list(getattr(review, "blocking_issues", None) or [])
+    findings_block = "\n".join(f"  - {f}" for f in findings[:8])
+    if not findings_block:
+        findings_block = "  - (no blocking_issues recorded — see review.summary)"
+
+    if reason == "no_progress":
+        title = "No progress between iterations — aborting early"
+        suggestion_lines = [
+            "Suggested next step:",
+            f"  1. Inspect the branch: git checkout {branch}",
+            "  2. The coder couldn't shift the reviewer's findings;",
+            "     the work item may need scope reduction or a different",
+            "     approach. Consider splitting into smaller items.",
+            "  3. Or: reject this proposal — edit",
+            "     `.sentinel/proposals/<file>` → Status: rejected",
+        ]
+    else:
+        title = "Coder iterations exhausted"
+        suggestion_lines = [
+            "Suggested next step:",
+            f"  1. Inspect the branch: git checkout {branch}",
+            "  2. Apply the findings manually",
+            "  3. Push as a regular PR via scripts/open-pr.sh",
+            "Or:",
+            "  1. Reduce work item scope (split into smaller items)",
+            "  2. Reject this proposal: edit",
+            "     `.sentinel/proposals/<file>` → Status: rejected",
+        ]
+
+    suggestions_md = "\n".join(suggestion_lines)
+    summary = getattr(review, "summary", "") or ""
+    summary_block = f"  Reviewer summary: {summary}\n" if summary else ""
+
+    return (
+        f"### {title}\n\n"
+        f"  Work item: {work_item.title}\n"
+        f"  Branch: {branch}\n"
+        f"  Iterations: {iterations}/{max_iterations}\n"
+        f"  Last reviewer verdict: {review.verdict}\n"
+        f"{summary_block}"
+        f"\n"
+        f"  Last reviewer findings:\n"
+        f"{findings_block}\n"
+        f"\n"
+        f"{suggestions_md}\n"
+    )
+
+
+def _persist_exhaustion(
+    project: Path,
+    *,
+    work_item,
+    body: str,
+) -> Path | None:
+    """Write the post-mortem to `.sentinel/exhaustions/<ts>-<slug>.md`.
+
+    Best-effort: failures here log a warning but never abort the cycle —
+    the in-stdout post-mortem is the primary signal; the file is for
+    grep-after-the-fact convenience. Returns the path on success,
+    None on persistence failure.
+    """
+    from sentinel.git_ops import slug as git_slug
+
+    try:
+        exhaustions_dir = project / ".sentinel" / "exhaustions"
+        exhaustions_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+        # Use the same slug helper sentinel uses elsewhere so artifact
+        # filenames stay consistent across the project.
+        wi_slug = git_slug(work_item.title) or work_item.id
+        path = exhaustions_dir / f"{timestamp}-{wi_slug}.md"
+        path.write_text(
+            f"# Coder iterations exhausted — {work_item.title}\n\n"
+            f"- Work item ID: {work_item.id}\n"
+            f"- Generated: {datetime.now().isoformat(timespec='seconds')}\n\n"
+            f"---\n\n"
+            f"{body}",
+            encoding="utf-8",
+        )
+        return path
+    except OSError as exc:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Failed to persist exhaustion post-mortem (non-fatal): %s", exc,
+        )
+        return None
+
+
 async def _iterate_coder_reviewer(
     *,
     work_item,
@@ -1332,6 +1446,8 @@ async def _iterate_coder_reviewer(
     reviewer: Reviewer,
     project: Path,
     ctx,
+    max_iterations: int = MAX_CODER_ITERATIONS,
+    coder_config=None,
 ) -> tuple[object, object, int]:
     """Loop coder.execute → reviewer.review until approved, stuck, or capped.
 
@@ -1342,19 +1458,28 @@ async def _iterate_coder_reviewer(
 
     Termination conditions (in priority order):
       1. `review.verdict == 'approved'` → ship gate takes over
-      2. `iterations >= MAX_CODER_ITERATIONS` → cap hit, surface final verdict
+      2. `iterations >= max_iterations` → cap hit, post-mortem block
+         emitted to stdout AND persisted to `.sentinel/exhaustions/`
+         (Finding F8). `max_iterations` defaults to MAX_CODER_ITERATIONS
+         for legacy callers; production reads
+         `config.coder.max_iterations`.
       3. No progress: reviewer returns the same blocking_issues set two
          rounds in a row → stop burning budget on a coder that isn't
-         responding to feedback
+         responding to feedback. Same post-mortem emission (different
+         banner), so operators see why we stopped.
       4. `exec_result.status == 'failed'` mid-loop → surface the error,
          bail out of iteration (the outer ship gate will handle it)
 
     Returns `(exec_result, review, iterations_used)`. `iterations_used`
     starts at 1 (counting the initial pass) so the caller can report
     "approved on iteration N of M".
+
+    `coder_config` is threaded through to `coder.execute` so the
+    revision pass also benefits from CLI-help pre-loading (Finding F7).
     """
     iterations = 1
     prior_issues: frozenset[str] | None = None
+    stop_reason: str | None = None  # "exhausted" | "no_progress" | None
 
     # If the initial review was a reviewer-infrastructure failure (not
     # a real verdict on the code), do not iterate — there are no
@@ -1370,7 +1495,7 @@ async def _iterate_coder_reviewer(
 
     while (
         review.verdict != "approved"
-        and iterations < MAX_CODER_ITERATIONS
+        and iterations < max_iterations
     ):
         current = _issue_set(review.blocking_issues)
         # Stop if the coder couldn't shift the findings since last round.
@@ -1381,13 +1506,14 @@ async def _iterate_coder_reviewer(
                 "  [yellow]No progress on findings — stopping "
                 "iteration[/yellow]"
             )
+            stop_reason = "no_progress"
             break
         prior_issues = current
         iterations += 1
 
         console.print(
             f"  [dim]revising (iteration {iterations}/"
-            f"{MAX_CODER_ITERATIONS})...[/dim]"
+            f"{max_iterations})...[/dim]"
         )
         exec_result = await coder.execute(
             work_item,
@@ -1395,6 +1521,7 @@ async def _iterate_coder_reviewer(
             artifacts_directory=str(project),
             branch=ctx.branch,
             review_feedback=review,
+            coder_config=coder_config,
         )
         if exec_result.cost_usd > 0:
             record_spend(
@@ -1444,6 +1571,47 @@ async def _iterate_coder_reviewer(
                 "stopping iteration[/yellow]"
             )
             break
+
+    # If we exited the loop with a non-approved verdict, emit the
+    # post-mortem. Two paths land here: hitting the cap, or no_progress
+    # (already set above). Don't fire on infrastructure-failure exits or
+    # `exec_result.status == "failed"` mid-loop — those have their own
+    # specific messaging and aren't iteration-cap problems.
+    cap_hit = (
+        review.verdict != "approved"
+        and iterations >= max_iterations
+        and stop_reason is None
+        and not getattr(review, "infrastructure_failure", False)
+        and exec_result.status != "failed"
+    )
+    if cap_hit:
+        stop_reason = "exhausted"
+
+    if stop_reason in ("exhausted", "no_progress"):
+        body = _format_exhaustion_postmortem(
+            work_item=work_item,
+            branch=ctx.branch,
+            iterations=iterations,
+            max_iterations=max_iterations,
+            review=review,
+            reason=stop_reason,
+        )
+        # The post-mortem is the primary signal — print it conspicuously
+        # so operators don't have to dig through .sentinel/exhaustions/
+        # to learn what went wrong (Finding F8: "Sentinel moved on
+        # silently. User has to dig into .sentinel/reviews/ to see what
+        # happened.").
+        console.print(
+            f"\n[bold red]{'─' * 60}[/bold red]\n"
+            f"[bold red]{body}[/bold red]"
+            f"[bold red]{'─' * 60}[/bold red]\n"
+        )
+        path = _persist_exhaustion(project, work_item=work_item, body=body)
+        if path is not None:
+            console.print(
+                f"  [dim]Post-mortem written to "
+                f"{path.relative_to(project)}[/dim]"
+            )
 
     return exec_result, review, iterations
 
@@ -1557,11 +1725,13 @@ async def _execute_and_review(
                 reviewer=reviewer,
                 project=project,
                 ctx=ctx,
+                max_iterations=config.coder.max_iterations,
+                coder_config=config.coder,
             )
             if iterations_used > 1:
                 console.print(
                     f"  [dim]coder iterations: {iterations_used}/"
-                    f"{MAX_CODER_ITERATIONS}[/dim]"
+                    f"{config.coder.max_iterations}[/dim]"
                 )
         console.print()
 
