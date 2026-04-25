@@ -46,7 +46,7 @@ Fix failing tests before pushing.
 
 ## Release & Distribution
 
-Homebrew formula (`brew install sentinel` via `autumngarage/sentinel` tap) + PyPI (`pip install sentinel`). Version is derived from the git tag via `hatch-vcs` — no manual bump. Release process: tag on main (`git tag v0.X.Y`), push tag (`git push --tags`), `gh release create`, update Homebrew formula SHA. `.git_archival.txt` (populated by git-archive's `export-subst`) lets tag tarballs resolve the version without `.git`, so Homebrew's source archive build works.
+Homebrew formula (`brew install sentinel` via `autumngarage/sentinel` tap) + PyPI (`pip install sentinel`). Version is derived from the git tag via `hatch-vcs` — no manual bump. Release process: tag on main (`git tag v0.X.Y`), push tag (`git push --tags`), `gh release create v0.X.Y --generate-notes`. The release-published event triggers `.github/workflows/release.yml`, which calls the shared `homebrew-bump.yml` reusable workflow in `autumngarage/autumn-garage` (pinned `@v1`) to rewrite the tap formula's `url` + `sha256` and commit directly to the tap's `main` — no hand-editing. Manual escape hatch: `gh workflow run release.yml -f tag_name=v0.X.Y` re-bumps for an existing tag. Required repo secret: `HOMEBREW_TAP_PAT` (classic PAT with `repo` scope on the tap, or fine-grained with `contents:write` on `autumngarage/homebrew-sentinel`). `.git_archival.txt` (populated by git-archive's `export-subst`) lets tag tarballs resolve the version without `.git`, so Homebrew's source archive build works.
 
 ## Architecture
 
