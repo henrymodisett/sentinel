@@ -1,0 +1,47 @@
+# Release workflow — auto-bumps the homebrew-sentinel tap Formula
+# whenever a GitHub Release is published in this repo.
+#
+# Two-step flow (machine handles only the deterministic half):
+#   1. Human runs `git tag v0.X.Y && git push --tags && gh release create
+#      v0.X.Y --generate-notes` on main. Version is derived from the tag
+#      via hatch-vcs — no manual __init__.py / pyproject.toml bump.
+#   2. The `release.published` event below fires; the shared workflow in
+#      autumngarage/autumn-garage rewrites Formula/sentinel.rb's `url`
+#      + `sha256` and commits to the tap's main directly. Users running
+#      `brew upgrade sentinel` get the new version immediately.
+#
+# Manual escape hatch: trigger via the GitHub UI's `Run workflow` button
+# (or `gh workflow run release.yml -f tag_name=v0.X.Y`) to re-bump for a
+# tag whose original release event is gone or failed.
+#
+# Required secret on this repo: HOMEBREW_TAP_PAT — classic PAT with
+# `repo` scope on autumngarage/homebrew-sentinel (a fine-grained token
+# with contents:write on that one repo also works).
+
+name: release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Tag to bump the formula to (e.g. v0.3.7). Required for manual runs."
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  bump-tap:
+    # On the auto-trigger, skip prereleases — they shouldn't land in the
+    # tap. Manual dispatch always runs so we can re-bump on demand.
+    if: github.event_name == 'workflow_dispatch' || !github.event.release.prerelease
+    uses: autumngarage/autumn-garage/.github/workflows/homebrew-bump.yml@v1
+    with:
+      formula-name: sentinel
+      tap-repo: autumngarage/homebrew-sentinel
+      tag-name: ${{ inputs.tag_name || github.event.release.tag_name }}
+    secrets:
+      HOMEBREW_TAP_PAT: ${{ secrets.HOMEBREW_TAP_PAT }}
