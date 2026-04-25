@@ -7,7 +7,7 @@
 #   scripts/release.sh --minor
 #   scripts/release.sh --major
 #
-# Conductor uses hatch-vcs, so the version is derived from the git tag —
+# Sentinel uses hatch-vcs, so the version is derived from the git tag —
 # no source files to bump, no commit to make. The helper just tags, pushes
 # the tag, and creates the GitHub release. The release-published event
 # fires .github/workflows/release.yml, which auto-bumps the homebrew tap.
@@ -21,6 +21,9 @@ case "$bump" in
   --major|--minor|--patch) ;;
   *) echo "ERROR: unknown bump arg: $bump (use --major, --minor, --patch)" >&2; exit 1 ;;
 esac
+
+command -v gh >/dev/null 2>&1 || { echo "ERROR: gh CLI not installed (need it for gh release create)" >&2; exit 1; }
+gh auth status >/dev/null 2>&1 || { echo "ERROR: gh not authenticated (run: gh auth login)" >&2; exit 1; }
 
 branch="$(git rev-parse --abbrev-ref HEAD)"
 [ "$branch" = "main" ] || { echo "ERROR: must be on main (currently $branch)" >&2; exit 1; }
