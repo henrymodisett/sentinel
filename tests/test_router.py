@@ -1,11 +1,13 @@
 """Tests for the provider router."""
 
-import pytest
+from types import SimpleNamespace
 
+import pytest
+from conductor.router import NoConfiguredProvider
+
+import sentinel.providers.router as router_module
 from sentinel.config.schema import RoleName, SentinelConfig
-from sentinel.providers.claude import ClaudeProvider
-from sentinel.providers.gemini import GeminiProvider
-from sentinel.providers.local import LocalProvider
+from sentinel.providers.conductor_adapter import ConductorAdapter
 from sentinel.providers.router import DEFAULT_RULES, Router, RoutingRule
 
 
@@ -26,11 +28,12 @@ def config() -> SentinelConfig:
 class TestRouter:
     def test_maps_roles_to_providers(self, config: SentinelConfig) -> None:
         router = Router(config)
-        assert isinstance(router.get_provider(RoleName.MONITOR), LocalProvider)
-        assert isinstance(router.get_provider(RoleName.RESEARCHER), GeminiProvider)
-        assert isinstance(router.get_provider(RoleName.PLANNER), ClaudeProvider)
-        assert isinstance(router.get_provider(RoleName.CODER), ClaudeProvider)
-        assert isinstance(router.get_provider(RoleName.REVIEWER), GeminiProvider)
+        assert isinstance(router.get_provider(RoleName.MONITOR), ConductorAdapter)
+        assert router.get_provider(RoleName.MONITOR).provider_name == "local"
+        assert router.get_provider(RoleName.RESEARCHER).provider_name == "gemini"
+        assert router.get_provider(RoleName.PLANNER).provider_name == "claude"
+        assert router.get_provider(RoleName.CODER).provider_name == "claude"
+        assert router.get_provider(RoleName.REVIEWER).provider_name == "gemini"
 
     def test_same_provider_different_models_are_separate(self, config: SentinelConfig) -> None:
         """Planner (opus) and coder (sonnet) both use claude but different models."""
@@ -50,6 +53,127 @@ class TestRouter:
         router = Router(config)
         with pytest.raises(ValueError, match="No provider configured"):
             router.get_provider("nonexistent")  # type: ignore[arg-type]
+
+
+class _FakeConductorProvider:
+    def __init__(self, name: str, default_model: str = "model") -> None:
+        self.name = name
+        self.default_model = default_model
+        self.tags = ["local", "offline", "tool-use", "code-review"]
+        self.supported_tools = frozenset({"Read", "Grep", "Glob", "Edit", "Write", "Bash"})
+        self.supported_sandboxes = frozenset({"none", "read-only", "workspace-write"})
+        self.supports_effort = True
+
+    def configured(self):  # noqa: ANN201
+        return True, None
+
+
+class TestIntentRouting:
+    def test_quick_intent_prefers_local_offline_constraints(
+        self, monkeypatch, config: SentinelConfig,
+    ) -> None:
+        calls = []
+        fake = _FakeConductorProvider("ollama", "qwen3.6:35b-a3b")
+
+        def fake_pick(spec, *, exclude=frozenset()):  # noqa: ANN001, ANN202
+            calls.append((spec, exclude))
+            return fake, SimpleNamespace(
+                provider="ollama",
+                prefer=spec.prefer,
+                effort=spec.effort,
+                sandbox=spec.sandbox,
+            )
+
+        monkeypatch.setattr(router_module, "_conductor_pick", fake_pick)
+
+        provider = Router(config).get_provider(RoleName.MONITOR, intent="quick")
+
+        assert isinstance(provider, ConductorAdapter)
+        assert provider.provider_name == "local"
+        assert provider.conductor_name == "ollama"
+        assert provider.model == "qwen3.6:35b-a3b"
+        assert provider.effort == "minimal"
+        spec, exclude = calls[0]
+        assert spec.tags == ("offline", "local")
+        assert spec.prefer == "balanced"
+        assert spec.tools == frozenset()
+        assert spec.sandbox == "none"
+        assert exclude == frozenset()
+
+    def test_research_intent_requires_web_search_tags(
+        self, monkeypatch, config: SentinelConfig,
+    ) -> None:
+        calls = []
+        fake = _FakeConductorProvider("gemini", "gemini-2.5-pro")
+
+        def fake_pick(spec, *, exclude=frozenset()):  # noqa: ANN001, ANN202
+            calls.append(spec)
+            return fake, SimpleNamespace(
+                provider="gemini",
+                prefer=spec.prefer,
+                effort=spec.effort,
+                sandbox=spec.sandbox,
+            )
+
+        monkeypatch.setattr(router_module, "_conductor_pick", fake_pick)
+
+        provider = Router(config).get_provider(RoleName.RESEARCHER, intent="research")
+
+        assert provider.provider_name == "gemini"
+        assert calls[0].tags == ("web-search", "long-context")
+        assert calls[0].prefer == "balanced"
+
+    def test_code_intent_requests_agentic_tools_and_workspace_write(
+        self, monkeypatch, config: SentinelConfig,
+    ) -> None:
+        calls = []
+        fake = _FakeConductorProvider("claude", "claude-sonnet-4-6")
+
+        def fake_pick(spec, *, exclude=frozenset()):  # noqa: ANN001, ANN202
+            calls.append(spec)
+            return fake, SimpleNamespace(
+                provider="claude",
+                prefer=spec.prefer,
+                effort=spec.effort,
+                sandbox=spec.sandbox,
+            )
+
+        monkeypatch.setattr(router_module, "_conductor_pick", fake_pick)
+
+        provider = Router(config).get_provider(RoleName.CODER, intent="code")
+
+        assert provider.provider_name == "claude"
+        assert calls[0].prefer == "best"
+        assert calls[0].sandbox == "workspace-write"
+        assert calls[0].tools == frozenset({"Read", "Grep", "Glob", "Edit", "Write", "Bash"})
+
+    def test_review_intent_retries_without_exclude_when_no_alternative(
+        self, monkeypatch, config: SentinelConfig,
+    ) -> None:
+        calls = []
+        fake = _FakeConductorProvider("claude", "claude-sonnet-4-6")
+
+        def fake_pick(spec, *, exclude=frozenset()):  # noqa: ANN001, ANN202
+            calls.append(exclude)
+            if exclude:
+                raise NoConfiguredProvider("no independent reviewer configured")
+            return fake, SimpleNamespace(
+                provider="claude",
+                prefer=spec.prefer,
+                effort=spec.effort,
+                sandbox=spec.sandbox,
+            )
+
+        monkeypatch.setattr(router_module, "_conductor_pick", fake_pick)
+
+        provider = Router(config).get_provider(
+            RoleName.REVIEWER,
+            intent="review",
+            exclude_providers={"claude"},
+        )
+
+        assert provider.provider_name == "claude"
+        assert calls == [frozenset({"claude"}), frozenset()]
 
 
 class TestCoderTimeout:
@@ -180,7 +304,8 @@ class TestTaskAwareRouting:
     ) -> None:
         router = Router(gemini_config)
         provider = router.get_provider(RoleName.MONITOR)
-        assert isinstance(provider, GeminiProvider)
+        assert isinstance(provider, ConductorAdapter)
+        assert provider.provider_name == "gemini"
         assert provider.model == "gemini-2.5-flash"  # the configured default
 
     def test_synthesize_overrides_flash_to_pro(
@@ -190,7 +315,8 @@ class TestTaskAwareRouting:
         flash times out on the cross-lens summary prompt."""
         router = Router(gemini_config)
         provider = router.get_provider(RoleName.MONITOR, task="synthesize")
-        assert isinstance(provider, GeminiProvider)
+        assert isinstance(provider, ConductorAdapter)
+        assert provider.provider_name == "gemini"
         assert provider.model == "gemini-2.5-pro"
 
     def test_huge_eval_overrides_below_threshold_no_change(
@@ -259,7 +385,8 @@ class TestTaskAwareRouting:
         )
         router = Router(cfg)
         provider = router.get_provider(RoleName.MONITOR, task="synthesize")
-        assert isinstance(provider, ClaudeProvider)
+        assert isinstance(provider, ConductorAdapter)
+        assert provider.provider_name == "claude"
         assert provider.model == "claude-sonnet-4-6"
 
     def test_overridden_provider_is_cached(
@@ -385,7 +512,7 @@ class TestMissingLocalModels:
         """Monitor configured for local/qwen2.5-coder:14b but only
         llama3.2:3b is pulled — the missing pair is reported with the
         role context so the message can name which role needs which model."""
-        from sentinel.providers import local as local_module
+        from sentinel.providers.conductor_adapter import ConductorAdapter
         from sentinel.providers.interface import ProviderStatus
 
         cfg = SentinelConfig(
@@ -404,7 +531,7 @@ class TestMissingLocalModels:
                 installed=True, authenticated=True, models=["llama3.2:3b"],
             )
 
-        monkeypatch.setattr(local_module.LocalProvider, "detect", fake_detect)
+        monkeypatch.setattr(ConductorAdapter, "detect", fake_detect)
 
         router = Router(cfg)
         missing = router.missing_local_models()
@@ -413,7 +540,7 @@ class TestMissingLocalModels:
     def test_local_role_with_pulled_model_passes(
         self, monkeypatch,
     ) -> None:
-        from sentinel.providers import local as local_module
+        from sentinel.providers.conductor_adapter import ConductorAdapter
         from sentinel.providers.interface import ProviderStatus
 
         cfg = SentinelConfig(
@@ -433,7 +560,7 @@ class TestMissingLocalModels:
                 models=["qwen2.5-coder:14b", "llama3.2:3b"],
             )
 
-        monkeypatch.setattr(local_module.LocalProvider, "detect", fake_detect)
+        monkeypatch.setattr(ConductorAdapter, "detect", fake_detect)
         router = Router(cfg)
         assert router.missing_local_models() == []
 
@@ -443,7 +570,7 @@ class TestMissingLocalModels:
         """If ollama itself isn't installed, every required model is
         effectively missing — the message tells the user to install
         ollama first by surfacing the pull commands they'll need next."""
-        from sentinel.providers import local as local_module
+        from sentinel.providers.conductor_adapter import ConductorAdapter
         from sentinel.providers.interface import ProviderStatus
 
         cfg = SentinelConfig(
@@ -460,7 +587,7 @@ class TestMissingLocalModels:
         def fake_detect(self):  # noqa: ANN001, ANN202
             return ProviderStatus(installed=False, authenticated=False)
 
-        monkeypatch.setattr(local_module.LocalProvider, "detect", fake_detect)
+        monkeypatch.setattr(ConductorAdapter, "detect", fake_detect)
         router = Router(cfg)
         missing = router.missing_local_models()
         assert ("monitor", "qwen2.5-coder:14b") in missing

@@ -10,6 +10,7 @@ keywords = ["ai", "agent", "meta-agent", "llm", "project-management", "autonomou
 
 dependencies = [
     "click>=8.1.0",
+    "conductor @ git+https://github.com/autumngarage/conductor.git@v0.3.3",
     "pydantic>=2.10.0",
     "rich>=13.9.0",
     "httpx>=0.28.0",
@@ -30,6 +31,9 @@ build-backend = "hatchling.build"
 # wheel missing the just-committed fix. Dev builds get suffixes like
 # `0.2.0.post12+g49c9044`; tagged releases are clean (`0.2.1`).
 source = "vcs"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.hooks.vcs]
 # Write the resolved version into the package at build time so the

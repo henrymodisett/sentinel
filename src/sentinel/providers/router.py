@@ -1,42 +1,115 @@
 """
-Router — selects the right provider+model for each call.
+Router — translates Sentinel role calls into Conductor routing requests.
 
-The user configures a default `(provider, model)` per role in
-`.sentinel/config.toml`. That default works for most calls. But dogfood
-on the sentinel repo (2026-04-16) showed two real cases where the
-*task* dictates the model, not the role:
+For normal runtime calls, Sentinel describes the task intent (`quick`,
+`research`, `plan`, `code`, `review`, or `chat`) and Conductor chooses the
+right provider/model from configured backends. This keeps provider-specific
+selection policy in Conductor rather than duplicating it in Sentinel.
 
-- The `synthesize` step times out on `gemini-2.5-flash` but completes
-  on `gemini-2.5-pro` — flash isn't large enough for the cross-lens
-  summary prompt.
-- `evaluate_lens` calls with very large prompts fail non-zero on
-  `gemini-2.5-pro` (observed 222s exit) — flash handles them fine.
-
-Encoded as data in `DEFAULT_RULES` so adding a new override doesn't
-require touching control flow. Callers that pass `task=` hints to
-`get_provider()` get the rule-based override; callers that don't (the
-test path, ad-hoc usage) get the configured default — fully backwards
-compatible.
+The legacy `.sentinel/config.toml` role defaults are still materialized for
+backward compatibility and for callers that do not pass an intent. The
+`DEFAULT_RULES` table remains as a compatibility layer for those static
+calls, but intent-based paths intentionally bypass Sentinel-side model
+overrides and delegate selection to Conductor.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 from rich.console import Console
 
 from sentinel.config.schema import RoleName, SentinelConfig
-from sentinel.providers.claude import ClaudeProvider
-from sentinel.providers.gemini import GeminiProvider
+from sentinel.providers.conductor_adapter import ConductorAdapter
 from sentinel.providers.interface import (  # noqa: TCH001
     ChatResponse,
     Provider,
     ProviderStatus,
 )
-from sentinel.providers.local import LocalProvider
-from sentinel.providers.openai import OpenAIProvider
 
 _console = Console()
+
+TaskIntent = Literal["quick", "research", "plan", "code", "review", "chat"]
+
+_AGENTIC_TOOLS = frozenset({"Read", "Grep", "Glob", "Edit", "Write", "Bash"})
+
+
+@dataclass(frozen=True)
+class IntentSpec:
+    """Conductor routing constraints for a Sentinel task intent."""
+
+    tags: tuple[str, ...]
+    prefer: str
+    effort: str | int
+    tools: frozenset[str]
+    sandbox: str
+
+
+INTENT_SPECS: dict[str, IntentSpec] = {
+    # "Quick" means local/offline if available. Balanced preserves tag
+    # dominance so Ollama beats faster cloud models when it is configured.
+    "quick": IntentSpec(
+        tags=("offline", "local"),
+        prefer="balanced",
+        effort="minimal",
+        tools=frozenset(),
+        sandbox="none",
+    ),
+    # Research must prefer actual web-search capability over raw tier.
+    "research": IntentSpec(
+        tags=("web-search", "long-context"),
+        prefer="balanced",
+        effort="medium",
+        tools=frozenset(),
+        sandbox="none",
+    ),
+    "plan": IntentSpec(
+        tags=("strong-reasoning", "long-context"),
+        prefer="best",
+        effort="high",
+        tools=frozenset(),
+        sandbox="read-only",
+    ),
+    "code": IntentSpec(
+        tags=("tool-use", "strong-reasoning"),
+        prefer="best",
+        effort="medium",
+        tools=_AGENTIC_TOOLS,
+        sandbox="workspace-write",
+    ),
+    "review": IntentSpec(
+        tags=("code-review", "strong-reasoning"),
+        prefer="best",
+        effort="medium",
+        tools=frozenset(),
+        sandbox="read-only",
+    ),
+    "chat": IntentSpec(
+        tags=(),
+        prefer="balanced",
+        effort="medium",
+        tools=frozenset(),
+        sandbox="none",
+    ),
+}
+
+
+def _conductor_pick(
+    spec: IntentSpec,
+    *,
+    exclude: frozenset[str] = frozenset(),
+):
+    from conductor.router import pick
+
+    return pick(
+        list(spec.tags),
+        prefer=spec.prefer,
+        effort=spec.effort,
+        tools=spec.tools,
+        sandbox=spec.sandbox,
+        exclude=exclude,
+    )
 
 
 @dataclass(frozen=True)
@@ -97,16 +170,21 @@ DEFAULT_RULES: tuple[RoutingRule, ...] = (
 )
 
 
-def _create_provider(provider_name: str, model: str, config: SentinelConfig) -> Provider:
-    if provider_name == "claude":
-        return ClaudeProvider(model=model)
-    if provider_name == "openai":
-        return OpenAIProvider(model=model)
-    if provider_name == "gemini":
-        return GeminiProvider(model=model)
-    if provider_name == "local":
-        return LocalProvider(model=model, endpoint=config.local.ollama_endpoint)
-    raise ValueError(f"Unknown provider: {provider_name}")
+def _create_provider(
+    provider_name: str,
+    model: str,
+    config: SentinelConfig,
+    *,
+    timeout_sec: int,
+    max_turns: int,
+) -> Provider:
+    return ConductorAdapter(
+        provider_name=provider_name,  # type: ignore[arg-type]
+        model=model,
+        timeout_sec=timeout_sec,
+        max_turns=max_turns,
+        ollama_endpoint=config.local.ollama_endpoint,
+    )
 
 
 class Router:
@@ -158,14 +236,62 @@ class Router:
         key = f"coder:{provider_name}:{model}" if coder_scoped else f"{provider_name}:{model}"
         if key in self._providers:
             return self._providers[key]
-        provider = _create_provider(provider_name, model, self._config)
-        if coder_scoped:
-            provider.timeout_sec = self._config.coder.timeout_seconds
-        else:
-            provider.timeout_sec = self._config.scan.provider_timeout_sec
-        provider.max_turns = self._config.coder.max_turns
+        timeout_sec = (
+            self._config.coder.timeout_seconds
+            if coder_scoped
+            else self._config.scan.provider_timeout_sec
+        )
+        provider = _create_provider(
+            provider_name,
+            model,
+            self._config,
+            timeout_sec=timeout_sec,
+            max_turns=self._config.coder.max_turns,
+        )
         self._providers[key] = provider
         return provider
+
+    def _materialize_intent(
+        self,
+        intent: TaskIntent,
+        *,
+        role: RoleName,
+        exclude_providers: frozenset[str] = frozenset(),
+    ) -> Provider:
+        spec = INTENT_SPECS[intent]
+        timeout_sec = (
+            self._config.coder.timeout_seconds
+            if role == RoleName.CODER
+            else self._config.scan.provider_timeout_sec
+        )
+
+        try:
+            provider, decision = _conductor_pick(spec, exclude=exclude_providers)
+        except Exception as exc:
+            # Reviewer independence is preferred, not a hard availability
+            # blocker. If every alternative is unavailable, retry without
+            # the exclude set so the review can still run and surface its
+            # reduced independence through provider comparison.
+            if (
+                exc.__class__.__name__ != "NoConfiguredProvider"
+                or intent != "review"
+                or not exclude_providers
+            ):
+                raise
+            provider, decision = _conductor_pick(spec)
+
+        reason = (
+            f"conductor:{intent}:{decision.provider}"
+            f":prefer={decision.prefer}:sandbox={decision.sandbox}"
+        )
+        return ConductorAdapter.from_conductor_provider(
+            provider,
+            timeout_sec=timeout_sec,
+            max_turns=self._config.coder.max_turns,
+            ollama_endpoint=self._config.local.ollama_endpoint,
+            effort=decision.effort,
+            routing_reason=reason,
+        )
 
     def get_provider(
         self,
@@ -173,19 +299,27 @@ class Router:
         *,
         task: str | None = None,
         prompt_size: int = 0,
+        intent: TaskIntent | None = None,
+        exclude_providers: frozenset[str] | set[str] | list[str] | None = None,
     ) -> Provider:
-        """Return the provider for `role`, possibly overridden by a
-        routing rule when `task` and/or `prompt_size` hint at a context
-        the rules were written for.
+        """Return the provider for `role`.
 
-        Without hints (`task=None`), this is identical to the original
-        static-mapping behavior — every existing caller keeps working
-        unchanged. Pass `task=` from any call site that knows it (the
-        Monitor pipeline does: explore / evaluate_lens / synthesize).
+        Intent-aware callers route through Conductor. Legacy callers can
+        omit `intent` and keep the configured role default, with optional
+        `task`/`prompt_size` compatibility rules.
         """
         configured = self._role_map.get(role)
         if not configured:
             raise ValueError(f"No provider configured for role: {role}")
+
+        if intent is not None:
+            if intent not in INTENT_SPECS:
+                raise ValueError(f"Unknown task intent: {intent}")
+            return self._materialize_intent(
+                intent,
+                role=RoleName(str(role)),
+                exclude_providers=frozenset(exclude_providers or ()),
+            )
 
         if task is None and prompt_size == 0:
             return configured
@@ -213,22 +347,35 @@ class Router:
         return configured
 
     async def chat(self, role: RoleName, prompt: str) -> ChatResponse:
-        return await self.get_provider(role).chat(prompt)
+        intent = "plan" if role == RoleName.PLANNER else "chat"
+        return await self.get_provider(role, intent=intent).chat(prompt)
 
     async def research(self, prompt: str) -> ChatResponse:
-        return await self.get_provider(RoleName.RESEARCHER).research(prompt)
+        return await self.get_provider(
+            RoleName.RESEARCHER, intent="research",
+        ).research(prompt)
 
     async def code(self, prompt: str, working_directory: str = ".") -> ChatResponse:
-        return await self.get_provider(RoleName.CODER).code(prompt, working_directory)
+        return await self.get_provider(
+            RoleName.CODER, intent="code",
+        ).code(prompt, working_directory)
 
     @staticmethod
     def detect_all() -> dict[str, ProviderStatus]:
-        """Detect all provider CLIs — used by `sentinel init` and `sentinel providers`."""
+        """Detect provider readiness via the Conductor-backed adapter."""
         return {
-            "claude": ClaudeProvider().detect(),
-            "codex": OpenAIProvider().detect(),
-            "gemini": GeminiProvider().detect(),
-            "ollama": LocalProvider().detect(),
+            "claude": ConductorAdapter(
+                provider_name="claude", model="claude-sonnet-4-6",
+            ).detect(),
+            "codex": ConductorAdapter(
+                provider_name="openai", model="gpt-5.4",
+            ).detect(),
+            "gemini": ConductorAdapter(
+                provider_name="gemini", model="gemini-2.5-pro",
+            ).detect(),
+            "ollama": ConductorAdapter(
+                provider_name="local", model="qwen2.5-coder:14b",
+            ).detect(),
         }
 
     def missing_local_models(self) -> list[tuple[str, str]]:
@@ -258,8 +405,10 @@ class Router:
 
         # One detection call returns all pulled models — avoids hitting
         # ollama's HTTP endpoint once per local-role.
-        status = LocalProvider(
-            endpoint=self._config.local.ollama_endpoint,
+        status = ConductorAdapter(
+            provider_name="local",
+            model="qwen2.5-coder:14b",
+            ollama_endpoint=self._config.local.ollama_endpoint,
         ).detect()
         if not status.installed:
             # Treat every required model as missing if ollama itself

@@ -273,7 +273,7 @@ async def run_scan(
 
     router = Router(config)
     monitor = Monitor(router)
-    provider = router.get_provider("monitor")
+    provider = router.get_provider("monitor", intent="quick")
     console.print(f"  Monitor provider: [bold]{provider.name}[/bold]")
     console.print()
 

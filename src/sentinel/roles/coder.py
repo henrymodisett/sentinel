@@ -989,11 +989,11 @@ class Coder:
         wd = working_directory
         ad = artifacts_directory
 
-        provider = self.router.get_provider("coder")
+        provider = self.router.get_provider("coder", intent="code")
         if not provider.capabilities.agentic_code:
             result.error = (
                 f"Provider {provider.name} doesn't support agentic code execution. "
-                f"Assign coder role to claude or openai in .sentinel/config.toml."
+                f"Configure at least one Conductor provider with workspace-write tool support."
             )
             result.duration_ms = int((time.time() - start) * 1000)
             _write_execution_transcript(

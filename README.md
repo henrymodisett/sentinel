@@ -32,23 +32,25 @@ Each phase is powered by a role — an LLM configured for one job. You assign a 
 | Role | Default | Why |
 |---|---|---|
 | **Monitor** | Gemini Flash | Runs often — Flash is fast and free on the free tier |
-| **Researcher** | Gemini CLI | Native web search, cheap |
-| **Planner** | Claude CLI | Best judgment |
-| **Coder** | Claude Code | Full agentic loop |
-| **Reviewer** | Gemini CLI | Independent from coder |
+| **Researcher** | Gemini via Conductor | Native web search, cheap |
+| **Planner** | Claude via Conductor | Best judgment |
+| **Coder** | Claude Code via Conductor | Full agentic loop |
+| **Reviewer** | Gemini via Conductor | Independent from coder |
 
 The Reviewer must be a different provider than the Coder. A model reviewing its own output has the same blind spots it started with.
 
 ## Providers
 
-Sentinel wraps CLIs — **no API keys live inside sentinel**. Each CLI handles its own auth:
+Sentinel delegates AI calls to [Conductor](https://github.com/autumngarage/conductor) — **no API keys live inside sentinel**. Conductor wraps each CLI or local endpoint and owns provider-specific behavior:
 
 - `claude` — Anthropic
 - `codex` — OpenAI
 - `gemini` — Google (native web search)
 - `ollama` — local, free, offline
 
-Any role can use any provider, with one constraint: the **Coder** needs agentic-code capability (Claude or OpenAI today — Gemini and local don't qualify yet).
+Any role can use any provider, with one constraint: the **Coder** needs Conductor's agentic-code capability (`workspace-write` tool execution).
+
+Sentinel routes by task intent, not just by static provider. Quick monitor work asks Conductor for local/offline when available; research asks for web-search + long context; code asks for tool-use + `workspace-write`; review asks for a code-review provider independent from the coder when possible.
 
 ## Quick start
 
@@ -163,7 +165,7 @@ Project context — what it is, current stage, what matters most right now — l
 
 ## Design principles
 
-- **CLI-based providers.** No SDKs, no stored keys. Each CLI handles its own auth.
+- **Conductor-backed providers.** Sentinel keeps role routing and budgets; Conductor owns provider-specific AI execution. Sentinel stores no provider API keys.
 - **Derive, don't persist.** Goals, state, plans are recomputed from source each cycle. Nothing stored to drift.
 - **Dynamic lenses.** Per-project analytical perspectives beat flat universal checklists.
 

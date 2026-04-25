@@ -119,7 +119,7 @@ class Researcher:
         if cached is not None:
             return cached
 
-        provider = self.router.get_provider("researcher")
+        provider = self.router.get_provider("researcher", intent="research")
         prompt = DOMAIN_RESEARCH_PROMPT.format(
             project_type=project_type or "generic",
             project_name=project_name,

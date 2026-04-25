@@ -276,8 +276,12 @@ class Reviewer:
             coder_output=execution.raw_output[:2000],
         )
 
-        provider = self.router.get_provider("reviewer")
-        coder_provider = self.router.get_provider("coder")
+        coder_provider = self.router.get_provider("coder", intent="code")
+        provider = self.router.get_provider(
+            "reviewer",
+            intent="review",
+            exclude_providers={getattr(coder_provider, "conductor_name", str(coder_provider.name))},
+        )
 
         # Warn if reviewer is same provider as coder (reduces independence)
         if provider.name == coder_provider.name:

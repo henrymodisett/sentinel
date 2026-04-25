@@ -1,7 +1,7 @@
 # Sentinel — Conductor Migration Plan
 
 **Author:** drafted 2026-04-24 during garage-wide post-v0.3.3 audit
-**Status:** in progress (Slice A shipped; B-E open)
+**Status:** complete in Sentinel (Slices A-E shipped 2026-04-24)
 **Owner:** Henry
 **Upstream plan of record:** [`autumn-garage/.cortex/plans/sentinel-conductor-migration.md`](https://github.com/autumngarage/autumn-garage/blob/main/.cortex/plans/sentinel-conductor-migration.md) — cross-tool coordination decisions live there; this file is the sentinel-local actionable view.
 
@@ -47,9 +47,9 @@ Key guarantee: **roles don't change**. If you `git diff src/sentinel/roles/` at 
 - Verified: `brew install autumngarage/sentinel/sentinel` gives a working `sentinel 0.3.6`; `/opt/homebrew/bin/sentinel providers` detects all four providers end-to-end alongside the existing `uv tool` install (PATH ordering keeps uv-editable first for dev).
 - No sentinel-repo code change in Slice A.
 
-### Slice B — `ConductorAdapter` shim (next)
+### Slice B — `ConductorAdapter` shim ✅ shipped 2026-04-24
 
-**Scope:** one new file, no role changes, no behaviour change at runtime (feature-flagged off).
+**Scope:** one new file, no role changes. Runtime AI calls now go through Conductor.
 
 **Files to add:**
 - `src/sentinel/providers/conductor_adapter.py` — new
@@ -85,12 +85,12 @@ class ConductorAdapter(Provider):
 | Sentinel method | Conductor call | Notes |
 |---|---|---|
 | `chat()` | `conductor.providers.get_provider(name).call(prompt, model=model, effort='medium', resume_session_id=None)` | Map `conductor.CallResponse` → `sentinel.ChatResponse` |
-| `chat_json()` | `chat()` + JSON-shaped preamble + `json.loads` + `jsonschema.validate` | Schema validation stays in sentinel — conductor has no equivalent |
+| `chat_json()` | `chat()` + JSON-shaped preamble + JSON parse + schema validation | Schema validation stays in sentinel — conductor has no equivalent |
 | `research()` | `chat()` | Web search is implicit on providers that support it (gemini); no conductor flag needed |
-| `code()` | `get_provider(name).exec(prompt, tools=frozenset({"Read","Grep","Glob","Edit","Write","Bash"}), sandbox='workspace-write', cwd=working_directory, timeout_sec=timeout_sec)` | For claude/codex, conductor's shell-out `exec()` passes `--max-turns` to the CLI; for kimi/local, conductor drives the HTTP tool-use loop with the v0.3.x iteration cap |
+| `code()` | `provider.exec(prompt, tools=frozenset({"Read","Grep","Glob","Edit","Write","Bash"}), sandbox='workspace-write', cwd=working_directory, timeout_sec=timeout_sec)` | Adapter passes `max_turns` when the installed Conductor version exposes that kwarg; timeout still bounds every run |
 | `detect()` | `get_provider(name).configured()` + capability lookup | Map `configured() -> (bool, reason)` to `ProviderStatus(installed, authenticated, hints)` |
 
-**Feature flag** — construct the adapter only when `SENTINEL_USE_CONDUCTOR=1` is in the environment. When unset or `0`, keep using the native providers. The flag is read in `router.py` (Slice C) — in Slice B the adapter just exists, nothing consumes it yet.
+**Feature flag** — removed from the final implementation. The native providers were deleted in Slice E, so `Router` now constructs `ConductorAdapter` unconditionally.
 
 **Known gaps that may surface during Slice B implementation** — if any bite, file a conductor PR rather than monkey-patching in sentinel:
 
@@ -109,37 +109,36 @@ class ConductorAdapter(Provider):
 - `chat()` preserves `stderr`, `raw_stdout`, `cost_usd` on error paths (R6/R7 from the master plan)
 - `chat_json()` happy path: valid JSON → `(parsed_dict, response)`; invalid JSON → `(None, response)` with `is_error=True`
 - `chat_json()` schema violation: structurally valid JSON that fails jsonschema → `(None, response)`
-- `code()` passes tools + sandbox correctly; respects `max_turns`
+- `code()` passes tools + sandbox correctly; passes `max_turns` when Conductor supports it
 - `code()` on `local` provider goes through conductor's HTTP tool-use loop (new capability vs native sentinel which refused)
 - `detect()` maps `configured()` output to `ProviderStatus`
 - `timeout_sec` kwarg propagates to conductor's provider constructor
 - `research()` delegates to `chat()` (web search is implicit)
 
-### Slice C — router migration (~0.5 sessions)
+### Slice C — router migration ✅ shipped 2026-04-24
 
 Touch `src/sentinel/providers/router.py`:
-- Behind `SENTINEL_USE_CONDUCTOR=1`, instantiate `ConductorAdapter` instead of `{Claude,OpenAI,Gemini,Local}Provider`
+- Instantiate `ConductorAdapter` instead of `{Claude,OpenAI,Gemini,Local}Provider`
 - `DEFAULT_RULES` keeps working — it runs first, picks the model name, then router constructs adapter with that model
 - Per-role timeout isolation preserved: coder's adapter constructed with `timeout_sec=config.coder.timeout_seconds`; others with `config.scan.provider_timeout_sec`
-- Flag default stays OFF — this slice is pure plumbing
 
-Existing `tests/test_router.py` should continue to pass with the flag off; add a small parametrized set that enables the flag and verifies adapter construction.
+Existing `tests/test_router.py` was updated to assert adapter construction and task-aware routing.
 
-### Slice D — role dogfood (~1-2 sessions)
+### Slice D — role dogfood
 
-Run real cycles with `SENTINEL_USE_CONDUCTOR=1` on a target repo (autumn-mail or a scratch dir). Per-role validation order by rising risk:
+Run real cycles on a target repo (autumn-mail or a scratch dir). Per-role validation order by rising risk:
 
 1. **Monitor** (simplest — `chat()` + `chat_json()`, read-only). If monitor completes one cycle cleanly, the 80%-case path is proven.
 2. **Researcher** (chat-only + implicit web search).
 3. **Reviewer** (stresses `chat_json()` hardest — structured verdicts).
 4. **Planner** (stubbed in `roles/planner.py` today; low risk).
-5. **Coder** (agentic `code()`, highest risk — validates `--max-turns` + tool-use flows through conductor's shell-out for claude/codex, and through conductor's HTTP loop for local).
+5. **Coder** (agentic `code()`, highest risk — validates tool-use flows through conductor's shell-out for claude/codex, and through conductor's HTTP loop for local).
 
 Each role gets a commit. Each is real-workload validation, not a unit test. Expect 1-3 small conductor PRs for gaps surfaced (R1 `--disallowedTools`, R9 per-instance ollama endpoint, R5 `max_turns` kwarg on HTTP loop).
 
-**Flip the default** (`SENTINEL_USE_CONDUCTOR=1` → default `true` in router) once all five roles pass.
+The default is already Conductor-only in this repo; real-cycle dogfood remains release validation.
 
-### Slice E — delete native providers (~0.5 sessions)
+### Slice E — delete native providers ✅ shipped 2026-04-24
 
 - `rm src/sentinel/providers/{claude,openai,gemini,local}.py` (≈2000 lines)
 - Trim `src/sentinel/providers/router.py` to only know about `ConductorAdapter`
@@ -159,7 +158,7 @@ From the cross-tool recon done in the autumn-garage plan; restated here with the
 | R2 | Gemini `--approval-mode plan` read-only | D | Conductor's gemini adapter already uses `plan` — verify in Slice D |
 | R3 | Per-role timeout isolation | B | Adapter takes `timeout_sec` in ctor; router constructs per-role adapters in C |
 | R4 | Task-aware `DEFAULT_RULES` | C | Router keeps them; they run before the adapter call |
-| R5 | `max_turns` propagation | B → C | Pipe through to conductor's `exec()`; HTTP loops may need a kwarg |
+| R5 | `max_turns` propagation | B → C | Adapter pipes through when Conductor exposes `max_turns`; otherwise Sentinel's timeout remains the hard bound |
 | R6 | `stderr` + `raw_stdout` on all paths | B | Adapter populates from `conductor.CallResponse.raw` |
 | R7 | Cost on non-zero exit | B | Conductor already preserves `usage` on `ProviderHTTPError` |
 | R8 | OpenAI NDJSON parsing | E | Conductor's codex adapter already does this — sentinel's parser deletes cleanly |
@@ -168,7 +167,7 @@ From the cross-tool recon done in the autumn-garage plan; restated here with the
 
 ## Success criteria
 
-1. `sentinel work` completes a full cycle on autumn-mail (or scratch repo) with `SENTINEL_USE_CONDUCTOR=1` — all 5 roles execute, output quality matches pre-migration runs
+1. `sentinel work` completes a full cycle on autumn-mail (or scratch repo) — all 5 roles execute, output quality matches pre-migration runs
 2. `sentinel providers` output identical pre- and post-migration (same providers detected, same capabilities)
 3. Test count within ±50 of pre-migration after Slice E deletion
 4. Conductor gains ≤3 small PRs filed as gaps surface — bounded, each <200 lines, none architectural
@@ -182,11 +181,10 @@ From the cross-tool recon done in the autumn-garage plan; restated here with the
 - **Config schema rewrite.** Users' `.sentinel/config.toml` stays unchanged through this entire plan. Provider names (`claude`/`openai`/`gemini`/`local`) in config still work; they get translated to conductor provider IDs inside the adapter.
 - **Conductor redesign.** If a conductor gap surfaces, file a small PR. Don't reshape conductor to accommodate sentinel patterns.
 
-## Where to pick up
+## Completed state
 
-**If you're back in this repo and want to start Slice B:**
-1. Read this file's "Slice B" section
-2. Read `src/sentinel/providers/interface.py` to refresh on `Provider` ABC, `ChatResponse`, `ProviderCapabilities`, `ProviderStatus`
-3. Read `autumn-garage/.cortex/plans/sentinel-conductor-migration.md` for cross-tool context (same plan, broader framing)
-4. Look at `src/sentinel/providers/claude.py` for a reference of how a sentinel provider translates CLI output into `ChatResponse` — the adapter does the same kind of translation but against `conductor.CallResponse` instead of `claude -p`
-5. Start with the file skeleton + `__init__` + `chat()` method + its tests. That's enough for a first commit that can be reviewed before going deeper.
+- Runtime provider calls enter through `src/sentinel/providers/conductor_adapter.py`.
+- `src/sentinel/providers/router.py` only materializes `ConductorAdapter`.
+- Sentinel now routes by task intent (`quick`, `research`, `plan`, `code`, `review`) through `conductor.router.pick(...)`; static role config remains the compatibility fallback.
+- Native provider modules and their provider-internal tests were deleted.
+- Config remains backward compatible: `claude`, `openai`, `gemini`, and `local` still parse the same way.

@@ -52,7 +52,7 @@ Homebrew formula (`brew install sentinel` via `autumngarage/sentinel` tap) + PyP
 
 ### Core Design Principles
 
-- **CLI-based providers**: Sentinel wraps CLIs (claude, codex, gemini, ollama) — never stores API keys
+- **Conductor-backed providers**: Sentinel routes roles and budgets; Conductor owns provider-specific AI execution. Sentinel never stores provider API keys.
 - **Derive, don't persist**: Goals come from CLAUDE.md/README/GitHub, not a separate config. No memory module.
 - **Lenses as structured expertise**: Analytical perspectives (architecture, security, testing, etc.) that guide every step
 - **Hybrid distribution**: Works as a standalone CLI AND as Claude Code agents/skills/loop.md
@@ -70,21 +70,24 @@ Goals are derived from CLAUDE.md, README.md, and GitHub issues — not stored se
 
 ### The Five Roles
 
-| Role | Default CLI | Why |
+| Role | Default Provider | Why |
 |------|------------|-----|
 | Monitor | `ollama` (local) | Runs often, should be free |
-| Researcher | `gemini` CLI | Built-in Google Search grounding |
-| Planner | `claude` CLI | Best judgment and reasoning |
-| Coder | `claude` (Claude Code) | Full agentic coding loop |
-| Reviewer | `gemini` CLI | Independent from coder |
+| Researcher | `gemini` via Conductor | Built-in Google Search grounding |
+| Planner | `claude` via Conductor | Best judgment and reasoning |
+| Coder | `claude` via Conductor | Full agentic coding loop |
+| Reviewer | `gemini` via Conductor | Independent from coder |
 
 ### Provider Layer
 
-Each provider wraps a CLI — no SDKs, no API keys in Sentinel:
-- `claude -p "prompt" --output-format json --bare` → JSON response
-- `codex exec "prompt" --json` → NDJSON events
-- `gemini -p "prompt" -o json` → JSON response
-- Ollama: HTTP API at `localhost:11434/api/chat` via `httpx`
+Sentinel keeps the small `Provider` contract used by roles and journals, but the single concrete implementation is `ConductorAdapter`. Config still uses Sentinel's stable names (`claude`, `openai`, `gemini`, `local`); the adapter translates them to Conductor IDs (`claude`, `codex`, `gemini`, `ollama`) and maps `CallResponse` back to `ChatResponse`.
+
+Runtime calls route by Sentinel intent before execution:
+- `quick` → local/offline if configured, used for cheap monitor subcalls
+- `research` → web-search + long-context
+- `plan` → high-quality reasoning, read-only
+- `code` → tool-use + `workspace-write`
+- `review` → code-review provider, excluding the coder provider when an alternative exists
 
 ### Package Structure
 
@@ -92,7 +95,7 @@ Each provider wraps a CLI — no SDKs, no API keys in Sentinel:
 src/sentinel/
 ├── cli/          CLI entrypoint (click)
 ├── config/       Pydantic schemas for .sentinel/config.toml
-├── providers/    CLI-based provider wrappers
+├── providers/    Provider contract + Conductor adapter
 ├── roles/        The five roles (monitor, researcher, planner, coder, reviewer)
 ├── loop/         The core cycle orchestrator
 └── research/     Extended research engine
@@ -107,8 +110,9 @@ templates/
 
 | File | Purpose |
 |------|---------|
-| `src/sentinel/providers/interface.py` | Provider base class, CLI helpers |
-| `src/sentinel/providers/router.py` | Maps roles to providers, detects CLIs |
+| `src/sentinel/providers/interface.py` | Provider base class and response/status types |
+| `src/sentinel/providers/conductor_adapter.py` | Translates Sentinel provider calls to Conductor |
+| `src/sentinel/providers/router.py` | Maps roles to provider/model pairs |
 | `src/sentinel/config/schema.py` | Pydantic config with role/lens definitions |
 | `src/sentinel/loop/cycle.py` | The four-step cycle orchestrator |
 | `lenses/universal/*.md` | Analytical perspectives for project evaluation |

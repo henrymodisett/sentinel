@@ -1,15 +1,16 @@
 """
-Provider interface — the unified abstraction across all LLM providers.
+Provider interface — the unified abstraction used by Sentinel roles.
 
-Every provider wraps a CLI tool (claude, codex, gemini) or HTTP API (ollama).
-Sentinel never touches API keys — each CLI handles its own authentication.
+The concrete implementation delegates to Conductor, which wraps CLI tools
+(claude, codex, gemini) and HTTP/local providers (ollama, kimi). Sentinel
+never touches provider API keys.
 
 Design decisions:
 - chat() is the universal primitive — send a prompt, get a response
 - research() adds web search capability (Gemini grounding, Claude web search)
 - code() adds agentic code execution (Claude Code, Codex full-auto mode)
 - Providers declare their capabilities so the router can warn about mismatches
-- All cloud providers use CLI subprocesses; Ollama uses its local HTTP API
+- Conductor owns provider-specific subprocess / HTTP execution
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ class ProviderName(StrEnum):
     OPENAI = "openai"
     GEMINI = "gemini"
     LOCAL = "local"
+    KIMI = "kimi"
 
 
 @dataclass

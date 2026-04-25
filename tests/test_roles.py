@@ -1183,7 +1183,7 @@ class TestReviewerHandlesBadResponse:
         ])
 
         router = MagicMock()
-        router.get_provider = lambda role: (
+        router.get_provider = lambda role, **_kwargs: (
             reviewer_provider if role == "reviewer" else coder_provider
         )
         reviewer = Reviewer(router)
@@ -1235,7 +1235,7 @@ class TestReviewerPersistsTranscripts:
             )),
         ])
         router = MagicMock()
-        router.get_provider = lambda role: (
+        router.get_provider = lambda role, **_kwargs: (
             reviewer_provider if role == "reviewer" else coder_provider
         )
         reviewer = Reviewer(router)
@@ -1281,7 +1281,7 @@ class TestReviewerPersistsTranscripts:
             )),
         ])
         router = MagicMock()
-        router.get_provider = lambda role: (
+        router.get_provider = lambda role, **_kwargs: (
             reviewer_provider if role == "reviewer" else coder_provider
         )
         reviewer = Reviewer(router)

@@ -769,8 +769,6 @@ class Monitor:
         # passes a task hint so the router can override the configured
         # model when a rule applies (e.g. synthesize → gemini-2.5-pro).
         # Without hints the configured default is used unchanged.
-        provider = self.router.get_provider("monitor")
-
         # Check for locked lenses first (reuse across scans for trend tracking)
         project_path_obj = Path(state.path) if state.path else None
         locked = (
@@ -788,6 +786,12 @@ class Monitor:
             })
             # Still need the project summary — prompt just for that
             summary_prompt = _build_explore_prompt(state)
+            provider = self.router.get_provider(
+                "monitor",
+                task="explore",
+                prompt_size=len(summary_prompt),
+                intent="quick",
+            )
             # Simple summary request when lenses are already locked
             summary_response = await provider.chat(
                 summary_prompt
@@ -813,8 +817,12 @@ class Monitor:
             explore_prompt = _build_explore_prompt(state)
 
             explore_provider = self.router.get_provider(
-                "monitor", task="explore", prompt_size=len(explore_prompt),
+                "monitor",
+                task="explore",
+                prompt_size=len(explore_prompt),
+                intent="quick",
             )
+            provider = explore_provider
             parsed, response = await explore_provider.chat_json(
                 explore_prompt, EXPLORE_SCHEMA,
             )
@@ -886,7 +894,10 @@ class Monitor:
             )
 
             eval_provider = self.router.get_provider(
-                "monitor", task="evaluate_lens", prompt_size=len(eval_prompt),
+                "monitor",
+                task="evaluate_lens",
+                prompt_size=len(eval_prompt),
+                intent="quick",
             )
             parsed_eval, resp = await eval_provider.chat_json(
                 eval_prompt, EVALUATE_SCHEMA,
@@ -1031,7 +1042,10 @@ class Monitor:
         result.n_lenses_failed = n_failed
 
         synth_provider = self.router.get_provider(
-            "monitor", task="synthesize", prompt_size=len(synth_prompt),
+            "monitor",
+            task="synthesize",
+            prompt_size=len(synth_prompt),
+            intent="plan",
         )
         parsed_synth, synth_resp = await synth_provider.chat_json(
             synth_prompt, SYNTHESIZE_SCHEMA,

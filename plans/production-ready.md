@@ -21,7 +21,7 @@ Until all three gates pass, we are not production-ready.
 ## Where we are today (post-dogfood snapshot, 2026-04-16)
 
 **Working:**
-- Provider abstraction (claude, codex, gemini, ollama) cleanly wraps CLIs, no API keys touched.
+- Provider abstraction delegates AI execution to Conductor; Sentinel keeps routing, budgets, and journals without storing provider API keys.
 - Monitor's dynamic lens generation produces astonishingly relevant project-specific lenses (it generated `llm-budgeting` and `dogfood-readiness` for the Sentinel repo unprompted).
 - Per-cycle journal (#45), checkpoint-on-append (#47), partial-scan rescue (#42), per-lens timeout (#48) all behave as designed.
 - `sentinel scan --quick` is a clean, free state baseline.
