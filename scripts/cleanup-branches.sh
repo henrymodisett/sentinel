@@ -11,8 +11,13 @@
 #   - Default mode is DRY RUN.
 #   - The current branch is never deleted.
 #   - The default branch (main/master) is never deleted.
-#   - Local branches use `git branch -d` (not `-D`), so unmerged work is safe.
-#   - Remote branches only deleted in --remote-too mode, only if no open PR and fully merged.
+#   - Ancestor-merged local branches use `git branch -d` (refuses unmerged work).
+#   - Squash-merged local branches use `git branch -D` — only after tree
+#     equivalence confirms the current default-branch tree has the branch's
+#     content for every file it touched (handles `gh pr merge --squash`,
+#     rebase-merges, and cherry-picks; rejects add-then-revert).
+#   - Remote branches only deleted in --remote-too mode, only if no open PR and
+#     fully merged or squash-merged.
 #   - Worktree-checked-out branches are skipped.
 #
 set -euo pipefail
@@ -35,7 +40,10 @@ while [ "$#" -gt 0 ]; do
       shift
       ;;
     -h|--help)
-      sed -n '3,16p' "$0" | sed 's/^# \{0,1\}//'
+      # Print the header comment block (skip shebang + leading `#`), stopping
+      # at the first non-comment line. Derived instead of hardcoded so future
+      # header edits don't silently truncate the help output.
+      awk 'NR>2 && !/^#/ { exit } NR>2 { sub(/^# ?/, ""); print }' "$0"
       exit 0
       ;;
     *)
@@ -83,6 +91,32 @@ is_worktree_branch() {
   return 1
 }
 
+# Returns 0 if every file the branch changed relative to the merge-base has
+# the branch's content on $upstream right now. This uniformly detects
+# squash-merges, rebase-merges, and cherry-picks (without caring how the
+# change got there) and correctly rejects the add-then-revert case — where
+# a patch-id lookup in upstream's history would false-positive on the add
+# commit even though the current upstream tree no longer has the change.
+is_fully_applied() {
+  local upstream="$1"
+  local branch="$2"
+  local base
+  base="$(git merge-base "$upstream" "$branch" 2>/dev/null)" || return 1
+  [ -z "$base" ] && return 1
+
+  # --no-renames disables git's rename heuristic, which would otherwise
+  # collapse "delete old, add new" into a single destination-path entry and
+  # hide the deletion from the tree check. -z makes the list NUL-delimited,
+  # safe for paths containing spaces, quotes, or newlines.
+  local file
+  while IFS= read -r -d '' file; do
+    [ -z "$file" ] && continue
+    git diff --quiet "$upstream" "$branch" -- "$file" 2>/dev/null || return 1
+  done < <(git diff --name-only --no-renames -z "$base" "$branch" 2>/dev/null)
+
+  return 0
+}
+
 DEFAULT_REF="origin/$DEFAULT_BRANCH"
 
 echo ""
@@ -90,6 +124,7 @@ echo "==> LOCAL branches"
 
 LOCAL_BRANCHES="$(git for-each-ref --format='%(refname:short)' refs/heads/)"
 MERGED_LOCAL=()
+SQUASH_MERGED_LOCAL=()
 UNMERGED_LOCAL=()
 
 while IFS= read -r branch; do
@@ -97,6 +132,8 @@ while IFS= read -r branch; do
   is_protected "$branch" || [ "$branch" = "$CURRENT_BRANCH" ] || is_worktree_branch "$branch" && continue
   if git merge-base --is-ancestor "$branch" "$DEFAULT_REF" 2>/dev/null; then
     MERGED_LOCAL+=("$branch")
+  elif is_fully_applied "$DEFAULT_REF" "$branch"; then
+    SQUASH_MERGED_LOCAL+=("$branch")
   else
     UNMERGED_LOCAL+=("$branch")
   fi
@@ -106,6 +143,14 @@ if [ "${#MERGED_LOCAL[@]}" -gt 0 ]; then
   echo ""
   echo "  Fully merged into $DEFAULT_BRANCH (safe to delete locally):"
   for b in "${MERGED_LOCAL[@]}"; do
+    echo "    - $b"
+  done
+fi
+
+if [ "${#SQUASH_MERGED_LOCAL[@]}" -gt 0 ]; then
+  echo ""
+  echo "  Squash-merged into $DEFAULT_BRANCH (patches applied; safe to force-delete):"
+  for b in "${SQUASH_MERGED_LOCAL[@]}"; do
     echo "    - $b"
   done
 fi
@@ -123,7 +168,7 @@ if [ "${#UNMERGED_LOCAL[@]}" -gt 0 ]; then
   echo "    (b) git branch -D <name> manually if the work is abandoned"
 fi
 
-if [ "${#MERGED_LOCAL[@]}" -eq 0 ] && [ "${#UNMERGED_LOCAL[@]}" -eq 0 ]; then
+if [ "${#MERGED_LOCAL[@]}" -eq 0 ] && [ "${#SQUASH_MERGED_LOCAL[@]}" -eq 0 ] && [ "${#UNMERGED_LOCAL[@]}" -eq 0 ]; then
   echo "  (nothing to clean up)"
 fi
 
@@ -132,12 +177,28 @@ REMOTE_DELETABLE=()
 REMOTE_HAS_PR=()
 REMOTE_UNIQUE_NO_PR=()
 
+REMOTE_SKIPPED=0
+
 if [ "$REMOTE_TOO" -eq 1 ]; then
   echo ""
   echo "==> REMOTE branches (--remote-too)"
 
   REMOTE_BRANCHES="$(git for-each-ref --format='%(refname:short)' refs/remotes/origin/ | sed 's@^origin/@@' | grep -v '^HEAD$' || true)"
-  OPEN_PR_BRANCHES="$(gh pr list --state open --limit 200 --json headRefName --jq '.[].headRefName' 2>/dev/null || echo "")"
+
+  # Fail closed: an errored `gh pr list` is indistinguishable from "no open
+  # PRs" if we swallow the error, and would mark every remote branch as
+  # deletable. Without a confirmed open-PR set we cannot safely classify.
+  GH_PR_ERR=""
+  if ! OPEN_PR_BRANCHES="$(gh pr list --state open --limit 200 --json headRefName --jq '.[].headRefName' 2>&1)"; then
+    GH_PR_ERR="$OPEN_PR_BRANCHES"
+    REMOTE_SKIPPED=1
+    echo ""
+    echo "  ERROR: 'gh pr list' failed — skipping remote cleanup to avoid unsafe deletion." >&2
+    echo "    $GH_PR_ERR" >&2
+  fi
+fi
+
+if [ "$REMOTE_TOO" -eq 1 ] && [ "$REMOTE_SKIPPED" -eq 0 ]; then
 
   has_open_pr() {
     local b="$1"
@@ -158,6 +219,8 @@ if [ "$REMOTE_TOO" -eq 1 ]; then
     fi
     if git merge-base --is-ancestor "origin/$remote_branch" "$DEFAULT_REF" 2>/dev/null; then
       REMOTE_DELETABLE+=("$remote_branch")
+    elif is_fully_applied "$DEFAULT_REF" "origin/$remote_branch"; then
+      REMOTE_DELETABLE+=("$remote_branch")
     else
       REMOTE_UNIQUE_NO_PR+=("$remote_branch")
     fi
@@ -165,7 +228,7 @@ if [ "$REMOTE_TOO" -eq 1 ]; then
 
   if [ "${#REMOTE_DELETABLE[@]}" -gt 0 ]; then
     echo ""
-    echo "  Fully merged + no open PR (safe to delete remotely):"
+    echo "  Fully merged or squash-merged + no open PR (safe to delete remotely):"
     for b in "${REMOTE_DELETABLE[@]}"; do
       echo "    - origin/$b"
     done
@@ -212,6 +275,19 @@ if [ "${#MERGED_LOCAL[@]}" -gt 0 ]; then
       echo "    deleted local: $b"
     else
       echo "    SKIPPED local (git refused — likely has unmerged commits): $b" >&2
+    fi
+  done
+fi
+
+if [ "${#SQUASH_MERGED_LOCAL[@]}" -gt 0 ]; then
+  # -d refuses these because squash-merge commits aren't ancestors; is_fully_applied
+  # already confirmed tree equivalence against the current default branch, so -D
+  # here won't lose work that isn't reachable another way.
+  for b in "${SQUASH_MERGED_LOCAL[@]}"; do
+    if git branch -D "$b" 2>&1; then
+      echo "    force-deleted local (squash-merged): $b"
+    else
+      echo "    SKIPPED local (force-delete failed): $b" >&2
     fi
   done
 fi
