@@ -43,7 +43,6 @@ src/sentinel/_version.py
 uv.lock
 
 # Touchstone
-.touchstone-version
 *.bak
 
 # Sentinel dogfood artifacts (the sentinel repo runs sentinel on itself
