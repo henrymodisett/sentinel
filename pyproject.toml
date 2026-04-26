@@ -24,6 +24,17 @@ sentinel = "sentinel.cli:main"
 requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
+[tool.uv]
+# Pin the dependency-resolution cutoff to a fixed date so `uv lock` /
+# `uv sync` produce a byte-identical uv.lock across machines and days.
+# Without this, the system-level UV_EXCLUDE_NEWER policy (a rolling
+# 7-day window) bakes a fresh "now - 7 days" timestamp into uv.lock's
+# [options] block on every invocation, churning a 4-line diff with no
+# actual dependency change. Bump this date deliberately when you want
+# to refresh deps — it becomes a single intentional "refresh deps" PR
+# instead of accidental noise on unrelated branches.
+exclude-newer = "2026-04-25T00:00:00Z"
+
 [tool.hatch.version]
 # Derive version from git so `uv tool install --force` always sees a
 # unique cache key — dogfood on portfolio_new (2026-04-17) showed that
