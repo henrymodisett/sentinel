@@ -225,6 +225,14 @@ run_node_action() {
       fi
       ok "no package.json '$action' script; skipped"
       ;;
+    build_if_distinct)
+      # Bundler builds (webpack/vite/esbuild/turbopack) catch errors typecheck
+      # misses. Only fire when both scripts are declared — "build: tsc" (build
+      # IS typecheck) shouldn't double-run during validate.
+      if has_package_script typecheck && has_package_script build; then
+        run_node_script build
+      fi
+      ;;
     *)
       warn "unknown Node action: $action"
       return 1
@@ -257,10 +265,21 @@ run_python_action() {
       ;;
     test)
       if python_bin="$(find_python_bin)"; then
-        run_shell_command "$python_bin -m pytest"
+        local pytest_rc=0
+        info "$python_bin -m pytest"
+        bash -c "$python_bin -m pytest" || pytest_rc=$?
+        # pytest exit 5 = no tests collected. Treat like absent linters — skip, don't fail.
+        if [ "$pytest_rc" -eq 5 ]; then
+          ok "pytest found no tests; skipped"
+        elif [ "$pytest_rc" -ne 0 ]; then
+          return "$pytest_rc"
+        fi
       else
         ok "python not found; skipped"
       fi
+      ;;
+    build_if_distinct)
+      : # no default Python build — nothing useful to add during validate
       ;;
     *)
       warn "unknown Python action: $action"
@@ -293,6 +312,9 @@ run_rust_action() {
     typecheck) run_shell_command "cargo check --all-targets --all-features" ;;
     build) run_shell_command "cargo build --all" ;;
     test) run_shell_command "cargo test --all" ;;
+    build_if_distinct)
+      : # cargo check already runs the full compiler — cargo build would repeat
+      ;;
     *)
       warn "unknown Rust action: $action"
       return 1
@@ -318,6 +340,9 @@ run_swift_action() {
       ;;
     typecheck|build) run_shell_command "swift build" ;;
     test) run_shell_command "swift test" ;;
+    build_if_distinct)
+      : # swift typecheck IS swift build — running it again would repeat
+      ;;
     *)
       warn "unknown Swift action: $action"
       return 1
@@ -337,6 +362,9 @@ run_go_action() {
     lint) run_shell_command "go vet ./..." ;;
     typecheck|build) run_shell_command "go build ./..." ;;
     test) run_shell_command "go test ./..." ;;
+    build_if_distinct)
+      : # go typecheck IS go build — running it again would repeat
+      ;;
     *)
       warn "unknown Go action: $action"
       return 1
@@ -354,6 +382,12 @@ run_profile_action() {
     swift) run_swift_action "$action" ;;
     go) run_go_action "$action" ;;
     generic|"")
+      # build_if_distinct is a validate-time extra — silently no-op for generic
+      # so "touchstone run validate" doesn't print a scary "no default command"
+      # line on every non-typed project.
+      if [ "$action" = "build_if_distinct" ]; then
+        return 0
+      fi
       ok "generic project has no default '$action' command; set ${action}_command in .touchstone-config"
       ;;
     *)
@@ -429,6 +463,11 @@ run_validate() {
 
   run_action lint
   run_action typecheck
+  # Node targets with distinct typecheck + build scripts: run the bundler too.
+  # Other profiles no-op because their typecheck already runs the compiler.
+  # Distinctness is per-target, so this flows through run_targets_action just
+  # like every other action — no special-casing for monorepo vs single-package.
+  run_action build_if_distinct
   run_action test
 }
 

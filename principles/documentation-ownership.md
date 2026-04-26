@@ -12,4 +12,6 @@ Every volatile fact in the project's documentation must have exactly one canonic
 
 4. **Config examples live in example files, not prose.** A `config.example.json` or `.env.example` is the canonical source of config shape. Documentation should point to the example file, not duplicate large config blocks that go stale.
 
-5. **When in doubt, delete the duplicate.** If you find the same fact in two places and can't easily determine which is canonical, delete the less-authoritative copy and add a link to the other. One correct source is better than two potentially-wrong sources.
+5. **Identify the owner, then link — don't delete first.** If you find the same fact in two places, decide which file owns it, then replace the less-authoritative copy with a link to the owner. Only delete outright when the duplicated context adds no value that a link wouldn't serve. Deletion before ownership is established can lose useful framing that belongs in the canonical doc.
+
+6. **Duplication found mid-PR gets a follow-up, not silence.** If you notice duplicated documentation while working on an unrelated change, don't bury the finding. File a follow-up issue or note the duplication in the PR description so it gets resolved instead of rediscovered.
