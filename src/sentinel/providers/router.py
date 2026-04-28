@@ -15,10 +15,15 @@ overrides and delegate selection to Conductor.
 
 from __future__ import annotations
 
+import json
+import os
+import shutil
+import subprocess
 from dataclasses import dataclass
-from typing import Literal
+from types import SimpleNamespace
+from typing import Literal, cast
 
-from rich.console import Console
+from rich.console import Console  # type: ignore[import-not-found]
 
 from sentinel.config.schema import RoleName, SentinelConfig
 from sentinel.providers.conductor_adapter import ConductorAdapter
@@ -33,6 +38,17 @@ _console = Console()
 TaskIntent = Literal["quick", "research", "plan", "code", "review", "chat"]
 
 _AGENTIC_TOOLS = frozenset({"Read", "Grep", "Glob", "Edit", "Write", "Bash"})
+
+
+class NoConfiguredProviderError(RuntimeError):
+    """Raised when no Conductor CLI provider satisfies an intent."""
+
+
+NoConfiguredProvider = NoConfiguredProviderError
+
+
+def _env_flag_enabled(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 @dataclass(frozen=True)
@@ -100,16 +116,54 @@ def _conductor_pick(
     *,
     exclude: frozenset[str] = frozenset(),
 ):
-    from conductor.router import pick
-
-    return pick(
-        list(spec.tags),
-        prefer=spec.prefer,
-        effort=spec.effort,
-        tools=spec.tools,
-        sandbox=spec.sandbox,
-        exclude=exclude,
+    conductor_path = shutil.which("conductor")
+    if conductor_path is None:
+        raise NoConfiguredProvider(
+            "Conductor CLI not found on PATH. Install it with "
+            "`brew install autumngarage/conductor/conductor`."
+        )
+    result = subprocess.run(
+        [conductor_path, "list", "--json"],
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
+    if result.returncode != 0:
+        raise NoConfiguredProvider(result.stderr or "conductor list failed")
+    try:
+        providers = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise NoConfiguredProvider("conductor list emitted malformed JSON") from exc
+
+    required_tags = set(spec.tags)
+    excluded = set(exclude)
+    for item in providers:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("provider") or "")
+        tags = set(item.get("tags") or [])
+        if not item.get("configured"):
+            continue
+        if name in excluded:
+            continue
+        if required_tags and not required_tags <= tags:
+            continue
+        provider = SimpleNamespace(
+            name=name,
+            default_model=item.get("default_model") or "",
+            tags=list(tags),
+            supported_tools=_AGENTIC_TOOLS if "tool-use" in tags else frozenset(),
+            supported_sandboxes=frozenset({"none", "read-only", "workspace-write"}),
+            supports_effort="thinking" in tags or "strong-reasoning" in tags,
+        )
+        decision = SimpleNamespace(
+            provider=name,
+            prefer=spec.prefer,
+            effort=spec.effort,
+            sandbox=spec.sandbox,
+        )
+        return provider, decision
+    raise NoConfiguredProvider("No configured provider matched the requested intent")
 
 
 @dataclass(frozen=True)
@@ -117,6 +171,7 @@ class RoutingRule:
     """A static routing rule. Matches certain (role, task, prompt_size,
     configured_provider) contexts and overrides the model. Encoded as
     data so additions don't require new code paths."""
+
     name: str
     task: str | None  # None = match any task
     role: RoleName | None  # None = match any role
@@ -139,8 +194,7 @@ class RoutingRule:
         if prompt_size < self.min_prompt_size:
             return False
         return not (
-            self.only_for_provider is not None
-            and self.only_for_provider != configured_provider
+            self.only_for_provider is not None and self.only_for_provider != configured_provider
         )
 
 
@@ -209,7 +263,9 @@ class Router:
         }
         for role_name, role_config in roles.items():
             provider = self._materialize(
-                role_config.provider.value, role_config.model, role=role_name,
+                role_config.provider.value,
+                role_config.model,
+                role=role_name,
             )
             self._role_map[role_name] = provider
 
@@ -258,6 +314,13 @@ class Router:
         role: RoleName,
         exclude_providers: frozenset[str] = frozenset(),
     ) -> Provider:
+        if not _env_flag_enabled("SENTINEL_USE_CONDUCTOR"):
+            return self._materialize(
+                self._config.roles.__getattribute__(role.value).provider.value,
+                self._config.roles.__getattribute__(role.value).model,
+                role=role,
+            )
+
         spec = INTENT_SPECS[intent]
         timeout_sec = (
             self._config.coder.timeout_seconds
@@ -272,10 +335,8 @@ class Router:
             # blocker. If every alternative is unavailable, retry without
             # the exclude set so the review can still run and surface its
             # reduced independence through provider comparison.
-            if (
-                exc.__class__.__name__ != "NoConfiguredProvider"
-                or intent != "review"
-                or not exclude_providers
+            if not (
+                isinstance(exc, NoConfiguredProvider) and intent == "review" and exclude_providers
             ):
                 raise
             provider, decision = _conductor_pick(spec)
@@ -327,13 +388,13 @@ class Router:
         configured_provider = str(configured.name)
         for rule in self._rules:
             if rule.matches(role, task, prompt_size, configured_provider):
-                if rule.override_model == configured.model:
+                if rule.override_model == getattr(configured, "model", ""):
                     # Rule matches but the configured model is already
                     # the chosen one — no override, no log line.
                     return configured
                 _console.print(
                     f"[dim][router] {str(role)}/{task or '(no task)'}: "
-                    f"{configured.model} → {rule.override_model} "
+                    f"{getattr(configured, 'model', '')} → {rule.override_model} "
                     f"({rule.name})[/dim]"
                 )
                 # Record the override on the next provider call so the
@@ -341,23 +402,26 @@ class Router:
                 # the rule's static reason in the source, the override
                 # is fully traceable from the journal alone.
                 from sentinel.journal import set_pending_routing_reason
+
                 set_pending_routing_reason(rule.name)
                 return self._materialize(configured_provider, rule.override_model)
 
         return configured
 
     async def chat(self, role: RoleName, prompt: str) -> ChatResponse:
-        intent = "plan" if role == RoleName.PLANNER else "chat"
+        intent = cast("TaskIntent", "plan" if role == RoleName.PLANNER else "chat")
         return await self.get_provider(role, intent=intent).chat(prompt)
 
     async def research(self, prompt: str) -> ChatResponse:
         return await self.get_provider(
-            RoleName.RESEARCHER, intent="research",
+            RoleName.RESEARCHER,
+            intent="research",
         ).research(prompt)
 
     async def code(self, prompt: str, working_directory: str = ".") -> ChatResponse:
         return await self.get_provider(
-            RoleName.CODER, intent="code",
+            RoleName.CODER,
+            intent="code",
         ).code(prompt, working_directory)
 
     @staticmethod
@@ -365,16 +429,20 @@ class Router:
         """Detect provider readiness via the Conductor-backed adapter."""
         return {
             "claude": ConductorAdapter(
-                provider_name="claude", model="claude-sonnet-4-6",
+                provider_name="claude",
+                model="claude-sonnet-4-6",
             ).detect(),
             "codex": ConductorAdapter(
-                provider_name="openai", model="gpt-5.4",
+                provider_name="openai",
+                model="gpt-5.4",
             ).detect(),
             "gemini": ConductorAdapter(
-                provider_name="gemini", model="gemini-2.5-pro",
+                provider_name="gemini",
+                model="gemini-2.5-pro",
             ).detect(),
             "ollama": ConductorAdapter(
-                provider_name="local", model="qwen2.5-coder:14b",
+                provider_name="local",
+                model="qwen2.5-coder:14b",
             ).detect(),
         }
 

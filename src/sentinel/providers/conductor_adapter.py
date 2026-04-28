@@ -1,24 +1,20 @@
-"""Conductor-backed provider adapter.
+"""Conductor subprocess provider adapter.
 
 Sentinel keeps its own Provider ABC because roles and journals depend on
-that small surface. This adapter is the only concrete implementation: it
-translates Sentinel's stable config names to Conductor's provider IDs, calls
-Conductor, then maps the normalized response back to ChatResponse.
+that small surface. This adapter satisfies that contract by invoking the
+`conductor` CLI per call and mapping Conductor's JSON response back to
+ChatResponse.
 """
 
 from __future__ import annotations
 
 import asyncio
-import importlib
-import inspect
 import json
 import shutil
 import subprocess
 import time
 from dataclasses import replace
 from typing import Any, Literal
-
-import httpx
 
 from sentinel.providers.interface import (
     ChatResponse,
@@ -51,20 +47,12 @@ _SENTINEL_ENUM: dict[str, ProviderName] = {
     "kimi": ProviderName.KIMI,
 }
 
-_CLI_COMMAND: dict[str, str | None] = {
-    "claude": "claude",
-    "openai": "codex",
-    "gemini": "gemini",
-    "local": "ollama",
-    "kimi": None,
-}
-
 _MODEL_LISTS: dict[str, list[str]] = {
     "claude": ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"],
     "openai": ["gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "o4-mini"],
     "gemini": ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"],
     "local": [],
-    "kimi": ["@cf/moonshotai/kimi-k2.6"],
+    "kimi": ["moonshotai/kimi-k2.6", "@cf/moonshotai/kimi-k2.6"],
 }
 
 _INSTALL_HINTS: dict[str, str] = {
@@ -80,82 +68,18 @@ _AUTH_HINTS: dict[str, str] = {
     "openai": "codex login",
     "gemini": "gemini (authenticates via browser on first run)",
     "local": "ollama serve && ollama pull qwen2.5-coder:14b",
-    "kimi": "set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID via conductor init",
-}
-
-_CONDUCTOR_CLASS_NAMES: dict[str, str] = {
-    "claude": "ClaudeProvider",
-    "codex": "CodexProvider",
-    "gemini": "GeminiProvider",
-    "ollama": "OllamaProvider",
-    "kimi": "KimiProvider",
+    "kimi": "set OPENROUTER_API_KEY via conductor init",
 }
 
 _AGENTIC_TOOLS = frozenset({"Read", "Grep", "Glob", "Edit", "Write", "Bash"})
 
 
-def _get_conductor_provider(
-    conductor_name: str,
-    *,
-    timeout_sec: int,
-    ollama_endpoint: str | None,
-) -> Any:
-    """Instantiate a Conductor provider with Sentinel's per-role settings."""
-    providers = importlib.import_module("conductor.providers")
-    cls = getattr(providers, _CONDUCTOR_CLASS_NAMES.get(conductor_name, ""), None)
-    if cls is not None:
-        kwargs: dict[str, Any] = {"timeout_sec": timeout_sec}
-        if conductor_name == "ollama" and ollama_endpoint:
-            kwargs["base_url"] = ollama_endpoint
-        try:
-            return cls(**kwargs)
-        except TypeError:
-            # Older Conductor releases accepted fewer constructor kwargs.
-            # Fall back to the registry path rather than failing detection.
-            pass
-    return providers.get_provider(conductor_name)
+class ProviderError(RuntimeError):
+    """Raised when Conductor exits non-zero or emits an invalid response."""
 
-
-def _accepts_keyword(callable_obj: Any, keyword: str) -> bool:
-    try:
-        signature = inspect.signature(callable_obj)
-    except (TypeError, ValueError):
-        return False
-    for parameter in signature.parameters.values():
-        if parameter.kind == inspect.Parameter.VAR_KEYWORD:
-            return True
-    return keyword in signature.parameters
-
-
-def _as_int(value: Any) -> int:
-    if value is None:
-        return 0
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return 0
-
-
-def _as_float(value: Any) -> float:
-    if value is None:
-        return 0.0
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _raw_streams(raw: Any) -> tuple[str, str]:
-    """Extract stderr/stdout-ish diagnostics from Conductor raw payloads."""
-    if not raw:
-        return "", ""
-    if isinstance(raw, dict):
-        stderr = str(raw.get("stderr") or "")
-        stdout = raw.get("stdout")
-        if stdout is None and raw:
-            stdout = json.dumps(raw, separators=(",", ":"), sort_keys=True)
-        return stderr, str(stdout or "")
-    return "", str(raw)
+    def __init__(self, message: str, *, response: ChatResponse | None = None) -> None:
+        super().__init__(message)
+        self.response = response
 
 
 def _schema_type_matches(value: Any, expected: str) -> bool:
@@ -198,21 +122,39 @@ def _validate_schema_basic(value: Any, schema: dict, path: str = "$") -> None:
                 _validate_schema_basic(value[key], child_schema, f"{path}.{key}")
 
     if isinstance(value, list) and isinstance(schema.get("items"), dict):
-        child_schema = schema["items"]
         for index, item in enumerate(value):
-            _validate_schema_basic(item, child_schema, f"{path}[{index}]")
+            _validate_schema_basic(item, schema["items"], f"{path}[{index}]")
 
 
 def _validate_json_schema(value: Any, schema: dict) -> None:
     try:
-        from jsonschema import validate
+        from jsonschema import validate  # type: ignore[import-untyped]
+
         validate(instance=value, schema=schema)
     except ModuleNotFoundError:
         _validate_schema_basic(value, schema)
 
 
+def _as_int(value: Any) -> int:
+    if value is None:
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _as_float(value: Any) -> float:
+    if value is None:
+        return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 class ConductorAdapter(Provider):
-    """Sentinel Provider implementation backed by Conductor."""
+    """Sentinel Provider implementation backed by the Conductor CLI."""
 
     capabilities = ProviderCapabilities()
 
@@ -225,22 +167,28 @@ class ConductorAdapter(Provider):
         max_turns: int = 40,
         ollama_endpoint: str | None = None,
         effort: str | int = "medium",
-        conductor_client: Any | None = None,
         routing_reason: str = "",
     ) -> None:
         if provider_name not in _SENTINEL_TO_CONDUCTOR:
             raise ValueError(f"Unknown provider: {provider_name}")
+        conductor_path = shutil.which("conductor")
+        if conductor_path is None:
+            raise RuntimeError(
+                "Conductor CLI not found on PATH. Install it with "
+                "`brew install autumngarage/conductor/conductor`."
+            )
+
         self.provider_name = provider_name
         self.conductor_name = _SENTINEL_TO_CONDUCTOR[provider_name]
         self.name = _SENTINEL_ENUM[provider_name]
-        self.cli_command = _CLI_COMMAND[provider_name] or "conductor"
+        self.cli_command = "conductor"
         self.model = model
         self.timeout_sec = timeout_sec
         self.max_turns = max_turns
         self.ollama_endpoint = ollama_endpoint
         self.effort = effort
         self.routing_reason = routing_reason
-        self._client: Any | None = conductor_client
+        self.conductor_path = conductor_path
         self.capabilities = self._capabilities_from_provider()
 
     @classmethod
@@ -266,96 +214,124 @@ class ConductorAdapter(Provider):
             max_turns=max_turns,
             ollama_endpoint=ollama_endpoint,
             effort=effort,
-            conductor_client=conductor_provider,
             routing_reason=routing_reason,
         )
 
-    def _conductor_provider(self) -> Any:
-        if self._client is None:
-            self._client = _get_conductor_provider(
-                self.conductor_name,
-                timeout_sec=self.timeout_sec,
-                ollama_endpoint=self.ollama_endpoint,
-            )
-        return self._client
-
     def _capabilities_from_provider(self) -> ProviderCapabilities:
-        try:
-            client = self._conductor_provider()
-        except Exception:
-            client = None
-
-        tools = getattr(client, "supported_tools", frozenset()) if client else frozenset()
-        sandboxes = getattr(client, "supported_sandboxes", frozenset()) if client else frozenset()
-        tags = set(getattr(client, "tags", [])) if client else set()
-
-        agentic_code = (
-            (
-                bool(_AGENTIC_TOOLS & set(tools))
-                and "workspace-write" in set(sandboxes)
-            )
-            if client is not None
-            else self.provider_name in {"claude", "openai", "gemini", "local", "kimi"}
-        )
-        web_search = (
-            self.provider_name in {"claude", "openai", "gemini"}
-            or "web-search" in tags
-        )
-        long_context = self.provider_name in {"claude", "gemini", "kimi"}
-        thinking = bool(getattr(client, "supports_effort", False)) if client else (
-            self.provider_name in {"claude", "openai", "gemini", "kimi"}
-        )
         return ProviderCapabilities(
             chat=True,
-            web_search=web_search,
-            agentic_code=agentic_code,
-            long_context=long_context,
-            thinking=thinking,
+            web_search=self.provider_name in {"claude", "openai", "gemini"},
+            agentic_code=True,
+            long_context=self.provider_name in {"claude", "gemini", "kimi"},
+            thinking=self.provider_name in {"claude", "openai", "gemini", "kimi"},
         )
 
-    def _map_response(self, response: Any) -> ChatResponse:
-        usage = getattr(response, "usage", {}) or {}
-        raw = getattr(response, "raw", {}) or {}
-        stderr, raw_stdout = _raw_streams(raw)
+    def _run(
+        self,
+        args: list[str],
+        *,
+        prompt: str | None = None,
+        timeout: int,
+    ) -> subprocess.CompletedProcess[str]:
+        try:
+            return subprocess.run(
+                args,
+                input=prompt,
+                capture_output=True,
+                timeout=timeout,
+                text=True,
+            )
+        except subprocess.TimeoutExpired as exc:
+            response = ChatResponse(
+                content=f"Error: conductor timed out after {timeout}s",
+                model=self.model,
+                provider=self.name,
+                stderr=str(exc),
+                is_error=True,
+            )
+            raise ProviderError(str(exc), response=response) from exc
+        except OSError as exc:
+            response = ChatResponse(
+                content=f"Error: {exc}",
+                model=self.model,
+                provider=self.name,
+                stderr=str(exc),
+                is_error=True,
+            )
+            raise ProviderError(str(exc), response=response) from exc
+
+    def _parse_stdout(self, stdout: str) -> dict[str, Any]:
+        parsed = parse_json_safe(stdout)
+        if not isinstance(parsed, dict):
+            raise ProviderError("Conductor emitted malformed JSON.")
+        return parsed
+
+    def _response_from_payload(
+        self,
+        payload: dict[str, Any],
+        *,
+        stderr: str,
+        raw_stdout: str,
+        is_error: bool = False,
+    ) -> ChatResponse:
+        text = payload.get("text", payload.get("content"))
+        if text is None:
+            raise ProviderError("Conductor JSON response is missing required field `text`.")
+
+        usage = payload.get("usage") or {}
+        if not isinstance(usage, dict):
+            usage = {}
         return ChatResponse(
-            content=getattr(response, "text", "") or "",
-            model=getattr(response, "model", None) or self.model,
+            content=str(text),
+            model=str(payload.get("model") or self.model),
             provider=self.name,
             input_tokens=_as_int(usage.get("input_tokens")),
             output_tokens=_as_int(usage.get("output_tokens")),
-            cost_usd=_as_float(getattr(response, "cost_usd", None)),
-            duration_ms=_as_int(getattr(response, "duration_ms", 0)),
-            session_id=getattr(response, "session_id", None),
+            cost_usd=_as_float(payload.get("cost_usd")),
+            duration_ms=_as_int(payload.get("duration_ms")),
+            session_id=payload.get("session_id"),
             stderr=stderr,
             raw_stdout=raw_stdout,
+            is_error=is_error or bool(payload.get("is_error", False)),
         )
 
-    def _error_response(
+    def _partial_error_response(
         self,
-        exc: Exception,
+        stdout: str,
         *,
-        started_at: float,
-    ) -> tuple[ChatResponse, str]:
-        elapsed_ms = int((time.perf_counter() - started_at) * 1000)
-        error_name = exc.__class__.__name__
-        label = {
-            "ProviderConfigError": "provider config error",
-            "ProviderHTTPError": "provider error",
-            "UnsupportedCapability": "unsupported capability",
-            "ProviderError": "provider error",
-            "TimeoutError": "timeout",
-        }.get(error_name, "provider error")
-        detail = str(exc) or error_name
-        return (
-            ChatResponse(
-                content=f"Error: {detail}",
+        stderr: str,
+    ) -> ChatResponse:
+        try:
+            payload = self._parse_stdout(stdout)
+            return self._response_from_payload(
+                payload,
+                stderr=stderr,
+                raw_stdout=stdout,
+                is_error=True,
+            )
+        except ProviderError:
+            return ChatResponse(
+                content=f"Error: {stderr or 'conductor failed'}",
                 model=self.model,
                 provider=self.name,
-                duration_ms=elapsed_ms,
-                stderr=detail,
+                stderr=stderr,
+                raw_stdout=stdout,
                 is_error=True,
-            ),
-            label,
+            )
+
+    def _map_completed_process(self, result: subprocess.CompletedProcess[str]) -> ChatResponse:
+        if result.returncode != 0:
+            response = self._partial_error_response(result.stdout, stderr=result.stderr)
+            raise ProviderError(
+                result.stderr or f"conductor exited {result.returncode}",
+                response=response,
+            )
+        payload = self._parse_stdout(result.stdout)
+        return self._response_from_payload(
+            payload,
+            stderr=result.stderr,
+            raw_stdout=result.stdout,
+            is_error=False,
         )
 
     async def chat(
@@ -363,27 +339,43 @@ class ConductorAdapter(Provider):
         prompt: str,
         system_prompt: str | None = None,
     ) -> ChatResponse:
-        if (resp := self._abort_if_budget_exhausted()):
+        if resp := self._abort_if_budget_exhausted():
             return resp
 
         full_prompt = prompt if not system_prompt else f"{system_prompt}\n\n{prompt}"
         started = time.perf_counter()
+        args = [
+            self.conductor_path,
+            "call",
+            "--with",
+            self.conductor_name,
+            "--model",
+            self.model,
+            "--effort",
+            str(self.effort),
+            "--json",
+            "--silent-route",
+        ]
         try:
-            client = self._conductor_provider()
-            response = await asyncio.to_thread(
-                client.call,
-                full_prompt,
-                self.model,
-                effort=self.effort,
-                resume_session_id=None,
+            result = await asyncio.to_thread(
+                self._run,
+                args,
+                prompt=full_prompt,
+                timeout=self.timeout_sec,
             )
-            mapped = self._map_response(response)
-            self._journal_call(started, mapped)
-            return mapped
-        except Exception as exc:
-            mapped, label = self._error_response(exc, started_at=started)
-            self._journal_call(started, mapped, error=label)
-            return mapped
+            response = self._map_completed_process(result)
+            self._journal_call(started, response)
+            return response
+        except ProviderError as exc:
+            response = exc.response or ChatResponse(
+                content=f"Error: {exc}",
+                model=self.model,
+                provider=self.name,
+                stderr=str(exc),
+                is_error=True,
+            )
+            self._journal_call(started, response, error="provider error")
+            raise
 
     async def chat_json(
         self,
@@ -400,18 +392,12 @@ class ConductorAdapter(Provider):
             f"Schema:\n{schema_str}"
         )
         response = await self.chat(strict_prompt, system_prompt)
-        if response.is_error:
-            return None, response
-
         parsed = parse_json_safe(response.content)
         if parsed is None:
             return None, replace(
                 response,
                 is_error=True,
-                stderr=(
-                    response.stderr
-                    or "Conductor response was not valid JSON for chat_json"
-                ),
+                stderr=(response.stderr or "Conductor response was not valid JSON for chat_json"),
             )
 
         try:
@@ -420,10 +406,7 @@ class ConductorAdapter(Provider):
             return None, replace(
                 response,
                 is_error=True,
-                stderr=(
-                    f"{response.stderr}\n{exc}".strip()
-                    if response.stderr else str(exc)
-                ),
+                stderr=(f"{response.stderr}\n{exc}".strip() if response.stderr else str(exc)),
             )
         return parsed, response
 
@@ -435,35 +418,51 @@ class ConductorAdapter(Provider):
         prompt: str,
         working_directory: str = ".",
     ) -> ChatResponse:
-        if (resp := self._abort_if_budget_exhausted()):
+        if resp := self._abort_if_budget_exhausted():
             return resp
 
         started = time.perf_counter()
+        timeout = self.timeout_sec + 30
+        args = [
+            self.conductor_path,
+            "exec",
+            "--with",
+            self.conductor_name,
+            "--model",
+            self.model,
+            "--effort",
+            str(self.effort),
+            "--tools",
+            ",".join(sorted(_AGENTIC_TOOLS)),
+            "--sandbox",
+            "workspace-write",
+            "--cwd",
+            working_directory,
+            "--timeout",
+            str(self.timeout_sec),
+            "--json",
+            "--silent-route",
+        ]
         try:
-            client = self._conductor_provider()
-            kwargs: dict[str, Any] = {
-                "effort": self.effort,
-                "tools": _AGENTIC_TOOLS,
-                "sandbox": "workspace-write",
-                "cwd": working_directory,
-                "timeout_sec": self.timeout_sec,
-                "resume_session_id": None,
-            }
-            if _accepts_keyword(client.exec, "max_turns"):
-                kwargs["max_turns"] = self.max_turns
-            response = await asyncio.to_thread(
-                client.exec,
-                prompt,
-                self.model,
-                **kwargs,
+            result = await asyncio.to_thread(
+                self._run,
+                args,
+                prompt=prompt,
+                timeout=timeout,
             )
-            mapped = self._map_response(response)
-            self._journal_call(started, mapped)
-            return mapped
-        except Exception as exc:
-            mapped, label = self._error_response(exc, started_at=started)
-            self._journal_call(started, mapped, error=label)
-            return mapped
+            response = self._map_completed_process(result)
+            self._journal_call(started, response)
+            return response
+        except ProviderError as exc:
+            response = exc.response or ChatResponse(
+                content=f"Error: {exc}",
+                model=self.model,
+                provider=self.name,
+                stderr=str(exc),
+                is_error=True,
+            )
+            self._journal_call(started, response, error="provider error")
+            raise
 
     def _journal_call(
         self,
@@ -473,100 +472,69 @@ class ConductorAdapter(Provider):
     ) -> None:
         if self.routing_reason:
             from sentinel.journal import current_journal, set_pending_routing_reason
+
             if current_journal() is not None:
                 set_pending_routing_reason(self.routing_reason)
         super()._journal_call(started_at, response, error=error)
 
-    def _detect_local(self) -> ProviderStatus:
-        path = shutil.which("ollama")
-        if not path:
+    def detect(self) -> ProviderStatus:
+        try:
+            result = self._run(
+                [self.conductor_path, "list", "--json"],
+                timeout=30,
+            )
+        except ProviderError as exc:
             return ProviderStatus(
-                installed=False,
-                install_hint=_INSTALL_HINTS["local"],
-                auth_hint=_AUTH_HINTS["local"],
+                installed=True,
+                authenticated=False,
+                install_hint=_INSTALL_HINTS[self.provider_name],
+                auth_hint=str(exc),
             )
 
-        endpoint = (self.ollama_endpoint or "http://localhost:11434").rstrip("/")
-        try:
-            resp = httpx.get(f"{endpoint}/api/tags", timeout=5)
-            if resp.status_code == 200:
-                data = resp.json()
-                models = [m["name"] for m in data.get("models", []) if "name" in m]
-                return ProviderStatus(
-                    installed=True,
-                    authenticated=True,
-                    models=models,
-                    install_hint=_INSTALL_HINTS["local"],
-                    auth_hint=_AUTH_HINTS["local"],
-                )
-        except (httpx.HTTPError, ValueError):
-            pass
+        if result.returncode != 0:
+            return ProviderStatus(
+                installed=True,
+                authenticated=False,
+                install_hint=_INSTALL_HINTS[self.provider_name],
+                auth_hint=result.stderr or f"conductor list exited {result.returncode}",
+            )
 
+        parsed = parse_json_safe(result.stdout)
+        if not isinstance(parsed, list):
+            return ProviderStatus(
+                installed=True,
+                authenticated=False,
+                install_hint=_INSTALL_HINTS[self.provider_name],
+                auth_hint="conductor list --json emitted malformed JSON",
+            )
+
+        provider_data = next(
+            (
+                item
+                for item in parsed
+                if isinstance(item, dict) and item.get("provider") == self.conductor_name
+            ),
+            None,
+        )
+        if provider_data is None:
+            return ProviderStatus(
+                installed=True,
+                authenticated=False,
+                models=_MODEL_LISTS[self.provider_name],
+                install_hint=_INSTALL_HINTS[self.provider_name],
+                auth_hint=f"conductor did not list provider {self.conductor_name}",
+            )
+
+        default_model = provider_data.get("default_model")
+        models = list(_MODEL_LISTS[self.provider_name])
+        if isinstance(default_model, str) and default_model and default_model not in models:
+            models.append(default_model)
+        reason = provider_data.get("reason")
+        fix_command = provider_data.get("fix_command")
         return ProviderStatus(
             installed=True,
-            authenticated=False,
-            install_hint=_INSTALL_HINTS["local"],
-            auth_hint=_AUTH_HINTS["local"],
-        )
-
-    def _detect_cli_fallback(self) -> ProviderStatus:
-        command = _CLI_COMMAND[self.provider_name]
-        if command is None:
-            return ProviderStatus(
-                installed=False,
-                install_hint=_INSTALL_HINTS[self.provider_name],
-                auth_hint=_AUTH_HINTS[self.provider_name],
-            )
-        path = shutil.which(command)
-        installed = path is not None
-        version = None
-        if installed:
-            try:
-                result = subprocess.run(
-                    [command, "--version"],
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                )
-                if result.returncode == 0:
-                    version = (result.stdout or result.stderr).strip() or None
-            except (OSError, subprocess.TimeoutExpired):
-                installed = False
-        return ProviderStatus(
-            installed=installed,
-            authenticated=installed,
-            version=version,
-            models=_MODEL_LISTS[self.provider_name],
-            install_hint=_INSTALL_HINTS[self.provider_name],
-            auth_hint=_AUTH_HINTS[self.provider_name],
-        )
-
-    def detect(self) -> ProviderStatus:
-        if self.provider_name == "local":
-            return self._detect_local()
-
-        try:
-            client = self._conductor_provider()
-        except ModuleNotFoundError:
-            return self._detect_cli_fallback()
-        except Exception:
-            return self._detect_cli_fallback()
-
-        try:
-            configured, reason = client.configured()
-        except Exception as exc:
-            configured = False
-            reason = str(exc)
-
-        if self.provider_name == "kimi":
-            installed = True
-        else:
-            installed = shutil.which(self.cli_command) is not None
-
-        return ProviderStatus(
-            installed=installed,
-            authenticated=bool(configured),
-            models=_MODEL_LISTS[self.provider_name],
-            install_hint=_INSTALL_HINTS[self.provider_name],
-            auth_hint=reason or _AUTH_HINTS[self.provider_name],
+            authenticated=bool(provider_data.get("configured")),
+            models=models,
+            install_hint=str(fix_command or _INSTALL_HINTS[self.provider_name]),
+            auth_hint=str(reason or _AUTH_HINTS[self.provider_name]),
         )
