@@ -21,6 +21,16 @@ Cites:
 >
 > **Where this plan lives.** This is Sentinel's product plan. Per autumn-garage's meta-repo doctrine, even cross-cutting work plans live in the primary owner's repo — Sentinel here. Cross-cutting decisions journaled in autumn-garage's `.cortex/journal/`. Cross-cutting principles live in autumn-garage doctrine. Per-tool implementation work for the three peer tools is tracked as GitHub issues against their repos.
 
+> **Staleness check — read this first.** Plans go stale; this one's claims must be verified against current state before being acted on. **Whenever you load this plan, check:**
+>
+> 1. **Tool versions.** Run `touchstone version`, `cortex version`, `sentinel version`, `conductor --version`. Compare to claims here. Brew tap vs source can diverge — version skew has bitten us (cortex 0.3.0 brew vs 0.5.0 source surfaced 2026-04-28).
+> 2. **Issue status.** Walk the cited GitHub issues (sentinel#89/#90, cortex#60/#61, conductor#93, touchstone#86/#87, plus any later additions). Closed → that slice landed; superseded → updated approach exists; still open → assumptions here still hold for that slice.
+> 3. **State files.** Read each tool's `.cortex/state.md` (when present) and recent journal entries. Tool state is the ground truth, not this plan.
+> 4. **Doctrine in autumn-garage.** Doctrine entries numbered after 0006 that touch the cross-cutting decisions below supersede those decisions. The plan doesn't auto-update; doctrine does.
+> 5. **Cross-cutting decisions specifically.** Decisions on default Doctrine location, brew packaging, cycle artifact schema, and subprocess seam are timestamped 2026-04-28. If you're more than ~3 months past that date and they haven't been re-confirmed in the journal, treat them as suspect until verified.
+>
+> If you find drift, update this plan or supersede the affected section before continuing — don't paper over it.
+
 ## Why now
 
 Conversation 2026-04-28 surfaced three findings that reshape Sentinel's product story:
