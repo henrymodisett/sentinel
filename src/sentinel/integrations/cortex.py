@@ -35,6 +35,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
+import subprocess
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -48,6 +50,129 @@ logger = logging.getLogger(__name__)
 # multi-megabyte cortex journal entry. The full data lives in
 # ``.sentinel/runs/<timestamp>.md``; the cortex entry is the summary.
 _RUN_JOURNAL_EXCERPT_CHARS = 800
+
+_missing_cortex_warned = False  # emit the missing-binary warning at most once
+
+
+# ---------- Doctrine seeding ----------
+
+
+def _find_defaults_doctrine_path() -> Path | None:
+    """Locate the bundled Sentinel baseline Doctrine pack.
+
+    Checks source-checkout layout first (``<repo>/defaults/doctrine``),
+    then the Homebrew libexec layout (``/opt/homebrew/opt/sentinel/
+    libexec/defaults/doctrine``). Returns ``None`` when neither exists
+    so the caller can degrade gracefully without raising.
+    """
+    source_root = Path(__file__).parents[3]
+    candidate = source_root / "defaults" / "doctrine"
+    if candidate.is_dir():
+        return candidate
+    brew_root = Path("/opt/homebrew/opt/sentinel/libexec")
+    if brew_root.exists():
+        candidate = brew_root / "defaults" / "doctrine"
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
+@dataclass(frozen=True)
+class SeedResult:
+    """Outcome of a ``seed_default_doctrine`` call.
+
+    ``status`` is one of ``"ok"`` (subprocess exited 0) or
+    ``"failed"`` (non-zero exit, logged). ``seeded`` and ``skipped``
+    are best-effort counts derived from the defaults pack size; they
+    are not parsed from cortex stdout because cortex's output format
+    is not part of its public contract.
+    """
+
+    status: str
+    seeded: int = 0
+    skipped: int = 0
+
+
+def seed_default_doctrine(
+    project_dir: Path,
+    *,
+    merge: str | None = None,
+    timeout_sec: int = 30,
+) -> SeedResult | None:
+    """Invoke ``cortex init --seed-from <packaged-defaults-doctrine>``
+    into *project_dir*'s ``.cortex/doctrine/``.
+
+    Returns a :class:`SeedResult` on success, ``None`` when:
+
+    - ``cortex`` is not on ``$PATH`` (warning logged once)
+    - the packaged defaults directory cannot be located
+    - the subprocess returns non-zero (stderr logged as warning)
+    - the subprocess times out (warning logged)
+
+    Callers must treat ``None`` as "seeding unavailable / skipped" and
+    continue — init's value is not gated on Doctrine seeding.
+    """
+    global _missing_cortex_warned  # noqa: PLW0603
+
+    cortex_bin = shutil.which("cortex")
+    if cortex_bin is None:
+        if not _missing_cortex_warned:
+            logger.warning(
+                "cortex binary not found on $PATH — skipping default "
+                "Doctrine seeding. Install cortex (brew install "
+                "autumngarage/sentinel/cortex) to enable.",
+            )
+            _missing_cortex_warned = True
+        return None
+
+    defaults_path = _find_defaults_doctrine_path()
+    if defaults_path is None:
+        logger.warning(
+            "Sentinel defaults/doctrine pack not found — skipping "
+            "Doctrine seeding. This is unexpected in a normal install.",
+        )
+        return None
+
+    merge_flag = merge if merge is not None else "skip-existing"
+    cmd = [
+        cortex_bin, "init",
+        "--seed-from", str(defaults_path),
+        "--merge", merge_flag,
+        "--path", str(project_dir),
+        "--yes",
+        "--no-add-imports-claude",
+        "--no-add-imports-agents",
+    ]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_sec,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "cortex init --seed-from timed out after %ss — "
+            "skipping Doctrine seeding.",
+            timeout_sec,
+        )
+        return None
+    except OSError as exc:
+        logger.warning("cortex init --seed-from failed to launch: %s", exc)
+        return None
+
+    if result.returncode != 0:
+        logger.warning(
+            "cortex init --seed-from exited %d — skipping Doctrine "
+            "seeding. stderr: %s",
+            result.returncode,
+            result.stderr.strip() or "(empty)",
+        )
+        return None
+
+    pack_size = len(list(defaults_path.glob("*.md")))
+    return SeedResult(status="ok", seeded=pack_size, skipped=0)
 
 
 @dataclass(frozen=True)
