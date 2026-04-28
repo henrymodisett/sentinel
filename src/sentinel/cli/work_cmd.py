@@ -28,7 +28,7 @@ import click
 from rich.console import Console
 from rich.panel import Panel
 
-from sentinel.budget import check_budget, record_spend
+from sentinel.budget import check_budget, check_rolling_budgets, record_spend
 from sentinel.cli.cycle_cmd import _action_to_work_item, _current_branch
 from sentinel.cli.init_cmd import run_init
 from sentinel.cli.plan_cmd import (
@@ -348,6 +348,8 @@ async def run_work(
     every: str | None = None,
     cortex_journal: bool | None = None,
     coder_timeout: int | None = None,
+    plan_only: bool = False,
+    resume_cycle_id: str | None = None,
 ) -> None:
     """The one command.
 
@@ -362,6 +364,9 @@ async def run_work(
     ``coder_timeout`` maps to ``--coder-timeout <seconds>`` and overrides
     both `SENTINEL_CODER_TIMEOUT` and `[coder] timeout_seconds`. When
     None we fall through to env → config → default.
+
+    ``plan_only`` maps to ``--plan-only``: run scan + plan but stop before
+    execution. No files modified, no PRs opened. Journal is still written.
     """
     if every is None:
         # Single cycle — just run it and return
@@ -372,6 +377,8 @@ async def run_work(
             auto,
             cortex_journal=cortex_journal,
             coder_timeout=coder_timeout,
+            plan_only=plan_only,
+            resume_cycle_id=resume_cycle_id,
         )
         return
 
@@ -484,6 +491,8 @@ async def _run_single_cycle(
     *,
     cortex_journal: bool | None = None,
     coder_timeout: int | None = None,
+    plan_only: bool = False,
+    resume_cycle_id: str | None = None,
 ) -> None:
     """Run exactly one cycle of work and return."""
     project = Path(project_path or os.getcwd()).resolve()
@@ -506,6 +515,10 @@ async def _run_single_cycle(
         console.print(f"  Budget: {budget_str}")
     if dry_run:
         console.print("  [yellow]Dry run — no execution[/yellow]")
+    if plan_only:
+        console.print("  [yellow]Plan only — scan + plan, no execution[/yellow]")
+    if resume_cycle_id:
+        console.print(f"  Resuming plan cycle: {resume_cycle_id}")
     console.print()
 
     # Refuse to start if the user has pending uncommitted work. Between
@@ -594,12 +607,12 @@ async def _run_single_cycle(
             f"{'s' if orphans != 1 else ''} from prior crashed runs[/dim]"
         )
 
-    # Pre-flight: shipping requirements. Skipped in dry-run mode since
-    # we never reach ship_pr. Checks gh auth, origin remote.
+    # Pre-flight: shipping requirements. Skipped in dry-run and plan-only
+    # modes since neither path reaches ship_pr. Checks gh auth, origin remote.
     # Codex flagged that `which gh` alone isn't enough — an installed-
     # but-unauthenticated gh surfaces as a cryptic error deep inside
     # the ship step. Better to fail fast with an actionable message.
-    if not dry_run:
+    if not dry_run and not plan_only:
         ship_errors = _check_shipping_preflight(project)
         if ship_errors:
             console.print(
@@ -680,6 +693,7 @@ async def _run_single_cycle(
             )
             if not budget_ok:
                 console.print(f"\n[yellow]  Stopping: {reason}[/yellow]")
+                journal.status = "blocked-on-budget"
                 journal.exit_reason = f"budget: {reason}"
                 break
 
@@ -812,6 +826,26 @@ async def _run_single_cycle(
                 journal.exit_reason = "backlog_empty"
                 break
 
+            # --plan-only: show the planned work, then stop without executing
+            if plan_only:
+                console.print("[bold cyan]→ Plan[/bold cyan]")
+                for i, a in enumerate(items[:5], 1):
+                    kind = a.get("kind", "refine")
+                    color = "green" if kind == "refine" else "yellow"
+                    console.print(
+                        f"  {i}. [{color}][{kind}][/{color}] {a['title']}"
+                    )
+                if len(items) > 5:
+                    console.print(f"  ... and {len(items) - 5} more items")
+                console.print()
+                console.print(
+                    "[yellow]  Plan only — run `sentinel work --resume <cycle-id>` "
+                    "when ready to execute.[/yellow]"
+                )
+                journal.status = "in-progress"
+                journal.exit_reason = "plan_only"
+                break
+
             # Handle first execution — confirm unless --auto or --dry-run
             if items_executed == 0 and not auto and not dry_run:
                 console.print("[bold]Next up:[/bold]")
@@ -851,6 +885,28 @@ async def _run_single_cycle(
                 journal.exit_reason = "all_items_processed"
                 break
 
+            # Loop detection: halt before executing if this item's
+            # fingerprint has appeared too many times recently. This
+            # catches the planner regenerating the same failing item
+            # rather than moving on to something solvable.
+            from sentinel.loop_guard import check_and_record as _loop_check
+            _loop_result = _loop_check(
+                project,
+                title=next_item.get("title", ""),
+                files=next_item.get("files", []),
+            )
+            if _loop_result.looping:
+                console.print(
+                    f"\n[red]  Loop detected:[/red] {_loop_result.reason}"
+                )
+                console.print(
+                    "  [dim]Remove .sentinel/state/loop-guard.json "
+                    "to unblock.[/dim]"
+                )
+                journal.status = "blocked-on-loop"
+                journal.exit_reason = "blocked-on-loop"
+                break
+
             # Execute + review + verify + ship
             from sentinel.journal import WorkItemRecord
 
@@ -864,6 +920,7 @@ async def _run_single_cycle(
                 verification_verdict,
                 ship_status,
                 pr_url,
+                ship_reason,
             ) = await _execute_and_review(
                 next_item,
                 items_executed + 1,
@@ -900,8 +957,13 @@ async def _run_single_cycle(
                     verification=verification_verdict,
                     pr_url=pr_url,
                     ship_status=ship_status,
+                    ship_reason=ship_reason,
                 )
             )
+            if ship_status == "blocked-on-human-approval":
+                journal.status = "blocked-on-human-approval"
+                journal.exit_reason = "blocked-on-human-approval"
+                break
 
             items_executed += 1
             bucket = _bucket_outcome(success)
@@ -1184,6 +1246,15 @@ def _check_all_budgets(
         return False, (
             f"daily budget reached (${budget.today_spent_usd:.2f} / ${budget.daily_limit_usd:.2f})"
         )
+
+    # Rolling 24h / 7d caps (from config [budget] per_day_usd / per_week_usd)
+    rolling_ok, rolling_reason = check_rolling_budgets(
+        project,
+        per_day_usd=config.budget.per_day_usd,
+        per_week_usd=config.budget.per_week_usd,
+    )
+    if not rolling_ok:
+        return False, rolling_reason
 
     # Per-run money budget (from --budget flag) — compares this cycle's
     # spend, not the daily total. Mirrors loop mode's session_spend_start.
@@ -1674,17 +1745,18 @@ async def _execute_and_review(
     *,
     cycle_id: str = "",
     cortex_context: str | None = None,
-) -> tuple[str, str | None, str, str]:
+) -> tuple[str, str | None, str, str, str]:
     """Execute one work item in its own worktree, review it, verify
     against project checks, and ship a PR if both gates pass.
 
-    Returns (verdict, verification_overall, ship_status, pr_url) where:
+    Returns (verdict, verification_overall, ship_status, pr_url, ship_reason) where:
       - verdict: 'approved' | 'changes' | 'rejected' | 'failed'
       - verification_overall: 'verified' | 'not_verified' |
         'no_check_defined' | None
       - ship_status: '' (not attempted), 'merged_armed', 'created',
         'existed', 'failed'
       - pr_url: GitHub URL when shipped, '' otherwise
+      - ship_reason: human-readable reason when shipping is gated/failed
 
     The user's main checkout is NEVER touched — all work happens in a
     `.sentinel/worktrees/wi-<id>` worktree that's cleaned up on exit
@@ -1729,7 +1801,7 @@ async def _execute_and_review(
         elapsed = time.time() - t0
         if exec_result.status == "failed":
             console.print(f"  [red]✗ Execute failed:[/red] {exec_result.error}")
-            return "failed", None, "", ""
+            return "failed", None, "", "", exec_result.error
 
         console.print(
             f"  [green]✓ Coded[/green] in {elapsed:.0f}s — "
@@ -1854,7 +1926,29 @@ async def _execute_and_review(
         #     the PR sits open for human review)
         ship_status = ""
         pr_url = ""
+        ship_reason = ""
         ship_ready = _should_ship(review.verdict, verification.overall)
+
+        # Destructive-change gate: inspect the diff before pushing.
+        # Triggers on migration files, large deletions, or secret-shaped
+        # additions. On trigger: leave the branch intact, record the block
+        # in the journal, and skip the PR. Human unblocks by pushing manually.
+        if ship_ready and exec_result.commit_sha:
+            from sentinel.gate import inspect as _gate_inspect
+            gate_result = _gate_inspect(ctx.path, base_branch=ctx.base)
+            if gate_result.blocked:
+                ship_status = "blocked-on-human-approval"
+                ship_reason = "; ".join(gate_result.reasons)
+                console.print(
+                    f"  [red]✗ Destructive-change gate:[/red] "
+                    f"{'; '.join(gate_result.reasons)}"
+                )
+                console.print(
+                    f"  [dim]Branch left at {ctx.branch} for manual review. "
+                    f"Push with `git push` when ready.[/dim]"
+                )
+                ship_ready = False  # skip the ship_pr call below
+
         if ship_ready and exec_result.commit_sha:
             ship = await ship_pr(
                 worktree_path=ctx.path,
@@ -1872,6 +1966,7 @@ async def _execute_and_review(
             )
             ship_status = ship.status
             pr_url = ship.pr_url
+            ship_reason = ship.error
             if ship.status in ("merged_armed", "created", "existed"):
                 console.print(f"  [green]→ PR ({ship.status}):[/green] {ship.pr_url}")
                 if ship.error:
@@ -1892,7 +1987,7 @@ async def _execute_and_review(
         console.print()
 
     if review.verdict == "approved":
-        return "approved", verification.overall, ship_status, pr_url
+        return "approved", verification.overall, ship_status, pr_url, ship_reason
 
     # Non-approved verdict — memorialize it so the next cycle's
     # planner doesn't regenerate the same item. See
@@ -1927,8 +2022,8 @@ async def _execute_and_review(
             )
 
     if review.verdict == "changes-requested":
-        return "changes", verification.overall, ship_status, pr_url
-    return "rejected", verification.overall, ship_status, pr_url
+        return "changes", verification.overall, ship_status, pr_url, ship_reason
+    return "rejected", verification.overall, ship_status, pr_url, ship_reason
 
 
 async def _run_loop(

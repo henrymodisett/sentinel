@@ -615,6 +615,7 @@ class TestUnusedSymbolsExist:
         wi = WorkItemRecord(work_item_id="wi-1", title="Test")
         assert wi.coder_status == "pending"
         assert wi.reviewer_verdict is None
+        assert wi.ship_reason == ""
 
     def test_phase_record_duration_handles_open_phase(self) -> None:
         p = PhaseRecord(name="x", started_at=100.0)

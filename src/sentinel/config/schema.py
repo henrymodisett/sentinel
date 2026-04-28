@@ -10,7 +10,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 # Bounds on the Coder's Claude CLI timeout. Floor keeps a misconfigured
 # 5s timeout from silently breaking every cycle; ceiling keeps a typo'd
@@ -84,8 +84,22 @@ class RoleConfig(BaseModel):
 
 
 class BudgetConfig(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     daily_limit_usd: float = 15.0
     warn_at_usd: float = 10.0
+    # Rolling-window caps — aggregate cycle costs over the last 24h / 7d.
+    # None means no cap. These are independent of daily_limit_usd (which
+    # resets at calendar-day midnight); these use rolling windows so a
+    # burst of spend at 11:59pm doesn't reset at 12:00am.
+    per_day_usd: float | None = Field(
+        default=None,
+        validation_alias=AliasChoices("per_day", "per_day_usd"),
+    )
+    per_week_usd: float | None = Field(
+        default=None,
+        validation_alias=AliasChoices("per_week", "per_week_usd"),
+    )
 
 
 class LocalConfig(BaseModel):
