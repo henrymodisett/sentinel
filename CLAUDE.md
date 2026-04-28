@@ -177,7 +177,7 @@ If you find yourself reaching for `subprocess.run(["bash", "scripts/open-pr.sh"â
 @lenses/universal/technical-debt.md
 @lenses/universal/developer-experience.md
 
-<!-- conductor:begin v0.8.1 -->
+<!-- conductor:begin v0.8.2 -->
 ## Conductor delegation
 
 This project has [conductor](https://github.com/autumngarage/conductor)

@@ -16,7 +16,7 @@ Drive this automatically unless the user asks for a different flow:
 6. Ship with `bash scripts/open-pr.sh --auto-merge`; this creates the PR, runs the final read-only Conductor merge review, squash-merges, and syncs the default branch.
 7. Clean up the feature branch if it still exists locally.
 
-<!-- conductor:begin v0.8.1 -->
+<!-- conductor:begin v0.8.2 -->
 ## Conductor delegation
 
 This project has [conductor](https://github.com/autumngarage/conductor)
