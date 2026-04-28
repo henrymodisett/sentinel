@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+from sentinel.integrations.cortex_read import cortex_fence
+
 if TYPE_CHECKING:
     from sentinel.providers.router import Router
     from sentinel.roles.coder import ExecutionResult
@@ -120,6 +122,7 @@ If there are zero blocking issues, verdict is "approved" and you can say
 
 def _slug(title: str) -> str:
     import re
+
     s = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
     return s[:50]
 
@@ -193,7 +196,9 @@ def _write_review_transcript(
 
         if raw_response:
             lines += [
-                "", "## Raw reviewer response", "",
+                "",
+                "## Raw reviewer response",
+                "",
                 "```",
                 raw_response[:15000].rstrip(),
                 "```",
@@ -201,7 +206,9 @@ def _write_review_transcript(
 
         if diff:
             lines += [
-                "", "## Diff under review", "",
+                "",
+                "## Diff under review",
+                "",
                 "```diff",
                 diff[:15000].rstrip(),
                 "```",
@@ -225,7 +232,10 @@ def _get_diff(project_path: str, base_branch: str = "main") -> str:
     """Get the diff between current HEAD and base branch."""
     result = subprocess.run(
         ["git", "diff", f"{base_branch}...HEAD"],
-        capture_output=True, text=True, cwd=project_path, timeout=30,
+        capture_output=True,
+        text=True,
+        cwd=project_path,
+        timeout=30,
     )
     return result.stdout[:15000]  # cap at 15k chars to fit in context
 
@@ -241,6 +251,7 @@ class Reviewer:
         project_path: str,
         *,
         working_directory: str | None = None,
+        cortex_context: str | None = None,
     ) -> ReviewResult:
         """Review completed work against acceptance criteria.
 
@@ -251,6 +262,7 @@ class Reviewer:
         never the worktree, so they survive cleanup.
         """
         from sentinel.journal import set_current_role
+
         set_current_role("reviewer")
         # Get the diff of what changed — query the worktree (where the
         # commit landed), not the main project (which is unchanged in
@@ -263,7 +275,7 @@ class Reviewer:
 
         from pathlib import Path as _Path
 
-        prompt = REVIEW_PROMPT.format(
+        prompt = cortex_fence(cortex_context) + REVIEW_PROMPT.format(
             project_name=_Path(project_path).name,
             title=work_item.title,
             description=work_item.description,
@@ -302,8 +314,12 @@ class Reviewer:
             result.blocking_issues = ["Reviewer could not produce a structured verdict"]
             result.infrastructure_failure = True
             _write_review_transcript(
-                project_path, work_item, execution, result,
-                diff=diff, raw_response=response.content,
+                project_path,
+                work_item,
+                execution,
+                result,
+                diff=diff,
+                raw_response=response.content,
             )
             return result
 
@@ -315,12 +331,14 @@ class Reviewer:
         # returning a list or a string. Normalize to dict at the parse
         # boundary so downstream code can trust the type.
         raw_criteria = parsed.get("criteria_met", {})
-        result.acceptance_criteria_met = (
-            raw_criteria if isinstance(raw_criteria, dict) else {}
-        )
+        result.acceptance_criteria_met = raw_criteria if isinstance(raw_criteria, dict) else {}
         _write_review_transcript(
-            project_path, work_item, execution, result,
-            diff=diff, raw_response=response.content,
+            project_path,
+            work_item,
+            execution,
+            result,
+            diff=diff,
+            raw_response=response.content,
         )
 
         return result

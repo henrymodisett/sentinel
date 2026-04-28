@@ -106,7 +106,8 @@ class TestPersistPartialScan:
         assert "Partial scan" not in content
 
     def test_preserves_every_lens_finding_on_failure(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         """The point of the fix: all successful lens evaluations must
         survive a synthesis failure. Losing 6/6 successful lenses on
@@ -119,16 +120,13 @@ class TestPersistPartialScan:
             assert ev.lens_name in content, (
                 f"lens {ev.lens_name} missing from persisted partial scan"
             )
-            assert ev.top_finding in content, (
-                f"top_finding for {ev.lens_name} missing"
-            )
+            assert ev.top_finding in content, f"top_finding for {ev.lens_name} missing"
             for task in ev.recommended_tasks:
-                assert task in content, (
-                    f"recommended task '{task}' for {ev.lens_name} missing"
-                )
+                assert task in content, f"recommended task '{task}' for {ev.lens_name} missing"
 
     def test_partial_scan_shows_computed_overall_score(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         """Overall score computed from successful lens averages must
         still appear, so the file carries a real top-line number rather
@@ -153,7 +151,9 @@ class TestWorkExitsNonZeroOnScanFailure:
     path just printed and returned."""
 
     def test_work_exits_nonzero_on_scan_failure(
-        self, fake_cli_env, isolated_home,
+        self,
+        fake_cli_env,
+        isolated_home,
     ) -> None:
         fake_cli_env(claude=True, gemini=True)
         CliRunner().invoke(main, ["init", "--yes"])
@@ -161,29 +161,41 @@ class TestWorkExitsNonZeroOnScanFailure:
         # Init the project as a git repo with a commit so the clean-tree
         # gate lets work proceed.
         import subprocess
+
         subprocess.run(
-            ["git", "init"], cwd=isolated_home, check=True, capture_output=True,
+            ["git", "init"],
+            cwd=isolated_home,
+            check=True,
+            capture_output=True,
         )
         subprocess.run(
             ["git", "config", "user.email", "t@t.io"],
-            cwd=isolated_home, check=True, capture_output=True,
+            cwd=isolated_home,
+            check=True,
+            capture_output=True,
         )
         subprocess.run(
             ["git", "config", "user.name", "t"],
-            cwd=isolated_home, check=True, capture_output=True,
+            cwd=isolated_home,
+            check=True,
+            capture_output=True,
         )
         subprocess.run(
-            ["git", "add", "-A"], cwd=isolated_home,
-            check=True, capture_output=True,
+            ["git", "add", "-A"],
+            cwd=isolated_home,
+            check=True,
+            capture_output=True,
         )
         subprocess.run(
-            ["git", "commit", "-m", "init"], cwd=isolated_home,
-            check=True, capture_output=True,
+            ["git", "commit", "-m", "init"],
+            cwd=isolated_home,
+            check=True,
+            capture_output=True,
         )
 
         # Patch Monitor.assess to return a simulated synthesis failure.
         # This is the exact shape we hit in the live dogfood run.
-        async def fake_assess(self, state, on_progress=None):
+        async def fake_assess(self, state, on_progress=None, cortex_context=None):
             return _failed_result_with_partial_lenses()
 
         # CliRunner runs without the host's gh/remote setup. The
@@ -191,11 +203,15 @@ class TestWorkExitsNonZeroOnScanFailure:
         # scan-failure path before we could exercise it — stub it
         # out for this test since we're verifying scan behavior,
         # not shipping behavior.
-        with patch(
-            "sentinel.roles.monitor.Monitor.assess", fake_assess,
-        ), patch(
-            "sentinel.cli.work_cmd._check_shipping_preflight",
-            return_value=[],
+        with (
+            patch(
+                "sentinel.roles.monitor.Monitor.assess",
+                fake_assess,
+            ),
+            patch(
+                "sentinel.cli.work_cmd._check_shipping_preflight",
+                return_value=[],
+            ),
         ):
             result = CliRunner().invoke(main, ["work"])
 
@@ -203,8 +219,7 @@ class TestWorkExitsNonZeroOnScanFailure:
         # exit non-zero for some unrelated reason (bad fixture, import
         # error, etc.).
         assert "Scan failed" in (result.output or ""), (
-            "fixture did not reach the scan-failure code path; "
-            f"output was:\n{result.output}"
+            f"fixture did not reach the scan-failure code path; output was:\n{result.output}"
         )
         assert result.exit_code != 0, (
             "work must exit non-zero on scan failure; "

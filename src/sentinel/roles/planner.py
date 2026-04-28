@@ -58,6 +58,7 @@ class Planner:
         self,
         assessment: StateAssessment,
         research: list[ResearchBrief],
+        cortex_context: str | None = None,
     ) -> Plan:
         """Generate a prioritized backlog from current state and research."""
         raise NotImplementedError

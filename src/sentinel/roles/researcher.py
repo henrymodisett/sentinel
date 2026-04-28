@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+from sentinel.integrations.cortex_read import cortex_fence
+
 if TYPE_CHECKING:
     from sentinel.providers.router import Router
 
@@ -98,6 +100,7 @@ class Researcher:
         project_name: str,
         readme_excerpt: str,
         docs_excerpt: str,
+        cortex_context: str | None = None,
     ) -> ResearchBrief:
         """Build a domain-expertise brief before lens generation.
 
@@ -110,17 +113,20 @@ class Researcher:
         still works, just without the domain context (same as today).
         """
         from sentinel.journal import set_current_role
+
         set_current_role("researcher")
         cache_path = Path(project_path) / ".sentinel" / DOMAIN_BRIEF_FILENAME
         context_hash = _hash_context(
-            project_type, readme_excerpt, docs_excerpt,
+            project_type,
+            readme_excerpt,
+            docs_excerpt,
         )
         cached = _load_cached_brief(cache_path, context_hash)
         if cached is not None:
             return cached
 
         provider = self.router.get_provider("researcher", intent="research")
-        prompt = DOMAIN_RESEARCH_PROMPT.format(
+        prompt = cortex_fence(cortex_context) + DOMAIN_RESEARCH_PROMPT.format(
             project_type=project_type or "generic",
             project_name=project_name,
             readme_excerpt=readme_excerpt[:2000] or "(no README)",
@@ -130,7 +136,8 @@ class Researcher:
             response = await provider.chat(prompt)
         except (OSError, RuntimeError) as exc:
             logger.warning(
-                "Domain research failed (%s) — proceeding without brief", exc,
+                "Domain research failed (%s) — proceeding without brief",
+                exc,
             )
             return ResearchBrief(
                 question="domain identification",
@@ -144,11 +151,7 @@ class Researcher:
         # `content="Error: ..."` with is_error=False, which would
         # otherwise get cached as a legit brief for 7 days.
         content = response.content.strip()
-        if (
-            response.is_error
-            or not content
-            or content.startswith("Error:")
-        ):
+        if response.is_error or not content or content.startswith("Error:"):
             logger.warning(
                 "Domain research returned empty/error — proceeding without brief",
             )
@@ -199,7 +202,8 @@ def _hash_context(project_type: str, readme: str, docs: str) -> str:
 
 
 def _load_cached_brief(
-    cache_path: Path, context_hash: str,
+    cache_path: Path,
+    context_hash: str,
 ) -> ResearchBrief | None:
     """Return the cached brief if fresh AND context hash matches, else None."""
     import datetime as _dt
@@ -238,7 +242,9 @@ def _load_cached_brief(
 
 
 def _save_cached_brief(
-    cache_path: Path, brief: ResearchBrief, context_hash: str,
+    cache_path: Path,
+    brief: ResearchBrief,
+    context_hash: str,
 ) -> None:
     """Write the brief to disk with a metadata header for cache lookup."""
     import datetime as _dt
@@ -246,11 +252,10 @@ def _save_cached_brief(
     try:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         generated = _dt.datetime.now(_dt.UTC).isoformat()
-        header = (
-            f"{_BRIEF_HEADER} hash={context_hash} generated={generated} -->"
-        )
+        header = f"{_BRIEF_HEADER} hash={context_hash} generated={generated} -->"
         cache_path.write_text(
-            f"{header}\n{brief.synthesis}\n", encoding="utf-8",
+            f"{header}\n{brief.synthesis}\n",
+            encoding="utf-8",
         )
     except (OSError, UnicodeError) as exc:
         logger.warning("Could not cache domain brief: %s", exc)
