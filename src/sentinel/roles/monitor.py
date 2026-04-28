@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path  # noqa: TC003 — runtime use in _load/_save_locked_lenses
 from typing import TYPE_CHECKING
 
+from sentinel.integrations.cortex_read import cortex_fence
 from sentinel.state import ProjectState  # noqa: TC001 — used at runtime in dataclasses
 
 if TYPE_CHECKING:
@@ -118,15 +119,13 @@ EXPLORE_SCHEMA = {
                     "description": {
                         "type": "string",
                         "description": (
-                            "One sentence: what this lens evaluates "
-                            "and why it matters here"
+                            "One sentence: what this lens evaluates and why it matters here"
                         ),
                     },
                     "what_to_look_for": {
                         "type": "string",
                         "description": (
-                            "2-3 sentences of specific things to examine, "
-                            "grounded in this project"
+                            "2-3 sentences of specific things to examine, grounded in this project"
                         ),
                     },
                     "questions": {
@@ -261,14 +260,19 @@ SYNTHESIZE_SCHEMA = {
                         "type": "array",
                         "items": {"type": "string"},
                         "description": (
-                            "Things explicitly NOT part of this work item, "
-                            "to prevent scope creep."
+                            "Things explicitly NOT part of this work item, to prevent scope creep."
                         ),
                     },
                 },
                 "required": [
-                    "title", "why", "impact", "lens", "kind",
-                    "acceptance_criteria", "verification", "out_of_scope",
+                    "title",
+                    "why",
+                    "impact",
+                    "lens",
+                    "kind",
+                    "acceptance_criteria",
+                    "verification",
+                    "out_of_scope",
                 ],
                 "additionalProperties": False,
             },
@@ -601,13 +605,15 @@ def _load_locked_lenses(project_path: Path) -> list[Lens] | None:
                 scope.append(s[2:].strip())
 
         if name and description:
-            lenses.append(Lens(
-                name=name,
-                description=description,
-                what_to_look_for=what_to_look_for or description,
-                questions=questions,
-                scope=scope,
-            ))
+            lenses.append(
+                Lens(
+                    name=name,
+                    description=description,
+                    what_to_look_for=what_to_look_for or description,
+                    questions=questions,
+                    scope=scope,
+                )
+            )
 
     return lenses if lenses else None
 
@@ -652,7 +658,8 @@ def _filter_file_tree_by_scope(file_tree: str, scope: list[str]) -> str:
 
 
 def _save_locked_lenses(
-    project_path: Path, lenses: list[Lens],
+    project_path: Path,
+    lenses: list[Lens],
 ) -> Path:
     """Persist lenses to .sentinel/lenses.md for reuse on future scans."""
     from datetime import datetime
@@ -677,7 +684,7 @@ def _save_locked_lenses(
         "Each lens may declare an optional `### Scope` section listing path",
         "globs (e.g. `Sources/**`). When present, the lens only evaluates",
         "files matching those globs — useful for keeping app-runtime",
-        "constraints (e.g. \"no cloud LLMs\") from leaking into dev-toolchain",
+        'constraints (e.g. "no cloud LLMs") from leaking into dev-toolchain',
         "config (e.g. `.sentinel/config.toml`, `setup.sh`). Omit the section",
         "for global lenses (the default).",
         "",
@@ -723,11 +730,14 @@ class Monitor:
         self,
         state: ProjectState,
         on_progress: ProgressCallback | None = None,
+        cortex_context: str | None = None,
     ) -> ScanResult:
         """Run the full multi-step scan pipeline with structured output."""
         from sentinel.journal import set_current_role
+
         set_current_role("monitor")
         result = ScanResult()
+        ctx_fence = cortex_fence(cortex_context)
 
         def emit(event: str, data: dict) -> None:
             if on_progress:
@@ -741,6 +751,7 @@ class Monitor:
         # is non-fatal — lens generation still runs with empty
         # domain context, same as pre-LEARN-phase behavior.
         from sentinel.roles.researcher import Researcher
+
         try:
             researcher = Researcher(self.router)
             brief = await researcher.domain_brief(
@@ -749,6 +760,7 @@ class Monitor:
                 project_name=state.name or Path(state.path or ".").name,
                 readme_excerpt=state.readme,
                 docs_excerpt=state.project_docs,
+                cortex_context=cortex_context,
             )
             # Researcher.domain_brief sets the role ContextVar to
             # "researcher" — restore it to "monitor" so the lens evals
@@ -757,10 +769,13 @@ class Monitor:
             state.domain_brief = brief.synthesis
             if brief.cost_usd > 0:
                 result.total_cost_usd += brief.cost_usd
-                emit("domain_brief", {
-                    "synthesis_len": len(brief.synthesis),
-                    "cost_usd": brief.cost_usd,
-                })
+                emit(
+                    "domain_brief",
+                    {
+                        "synthesis_len": len(brief.synthesis),
+                        "cost_usd": brief.cost_usd,
+                    },
+                )
         except (RuntimeError, OSError) as exc:
             logger.warning("Domain brief step skipped: %s", exc)
 
@@ -771,21 +786,18 @@ class Monitor:
         # Without hints the configured default is used unchanged.
         # Check for locked lenses first (reuse across scans for trend tracking)
         project_path_obj = Path(state.path) if state.path else None
-        locked = (
-            _load_locked_lenses(project_path_obj)
-            if project_path_obj else None
-        )
+        locked = _load_locked_lenses(project_path_obj) if project_path_obj else None
 
         if locked:
-            emit("step_start", {
-                "step": "explore",
-                "message": (
-                    f"Using {len(locked)} locked lenses from "
-                    f".sentinel/lenses.md..."
-                ),
-            })
+            emit(
+                "step_start",
+                {
+                    "step": "explore",
+                    "message": (f"Using {len(locked)} locked lenses from .sentinel/lenses.md..."),
+                },
+            )
             # Still need the project summary — prompt just for that
-            summary_prompt = _build_explore_prompt(state)
+            summary_prompt = ctx_fence + _build_explore_prompt(state)
             provider = self.router.get_provider(
                 "monitor",
                 task="explore",
@@ -794,8 +806,7 @@ class Monitor:
             )
             # Simple summary request when lenses are already locked
             summary_response = await provider.chat(
-                summary_prompt
-                + "\n\nJust give me the project_summary paragraph — "
+                summary_prompt + "\n\nJust give me the project_summary paragraph — "
                 "2-3 paragraphs of what this project is, what matters, what makes it unique. "
                 "No JSON, no lens list.",
             )
@@ -809,12 +820,15 @@ class Monitor:
             emit("lens_generated", {"lenses": result.lenses})
             emit("step_done", {"step": "explore", "cost_usd": summary_response.cost_usd})
         else:
-            emit("step_start", {
-                "step": "explore",
-                "message": "Exploring project and generating custom lenses...",
-            })
+            emit(
+                "step_start",
+                {
+                    "step": "explore",
+                    "message": "Exploring project and generating custom lenses...",
+                },
+            )
 
-            explore_prompt = _build_explore_prompt(state)
+            explore_prompt = ctx_fence + _build_explore_prompt(state)
 
             explore_provider = self.router.get_provider(
                 "monitor",
@@ -824,7 +838,8 @@ class Monitor:
             )
             provider = explore_provider
             parsed, response = await explore_provider.chat_json(
-                explore_prompt, EXPLORE_SCHEMA,
+                explore_prompt,
+                EXPLORE_SCHEMA,
             )
 
             result.model = response.model
@@ -843,12 +858,14 @@ class Monitor:
 
             result.project_summary = parsed.get("project_summary", "")
             for lens_data in parsed["lenses"]:
-                result.lenses.append(Lens(
-                    name=lens_data["name"],
-                    description=lens_data["description"],
-                    what_to_look_for=lens_data["what_to_look_for"],
-                    questions=lens_data.get("questions", []),
-                ))
+                result.lenses.append(
+                    Lens(
+                        name=lens_data["name"],
+                        description=lens_data["description"],
+                        what_to_look_for=lens_data["what_to_look_for"],
+                        questions=lens_data.get("questions", []),
+                    )
+                )
 
             # Save the generated lenses so future scans reuse them
             if project_path_obj:
@@ -858,17 +875,23 @@ class Monitor:
             emit("step_done", {"step": "explore", "cost_usd": response.cost_usd})
 
         # --- Step 2: EVALUATE (parallel) ---
-        emit("step_start", {
-            "step": "evaluate",
-            "message": f"Evaluating through {len(result.lenses)} lenses in parallel...",
-        })
+        emit(
+            "step_start",
+            {
+                "step": "evaluate",
+                "message": f"Evaluating through {len(result.lenses)} lenses in parallel...",
+            },
+        )
 
         async def evaluate_one(lens: Lens, index: int) -> LensEvaluation:
-            emit("lens_start", {
-                "lens_name": lens.name,
-                "index": index,
-                "total": len(result.lenses),
-            })
+            emit(
+                "lens_start",
+                {
+                    "lens_name": lens.name,
+                    "index": index,
+                    "total": len(result.lenses),
+                },
+            )
             # Scope filter: when the lens declares an explicit scope,
             # narrow the file_tree to matching paths so the evaluator
             # doesn't consider out-of-scope files. Unscoped lenses see
@@ -877,9 +900,10 @@ class Monitor:
             # constraint was applied to dev-toolchain config that
             # legitimately uses a cloud reviewer.
             scoped_tree = _filter_file_tree_by_scope(
-                state.file_tree, lens.scope,
+                state.file_tree,
+                lens.scope,
             )
-            eval_prompt = EVALUATE_PROMPT.format(
+            eval_prompt = ctx_fence + EVALUATE_PROMPT.format(
                 project_name=state.name,
                 lens_name=lens.name,
                 project_summary=result.project_summary[:1500],
@@ -900,7 +924,8 @@ class Monitor:
                 intent="quick",
             )
             parsed_eval, resp = await eval_provider.chat_json(
-                eval_prompt, EVALUATE_SCHEMA,
+                eval_prompt,
+                EVALUATE_SCHEMA,
             )
             result.total_input_tokens += resp.input_tokens
             result.total_output_tokens += resp.output_tokens
@@ -911,12 +936,12 @@ class Monitor:
             # sometimes emit prose instead of schema output.
             if not parsed_eval:
                 retry_prompt = (
-                    eval_prompt
-                    + "\n\nOUTPUT REQUIREMENT: Return ONLY the JSON object. "
+                    eval_prompt + "\n\nOUTPUT REQUIREMENT: Return ONLY the JSON object. "
                     "No prose, no markdown, no explanation. Start with { and end with }."
                 )
                 parsed_eval, retry_resp = await eval_provider.chat_json(
-                    retry_prompt, EVALUATE_SCHEMA,
+                    retry_prompt,
+                    EVALUATE_SCHEMA,
                 )
                 result.total_input_tokens += retry_resp.input_tokens
                 result.total_output_tokens += retry_resp.output_tokens
@@ -926,10 +951,13 @@ class Monitor:
                     resp = retry_resp
 
             if not parsed_eval:
-                emit("lens_failed", {
-                    "lens_name": lens.name,
-                    "error": resp.content[:200],
-                })
+                emit(
+                    "lens_failed",
+                    {
+                        "lens_name": lens.name,
+                        "error": resp.content[:200],
+                    },
+                )
                 return LensEvaluation(
                     lens_name=lens.name,
                     error=f"Evaluation failed: {resp.content[:200]}",
@@ -942,11 +970,14 @@ class Monitor:
                 findings=parsed_eval.get("findings", ""),
                 recommended_tasks=parsed_eval.get("recommended_tasks", []),
             )
-            emit("lens_done", {
-                "lens_name": lens.name,
-                "score": evaluation.score,
-                "running_cost_usd": result.total_cost_usd,
-            })
+            emit(
+                "lens_done",
+                {
+                    "lens_name": lens.name,
+                    "score": evaluation.score,
+                    "running_cost_usd": result.total_cost_usd,
+                },
+            )
             return evaluation
 
         # Run all lens evaluations in parallel with a per-lens timeout
@@ -966,47 +997,57 @@ class Monitor:
         async def evaluate_with_timeout(lens: Lens, index: int) -> LensEvaluation:
             try:
                 return await asyncio.wait_for(
-                    evaluate_one(lens, index), timeout=per_lens_timeout,
+                    evaluate_one(lens, index),
+                    timeout=per_lens_timeout,
                 )
             except TimeoutError:
-                emit("lens_failed", {
-                    "lens_name": lens.name,
-                    "error": f"timed out after {per_lens_timeout}s",
-                })
+                emit(
+                    "lens_failed",
+                    {
+                        "lens_name": lens.name,
+                        "error": f"timed out after {per_lens_timeout}s",
+                    },
+                )
                 return LensEvaluation(
                     lens_name=lens.name,
                     error=f"Evaluation timed out after {per_lens_timeout}s",
                 )
 
-        tasks = [
-            evaluate_with_timeout(lens, i)
-            for i, lens in enumerate(result.lenses, 1)
-        ]
+        tasks = [evaluate_with_timeout(lens, i) for i, lens in enumerate(result.lenses, 1)]
         # return_exceptions=True so one bad apple (unexpected exception,
         # not just timeout) doesn't cancel the others. Exceptions that
         # slip past evaluate_with_timeout's try/except become
         # LensEvaluation(error=...) entries; scan proceeds.
         gathered = await asyncio.gather(*tasks, return_exceptions=True)
         result.evaluations = [
-            ev if isinstance(ev, LensEvaluation) else LensEvaluation(
+            ev
+            if isinstance(ev, LensEvaluation)
+            else LensEvaluation(
                 lens_name=result.lenses[i].name,
                 error=f"Evaluation raised {type(ev).__name__}: {ev}",
             )
             for i, ev in enumerate(gathered)
         ]
 
-        emit("step_done", {
-            "step": "evaluate",
-            "cost_usd": sum(
-                e.score for e in result.evaluations  # placeholder
-            ),
-        })
+        emit(
+            "step_done",
+            {
+                "step": "evaluate",
+                "cost_usd": sum(
+                    e.score
+                    for e in result.evaluations  # placeholder
+                ),
+            },
+        )
 
         # --- Step 3: SYNTHESIZE ---
-        emit("step_start", {
-            "step": "synthesize",
-            "message": "Synthesizing final report...",
-        })
+        emit(
+            "step_start",
+            {
+                "step": "synthesize",
+                "message": "Synthesizing final report...",
+            },
+        )
 
         evals_text = ""
         for ev in result.evaluations:
@@ -1017,12 +1058,10 @@ class Monitor:
                     f"\n### {ev.lens_name} (score: {ev.score}/100)\n"
                     f"**Top finding:** {ev.top_finding}\n\n"
                     f"{ev.findings}\n\n"
-                    f"**Tasks:**\n"
-                    + "\n".join(f"- {t}" for t in ev.recommended_tasks)
-                    + "\n"
+                    f"**Tasks:**\n" + "\n".join(f"- {t}" for t in ev.recommended_tasks) + "\n"
                 )
 
-        synth_prompt = SYNTHESIZE_PROMPT.format(
+        synth_prompt = ctx_fence + SYNTHESIZE_PROMPT.format(
             project_name=state.name,
             project_summary=result.project_summary[:1500],
             lens_evaluations=evals_text[:10000],
@@ -1048,7 +1087,8 @@ class Monitor:
             intent="plan",
         )
         parsed_synth, synth_resp = await synth_provider.chat_json(
-            synth_prompt, SYNTHESIZE_SCHEMA,
+            synth_prompt,
+            SYNTHESIZE_SCHEMA,
         )
         result.total_input_tokens += synth_resp.input_tokens
         result.total_output_tokens += synth_resp.output_tokens
@@ -1077,9 +1117,12 @@ class Monitor:
         result.raw_report = parsed_synth.get("summary", "")
         result.ok = True
 
-        emit("step_done", {
-            "step": "synthesize",
-            "cost_usd": synth_resp.cost_usd,
-        })
+        emit(
+            "step_done",
+            {
+                "step": "synthesize",
+                "cost_usd": synth_resp.cost_usd,
+            },
+        )
 
         return result

@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from sentinel.integrations.cortex_read import fetch_manifest
 from sentinel.roles.coder import Coder, ExecutionResult
 from sentinel.roles.monitor import Monitor, ScanResult
 from sentinel.roles.planner import Plan, Planner
@@ -15,7 +16,6 @@ from sentinel.roles.reviewer import Reviewer, ReviewResult
 from sentinel.state import gather_state
 
 if TYPE_CHECKING:
-
     from sentinel.config.schema import SentinelConfig
     from sentinel.providers.router import Router
 
@@ -47,15 +47,20 @@ class Loop:
         start = time.time()
         project_path = Path(self.config.project.path)
 
+        # Fetch Cortex manifest once at cycle start and inject into each role's
+        # prompt. Returns None when cortex is absent or unavailable; roles
+        # omit the fence in that case, preserving today's behaviour.
+        cortex_context = fetch_manifest(project_path)
+
         # Step 1: ASSESS — multi-step scan (explore → generate lenses → evaluate)
         state = gather_state(project_path)
-        assessment = await self.monitor.assess(state)
+        assessment = await self.monitor.assess(state, cortex_context=cortex_context)
 
         # Step 2: RESEARCH — investigate issues found
         research_briefs = await self._research_phase(assessment)
 
         # Step 3: PLAN — create prioritized work items
-        plan = await self.planner.plan(assessment, research_briefs)
+        plan = await self.planner.plan(assessment, research_briefs, cortex_context=cortex_context)
 
         # Step 4: DELEGATE — execute and review
         executions, reviews = await self._execute_phase(plan, str(project_path))
@@ -72,7 +77,8 @@ class Loop:
         )
 
     async def _research_phase(
-        self, assessment: ScanResult,
+        self,
+        assessment: ScanResult,
     ) -> list[ResearchBrief]:
         # TODO(cycle): implement research phase — identify what needs
         # investigating based on assessment, call self.researcher
@@ -81,7 +87,9 @@ class Loop:
         )
 
     async def _execute_phase(
-        self, plan: Plan, project_path: str,  # noqa: ARG002
+        self,
+        plan: Plan,
+        project_path: str,  # noqa: ARG002
     ) -> tuple[list[ExecutionResult], list[ReviewResult]]:
         # The Loop class predates the worktree-managed Coder API and
         # the autonomous PR factory in work_cmd._execute_and_review.

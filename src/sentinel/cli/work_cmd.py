@@ -68,7 +68,10 @@ def _working_tree_clean(project: Path | str) -> bool:
     """
     result = subprocess.run(
         ["git", "status", "--porcelain"],
-        capture_output=True, text=True, cwd=project, timeout=10,
+        capture_output=True,
+        text=True,
+        cwd=project,
+        timeout=10,
     )
     if result.returncode != 0:
         # Not a git repo or git missing — let the caller proceed; other
@@ -104,33 +107,35 @@ def _reset_and_checkout(project: str, branch: str) -> bool:
     """
     reset = subprocess.run(
         ["git", "reset", "--hard", "HEAD"],
-        capture_output=True, text=True, cwd=project, timeout=30,
+        capture_output=True,
+        text=True,
+        cwd=project,
+        timeout=30,
     )
     if reset.returncode != 0:
-        console.print(
-            f"  [red]git reset --hard failed:[/red] {reset.stderr.strip()}"
-        )
+        console.print(f"  [red]git reset --hard failed:[/red] {reset.stderr.strip()}")
         return False
 
     clean = subprocess.run(
-        ["git", "clean", "-fd",
-         "--exclude=.sentinel/", "--exclude=.claude/"],
-        capture_output=True, text=True, cwd=project, timeout=30,
+        ["git", "clean", "-fd", "--exclude=.sentinel/", "--exclude=.claude/"],
+        capture_output=True,
+        text=True,
+        cwd=project,
+        timeout=30,
     )
     if clean.returncode != 0:
-        console.print(
-            f"  [red]git clean failed:[/red] {clean.stderr.strip()}"
-        )
+        console.print(f"  [red]git clean failed:[/red] {clean.stderr.strip()}")
         return False
 
     co = subprocess.run(
         ["git", "checkout", branch],
-        capture_output=True, text=True, cwd=project, timeout=30,
+        capture_output=True,
+        text=True,
+        cwd=project,
+        timeout=30,
     )
     if co.returncode != 0:
-        console.print(
-            f"  [red]git checkout {branch} failed:[/red] {co.stderr.strip()}"
-        )
+        console.print(f"  [red]git checkout {branch} failed:[/red] {co.stderr.strip()}")
         return False
 
     return True
@@ -141,6 +146,7 @@ def _parse_interval(interval: str) -> int:
     m = re.match(r"^(\d+)\s*([smh])$", interval.strip())
     if not m:
         import click as _click
+
         raise _click.BadParameter(
             f"Invalid interval '{interval}'. Use e.g. '30s', '10m', '1h'.",
         )
@@ -187,15 +193,16 @@ def _parse_budget(budget_str: str | None) -> tuple[float | None, int | None]:
         part = raw_part.strip()
         if not part:
             continue
-        if (m := re.match(r"^\$?(\d+(?:\.\d+)?)$", part)):
+        if m := re.match(r"^\$?(\d+(?:\.\d+)?)$", part):
             money_usd = float(m.group(1))
             continue
-        if (t := re.match(r"^(\d+)\s*([smh])$", part)):
+        if t := re.match(r"^(\d+)\s*([smh])$", part):
             n = int(t.group(1))
             unit = t.group(2)
             time_seconds = {"s": n, "m": n * 60, "h": n * 3600}[unit]
             continue
         import click as _click
+
         raise _click.BadParameter(
             f"Invalid budget component {part!r}. "
             f"Use $5 (money), 10m/1h/30s (time), or '10m,$5' (both).",
@@ -276,7 +283,8 @@ def _remaining_backlog_items(
     config = _load_config(project)
     refinements = filter_actions(refinements, project, config).kept
     refinements = filter_rejected(
-        refinements, project,
+        refinements,
+        project,
         exclude_cycle_id=current_cycle_id,
     ).kept
 
@@ -314,8 +322,7 @@ def _resolve_coder_timeout(
     def _check(label: str, v: int) -> int:
         if v < CODER_TIMEOUT_MIN_SEC or v > CODER_TIMEOUT_MAX_SEC:
             raise click.BadParameter(
-                f"{label}={v} out of range "
-                f"[{CODER_TIMEOUT_MIN_SEC}, {CODER_TIMEOUT_MAX_SEC}]",
+                f"{label}={v} out of range [{CODER_TIMEOUT_MIN_SEC}, {CODER_TIMEOUT_MAX_SEC}]",
             )
         return v
 
@@ -359,7 +366,10 @@ async def run_work(
     if every is None:
         # Single cycle — just run it and return
         await _run_single_cycle(
-            project_path, budget_str, dry_run, auto,
+            project_path,
+            budget_str,
+            dry_run,
+            auto,
             cortex_journal=cortex_journal,
             coder_timeout=coder_timeout,
         )
@@ -367,7 +377,11 @@ async def run_work(
 
     # Loop mode
     await _run_loop(
-        project_path, budget_str, dry_run, auto, every,
+        project_path,
+        budget_str,
+        dry_run,
+        auto,
+        every,
         cortex_journal=cortex_journal,
         coder_timeout=coder_timeout,
     )
@@ -431,6 +445,7 @@ def _emit_cortex_t16_entry(
         cycle_id = cycle_id_from_run_path(journal_path)
     else:
         from datetime import datetime as _dt
+
         cycle_id = _dt.fromtimestamp(journal.started_at).strftime("%Y-%m-%d-%H%M%S")
 
     cycle_data = build_cycle_data_from_journal(
@@ -482,6 +497,7 @@ async def _run_single_cycle(
     # accumulated cost (so the cap reflects exactly this cycle's spend,
     # not the daily total).
     from sentinel.budget_ctx import set_cycle_deadline, set_cycle_money_cap
+
     set_cycle_deadline(time_budget_sec)
     set_cycle_money_cap(money_budget)
 
@@ -546,7 +562,9 @@ async def _run_single_cycle(
     # `--budget $5` on a day already at $4 of spend blocks the cycle
     # before any work runs. Mirrors loop mode's session_spend_start.
     cycle_spend_start = check_budget(
-        project, config.budget.daily_limit_usd, config.budget.warn_at_usd,
+        project,
+        config.budget.daily_limit_usd,
+        config.budget.warn_at_usd,
     ).today_spent_usd
 
     # Pre-flight: any role configured for the local (ollama) provider
@@ -557,13 +575,10 @@ async def _run_single_cycle(
     missing = router_for_check.missing_local_models()
     if missing:
         console.print(
-            "[red]  Missing local models — sentinel can't start until "
-            "they're pulled:[/red]"
+            "[red]  Missing local models — sentinel can't start until they're pulled:[/red]"
         )
         for role, model in missing:
-            console.print(
-                f"    {role}: [bold]ollama pull {model}[/bold]"
-            )
+            console.print(f"    {role}: [bold]ollama pull {model}[/bold]")
         return
 
     # Pre-flight: clean up orphaned worktrees from prior crashed runs.
@@ -571,6 +586,7 @@ async def _run_single_cycle(
     # partway through the prior cycle would block the next. One-line
     # note when anything was actually pruned; silent otherwise.
     from sentinel.worktree import cleanup_orphaned_worktrees
+
     orphans = cleanup_orphaned_worktrees(project)
     if orphans:
         console.print(
@@ -598,6 +614,7 @@ async def _run_single_cycle(
     # the common case (nothing expired), one-line note when something
     # was actually removed. Failing prune doesn't block work.
     from sentinel.prune import prune_runs
+
     try:
         removed = prune_runs(project, config.retention.runs_days)
         if removed:
@@ -613,6 +630,7 @@ async def _run_single_cycle(
     # this via ContextVar; the finally block writes it to disk regardless
     # of how the cycle ends (success, exception, KeyboardInterrupt).
     from sentinel.journal import Journal, set_current_journal, set_current_phase
+
     journal = Journal(
         project_path=project,
         project_name=project.name,
@@ -629,6 +647,10 @@ async def _run_single_cycle(
     coder = Coder(router)
     reviewer = Reviewer(router)
     original_branch = _current_branch(str(project))
+
+    from sentinel.integrations.cortex_read import fetch_manifest as _fetch_manifest
+
+    cortex_manifest = _fetch_manifest(project)
 
     items_executed = 0
     items_approved = 0
@@ -649,8 +671,12 @@ async def _run_single_cycle(
         while True:
             # Budget check
             budget_ok, reason = _check_all_budgets(
-                project, config, money_budget, cycle_spend_start,
-                start_time, time_budget_sec,
+                project,
+                config,
+                money_budget,
+                cycle_spend_start,
+                start_time,
+                time_budget_sec,
             )
             if not budget_ok:
                 console.print(f"\n[yellow]  Stopping: {reason}[/yellow]")
@@ -669,13 +695,18 @@ async def _run_single_cycle(
                 journal.start_phase("scan")
                 state = gather_state(project)
                 from sentinel.cli.scan_cmd import scan_progress_printer
+
                 scan_result = await monitor.assess(
-                    state, on_progress=scan_progress_printer(),
+                    state,
+                    on_progress=scan_progress_printer(),
+                    cortex_context=cortex_manifest,
                 )
 
                 if scan_result.total_cost_usd > 0:
                     record_spend(
-                        project, scan_result.total_cost_usd, "work-scan",
+                        project,
+                        scan_result.total_cost_usd,
+                        "work-scan",
                         f"model={scan_result.model}",
                     )
 
@@ -695,8 +726,7 @@ async def _run_single_cycle(
                             )
                         except (OSError, ValueError) as persist_err:
                             console.print(
-                                f"  [yellow]Could not persist partial scan: "
-                                f"{persist_err}[/yellow]"
+                                f"  [yellow]Could not persist partial scan: {persist_err}[/yellow]"
                             )
                     raise click.exceptions.Exit(code=1)
 
@@ -707,16 +737,17 @@ async def _run_single_cycle(
                 # stores lens scores in a form we'd have to reparse.
                 cortex_overall_score = scan_result.overall_score
                 cortex_lens_scores = [
-                    (ev.lens_name, ev.score)
-                    for ev in scan_result.evaluations
-                    if not ev.error
+                    (ev.lens_name, ev.score) for ev in scan_result.evaluations if not ev.error
                 ]
                 console.print(
                     f"  [green]✓[/green] Health: {scan_result.overall_score}/100 "
                     f"(${scan_result.total_cost_usd:.4f})\n"
                 )
                 _print_cycle_spend(
-                    project, config, cycle_spend_start, money_budget,
+                    project,
+                    config,
+                    cycle_spend_start,
+                    money_budget,
                 )
 
             # --- 4. Plan if backlog stale ---
@@ -734,12 +765,10 @@ async def _run_single_cycle(
                 _write_backlog(project, actions, scan_file, config=config)
                 # Write expansion proposals so user can approve later
                 from sentinel.cli.plan_cmd import _write_proposals
+
                 proposals = _write_proposals(project, actions, scan_file)
 
-                refinements = [
-                    a for a in actions
-                    if a.get("kind", "refine") == "refine"
-                ]
+                refinements = [a for a in actions if a.get("kind", "refine") == "refine"]
                 expansions = [a for a in actions if a.get("kind") == "expand"]
                 cortex_refinement_count = len(refinements)
                 cortex_expansion_count = len(expansions)
@@ -749,7 +778,10 @@ async def _run_single_cycle(
                 )
                 journal.end_phase("plan")
                 _print_cycle_spend(
-                    project, config, cycle_spend_start, money_budget,
+                    project,
+                    config,
+                    cycle_spend_start,
+                    money_budget,
                 )
                 if proposals:
                     console.print(
@@ -772,7 +804,8 @@ async def _run_single_cycle(
                 journal.started_at,
             ).strftime("%Y-%m-%d-%H%M%S")
             items = _remaining_backlog_items(
-                project, current_cycle_id=_cycle_id_str,
+                project,
+                current_cycle_id=_cycle_id_str,
             )
             if not items:
                 console.print("[green]  Backlog empty. Done.[/green]")
@@ -786,7 +819,8 @@ async def _run_single_cycle(
                     console.print(f"  {i}. {a['title']}")
                 console.print()
                 if not click.confirm(
-                    "  Proceed with autonomous execution?", default=False,
+                    "  Proceed with autonomous execution?",
+                    default=False,
                 ):
                     console.print("[yellow]  Stopped before execution.[/yellow]")
                     journal.exit_reason = "user_declined"
@@ -798,17 +832,14 @@ async def _run_single_cycle(
                 for i, a in enumerate(items[:3], 1):
                     kind = a.get("kind", "refine")
                     color = "green" if kind == "refine" else "yellow"
-                    console.print(
-                        f"  {i}. [{color}][{kind}][/{color}] {a['title']}"
-                    )
+                    console.print(f"  {i}. [{color}][{kind}][/{color}] {a['title']}")
                 console.print()
                 # Surface the resolved Coder timeout so --dry-run is a
                 # useful configuration-probe: users (and tests) can
                 # verify the flag/env/config resolution without actually
                 # invoking the Claude CLI.
                 console.print(
-                    f"  [dim]Resolved coder timeout: "
-                    f"{config.coder.timeout_seconds}s[/dim]"
+                    f"  [dim]Resolved coder timeout: {config.coder.timeout_seconds}s[/dim]"
                 )
                 console.print("[yellow]  Dry run — stopping[/yellow]")
                 journal.exit_reason = "dry_run"
@@ -822,22 +853,34 @@ async def _run_single_cycle(
 
             # Execute + review + verify + ship
             from sentinel.journal import WorkItemRecord
+
             wi_id = str(next_item.get("id", items_executed + 1))
             wi_title = next_item.get("title", "(untitled)")
             phase_label = f"execute:{wi_id}"
             set_current_phase("execute")
             journal.start_phase(phase_label)
             (
-                success, verification_verdict, ship_status, pr_url,
+                success,
+                verification_verdict,
+                ship_status,
+                pr_url,
             ) = await _execute_and_review(
-                next_item, items_executed + 1,
-                project, original_branch,
-                coder, reviewer, config,
+                next_item,
+                items_executed + 1,
+                project,
+                original_branch,
+                coder,
+                reviewer,
+                config,
                 cycle_id=_cycle_id_str,
+                cortex_context=cortex_manifest,
             )
             journal.end_phase(phase_label, status=success or "unknown")
             _print_cycle_spend(
-                project, config, cycle_spend_start, money_budget,
+                project,
+                config,
+                cycle_spend_start,
+                money_budget,
             )
 
             # Mirror the outcome into the work-items table so the journal
@@ -848,15 +891,17 @@ async def _run_single_cycle(
                 "rejected": ("succeeded", "rejected"),
                 "failed": ("failed", None),
             }.get(success or "", ("unknown", None))
-            journal.record_work_item(WorkItemRecord(
-                work_item_id=wi_id,
-                title=wi_title,
-                coder_status=wi_status,
-                reviewer_verdict=reviewer_verdict,
-                verification=verification_verdict,
-                pr_url=pr_url,
-                ship_status=ship_status,
-            ))
+            journal.record_work_item(
+                WorkItemRecord(
+                    work_item_id=wi_id,
+                    title=wi_title,
+                    coder_status=wi_status,
+                    reviewer_verdict=reviewer_verdict,
+                    verification=verification_verdict,
+                    pr_url=pr_url,
+                    ship_status=ship_status,
+                )
+            )
 
             items_executed += 1
             bucket = _bucket_outcome(success)
@@ -894,10 +939,7 @@ async def _run_single_cycle(
         journal.mark_ended()
         try:
             journal_path = journal.write()
-            console.print(
-                f"  [dim]Run journal: "
-                f"{journal_path.relative_to(project)}[/dim]"
-            )
+            console.print(f"  [dim]Run journal: {journal_path.relative_to(project)}[/dim]")
         except OSError as e:
             console.print(f"  [yellow]Could not write run journal: {e}[/yellow]")
             journal_path = None
@@ -911,7 +953,9 @@ async def _run_single_cycle(
         # `.sentinel/state/cortex-write-errors.jsonl`, prints a warning,
         # and the cycle exit code is unaffected.
         _emit_cortex_t16_entry(
-            project, journal, journal_path,
+            project,
+            journal,
+            journal_path,
             cli_flag=cortex_journal,
             config=config,
             overall_score=cortex_overall_score,
@@ -924,7 +968,9 @@ async def _run_single_cycle(
     # --- Summary ---
     elapsed = time.time() - start_time
     budget_now = check_budget(
-        project, config.budget.daily_limit_usd, config.budget.warn_at_usd,
+        project,
+        config.budget.daily_limit_usd,
+        config.budget.warn_at_usd,
     )
     console.print()
 
@@ -939,7 +985,9 @@ async def _run_single_cycle(
         )
     else:
         cycle_spend_line = _format_cycle_spend_line(
-            budget_now.today_spent_usd, cycle_spend_start, money_budget,
+            budget_now.today_spent_usd,
+            cycle_spend_start,
+            money_budget,
         )
         panel_body = (
             f"Items executed: {items_executed}\n"
@@ -1001,12 +1049,12 @@ def _build_failure_summary(journal) -> str:  # noqa: ANN001
             f"({erroring_call.error})"
         )
         if erroring_call.routed_via:
-            lines.append(
-                f"Routing rule: [dim]{erroring_call.routed_via}[/dim]"
-            )
+            lines.append(f"Routing rule: [dim]{erroring_call.routed_via}[/dim]")
 
     suggestion = _suggest_next_action(
-        exit_reason, failed_phase, erroring_call,
+        exit_reason,
+        failed_phase,
+        erroring_call,
     )
     if suggestion:
         lines += ["", f"Try: [bold]{suggestion}[/bold]"]
@@ -1015,7 +1063,9 @@ def _build_failure_summary(journal) -> str:  # noqa: ANN001
 
 
 def _suggest_next_action(  # noqa: ANN001
-    exit_reason: str, failed_phase, erroring_call,
+    exit_reason: str,
+    failed_phase,
+    erroring_call,
 ) -> str:
     """Map a failure pattern to one suggested next action. Patterns
     are keyed off (a) journal.exit_reason and (b) the last erroring
@@ -1038,10 +1088,7 @@ def _suggest_next_action(  # noqa: ANN001
     if erroring_call and erroring_call.error == "cli is_error":
         return "check provider auth with `sentinel providers`"
     if failed_phase and failed_phase.name == "scan":
-        return (
-            "scan failure: check `.sentinel/scans/partial/` for any "
-            "rescued lens evaluations"
-        )
+        return "scan failure: check `.sentinel/scans/partial/` for any rescued lens evaluations"
     return ""
 
 
@@ -1079,10 +1126,14 @@ def _print_cycle_spend(
     if money_budget is None:
         return
     status = check_budget(
-        project, config.budget.daily_limit_usd, config.budget.warn_at_usd,
+        project,
+        config.budget.daily_limit_usd,
+        config.budget.warn_at_usd,
     )
     line = _format_cycle_spend_line(
-        status.today_spent_usd, cycle_spend_start, money_budget,
+        status.today_spent_usd,
+        cycle_spend_start,
+        money_budget,
     )
     if line:
         console.print(f"  [dim]{line}[/dim]")
@@ -1125,12 +1176,13 @@ def _check_all_budgets(
     """
     # Daily money budget (from config)
     budget = check_budget(
-        project, config.budget.daily_limit_usd, config.budget.warn_at_usd,
+        project,
+        config.budget.daily_limit_usd,
+        config.budget.warn_at_usd,
     )
     if budget.over_limit:
         return False, (
-            f"daily budget reached "
-            f"(${budget.today_spent_usd:.2f} / ${budget.daily_limit_usd:.2f})"
+            f"daily budget reached (${budget.today_spent_usd:.2f} / ${budget.daily_limit_usd:.2f})"
         )
 
     # Per-run money budget (from --budget flag) — compares this cycle's
@@ -1138,10 +1190,7 @@ def _check_all_budgets(
     if money_budget is not None:
         cycle_spent = budget.today_spent_usd - cycle_spend_start
         if cycle_spent >= money_budget:
-            return False, (
-                f"per-run budget reached "
-                f"(${cycle_spent:.2f} / ${money_budget:.2f})"
-            )
+            return False, (f"per-run budget reached (${cycle_spent:.2f} / ${money_budget:.2f})")
 
     # Per-work time budget
     if time_budget_sec is not None:
@@ -1169,26 +1218,29 @@ def _check_shipping_preflight(project: Path) -> list[str]:
 
     if not shutil.which("gh"):
         errors.append(
-            "[bold]gh[/bold] not found on PATH. Install with: "
-            "[bold]brew install gh[/bold]"
+            "[bold]gh[/bold] not found on PATH. Install with: [bold]brew install gh[/bold]"
         )
         # If gh is missing, the auth check can't run — return early.
         return errors
 
     auth_result = subprocess.run(
         ["gh", "auth", "status"],
-        capture_output=True, text=True, timeout=10, check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
     )
     if auth_result.returncode != 0:
-        errors.append(
-            "gh is not authenticated. Run: [bold]gh auth login[/bold]"
-        )
+        errors.append("gh is not authenticated. Run: [bold]gh auth login[/bold]")
 
     # Check origin remote — sentinel pushes to `origin` by convention.
     remote_result = subprocess.run(
         ["git", "remote", "get-url", "origin"],
-        capture_output=True, text=True, cwd=str(project),
-        timeout=10, check=False,
+        capture_output=True,
+        text=True,
+        cwd=str(project),
+        timeout=10,
+        check=False,
     )
     if remote_result.returncode != 0:
         errors.append(
@@ -1215,16 +1267,18 @@ def _should_ship(review_verdict: str, verification_overall: str | None) -> bool:
       actually FAILED)
     - any non-approved verdict → block
     """
-    return (
-        review_verdict == "approved"
-        and verification_overall in (
-            "verified", "no_check_defined", "unverified",
-        )
+    return review_verdict == "approved" and verification_overall in (
+        "verified",
+        "no_check_defined",
+        "unverified",
     )
 
 
 def _build_pr_body(
-    work_item, action: dict, review, verification,  # noqa: ANN001
+    work_item,
+    action: dict,
+    review,
+    verification,  # noqa: ANN001
 ) -> str:
     """Compose the PR body — work item context, lens that flagged it,
     reviewer verdict, verification results. Goes through --body-file so
@@ -1431,8 +1485,10 @@ def _persist_exhaustion(
         return path
     except OSError as exc:
         import logging
+
         logging.getLogger(__name__).warning(
-            "Failed to persist exhaustion post-mortem (non-fatal): %s", exc,
+            "Failed to persist exhaustion post-mortem (non-fatal): %s",
+            exc,
         )
         return None
 
@@ -1448,6 +1504,7 @@ async def _iterate_coder_reviewer(
     ctx,
     max_iterations: int = MAX_CODER_ITERATIONS,
     coder_config=None,
+    cortex_context: str | None = None,
 ) -> tuple[object, object, int]:
     """Loop coder.execute → reviewer.review until approved, stuck, or capped.
 
@@ -1487,34 +1544,22 @@ async def _iterate_coder_reviewer(
     # this: otherwise a "reviewer crashed" outcome would trigger
     # expensive coder passes against nonexistent feedback.
     if getattr(review, "infrastructure_failure", False):
-        console.print(
-            "  [yellow]Reviewer infrastructure failure — not "
-            "iterating[/yellow]"
-        )
+        console.print("  [yellow]Reviewer infrastructure failure — not iterating[/yellow]")
         return exec_result, review, iterations
 
-    while (
-        review.verdict != "approved"
-        and iterations < max_iterations
-    ):
+    while review.verdict != "approved" and iterations < max_iterations:
         current = _issue_set(review.blocking_issues)
         # Stop if the coder couldn't shift the findings since last round.
         # Check only once we've completed a revise→review cycle (i.e.
         # we have a prior set to compare against).
         if prior_issues is not None and current == prior_issues:
-            console.print(
-                "  [yellow]No progress on findings — stopping "
-                "iteration[/yellow]"
-            )
+            console.print("  [yellow]No progress on findings — stopping iteration[/yellow]")
             stop_reason = "no_progress"
             break
         prior_issues = current
         iterations += 1
 
-        console.print(
-            f"  [dim]revising (iteration {iterations}/"
-            f"{max_iterations})...[/dim]"
-        )
+        console.print(f"  [dim]revising (iteration {iterations}/{max_iterations})...[/dim]")
         exec_result = await coder.execute(
             work_item,
             working_directory=str(ctx.path),
@@ -1522,16 +1567,17 @@ async def _iterate_coder_reviewer(
             branch=ctx.branch,
             review_feedback=review,
             coder_config=coder_config,
+            cortex_context=cortex_context,
         )
         if exec_result.cost_usd > 0:
             record_spend(
-                project, exec_result.cost_usd, "work-execute",
+                project,
+                exec_result.cost_usd,
+                "work-execute",
                 f"revise={work_item.title[:40]}",
             )
         if exec_result.status == "failed":
-            console.print(
-                f"  [red]✗ Revise failed:[/red] {exec_result.error}"
-            )
+            console.print(f"  [red]✗ Revise failed:[/red] {exec_result.error}")
             break
         console.print(
             f"  [green]✓ Revised[/green] — "
@@ -1541,12 +1587,17 @@ async def _iterate_coder_reviewer(
 
         console.print("  [dim]re-reviewing...[/dim]")
         review = await reviewer.review(
-            work_item, exec_result, str(project),
+            work_item,
+            exec_result,
+            str(project),
             working_directory=str(ctx.path),
+            cortex_context=cortex_context,
         )
         if review.cost_usd > 0:
             record_spend(
-                project, review.cost_usd, "work-review",
+                project,
+                review.cost_usd,
+                "work-review",
                 f"revise={work_item.title[:40]}",
             )
         verdict_color = {
@@ -1567,8 +1618,7 @@ async def _iterate_coder_reviewer(
         # a non-verdict.
         if getattr(review, "infrastructure_failure", False):
             console.print(
-                "  [yellow]Reviewer infrastructure failure mid-loop — "
-                "stopping iteration[/yellow]"
+                "  [yellow]Reviewer infrastructure failure mid-loop — stopping iteration[/yellow]"
             )
             break
 
@@ -1608,10 +1658,7 @@ async def _iterate_coder_reviewer(
         )
         path = _persist_exhaustion(project, work_item=work_item, body=body)
         if path is not None:
-            console.print(
-                f"  [dim]Post-mortem written to "
-                f"{path.relative_to(project)}[/dim]"
-            )
+            console.print(f"  [dim]Post-mortem written to {path.relative_to(project)}[/dim]")
 
     return exec_result, review, iterations
 
@@ -1626,6 +1673,7 @@ async def _execute_and_review(
     config: SentinelConfig,
     *,
     cycle_id: str = "",
+    cortex_context: str | None = None,
 ) -> tuple[str, str | None, str, str]:
     """Execute one work item in its own worktree, review it, verify
     against project checks, and ship a PR if both gates pass.
@@ -1655,7 +1703,10 @@ async def _execute_and_review(
     wi_slug = f"wi-{work_item.id}"
 
     async with worktree_for(
-        project, branch=branch, base=original_branch, slug=wi_slug,
+        project,
+        branch=branch,
+        base=original_branch,
+        slug=wi_slug,
     ) as ctx:
         t0 = time.time()
         exec_result = await coder.execute(
@@ -1664,11 +1715,14 @@ async def _execute_and_review(
             artifacts_directory=str(project),
             branch=ctx.branch,
             coder_config=config.coder,
+            cortex_context=cortex_context,
         )
 
         if exec_result.cost_usd > 0:
             record_spend(
-                project, exec_result.cost_usd, "work-execute",
+                project,
+                exec_result.cost_usd,
+                "work-execute",
                 f"item={work_item.title[:40]}",
             )
 
@@ -1686,12 +1740,17 @@ async def _execute_and_review(
         # Review against the worktree's diff
         console.print("  [dim]reviewing...[/dim]")
         review = await reviewer.review(
-            work_item, exec_result, str(project),
+            work_item,
+            exec_result,
+            str(project),
             working_directory=str(ctx.path),
+            cortex_context=cortex_context,
         )
         if review.cost_usd > 0:
             record_spend(
-                project, review.cost_usd, "work-review",
+                project,
+                review.cost_usd,
+                "work-review",
                 f"item={work_item.title[:40]}",
             )
 
@@ -1727,6 +1786,7 @@ async def _execute_and_review(
                 ctx=ctx,
                 max_iterations=config.coder.max_iterations,
                 coder_config=config.coder,
+                cortex_context=cortex_context,
             )
             if iterations_used > 1:
                 console.print(
@@ -1747,50 +1807,34 @@ async def _execute_and_review(
         try:
             persist_verification(project, verification)
         except OSError as e:
-            console.print(
-                f"  [yellow]Could not persist verification: {e}[/yellow]"
-            )
+            console.print(f"  [yellow]Could not persist verification: {e}[/yellow]")
         verifier_icon = {
             "verified": "[green]✅[/green]",
             "not_verified": "[red]❌[/red]",
             "unverified": "[yellow]⚠[/yellow]",
             "no_check_defined": "[dim]—[/dim]",
         }.get(verification.overall, "?")
-        n_pass = sum(
-            1 for c in verification.checks if c.verdict == "pass"
-        )
-        n_fail = sum(
-            1 for c in verification.checks if c.verdict == "fail"
-        )
-        n_skipped = sum(
-            1 for c in verification.checks if c.verdict == "skipped"
-        )
+        n_pass = sum(1 for c in verification.checks if c.verdict == "pass")
+        n_fail = sum(1 for c in verification.checks if c.verdict == "fail")
+        n_skipped = sum(1 for c in verification.checks if c.verdict == "skipped")
         # Count only non-skipped checks in the ratio so a missing lint
         # tool doesn't count against the items that actually ran.
         n_ran = n_pass + n_fail
         if n_skipped:
-            status_detail = (
-                f"{n_pass} passed, {n_fail} failed, "
-                f"{n_skipped} skipped"
-            )
+            status_detail = f"{n_pass} passed, {n_fail} failed, {n_skipped} skipped"
         else:
             status_detail = f"{n_pass}/{n_ran} checks passed"
         console.print(
-            f"  Verifier: {verifier_icon} {verification.overall} "
-            f"[dim]({status_detail})[/dim]"
+            f"  Verifier: {verifier_icon} {verification.overall} [dim]({status_detail})[/dim]"
         )
         # Skipped checks are the user's to fix — surface install hints
         # inline so operators don't have to grep the jsonl.
         for c in verification.checks:
             if c.verdict == "skipped":
-                console.print(
-                    f"    [yellow]⚠ {c.name} skipped:[/yellow] "
-                    f"[dim]{c.evidence}[/dim]"
-                )
+                console.print(f"    [yellow]⚠ {c.name} skipped:[/yellow] [dim]{c.evidence}[/dim]")
         if verification.overall == "unverified":
             console.print(
-                "  [yellow]⚠ All checks skipped — no independent "
-                "signal on this diff.[/yellow]"
+                "  [yellow]⚠ All checks skipped — no independent signal on this diff.[/yellow]"
             )
         console.print()
 
@@ -1820,25 +1864,21 @@ async def _execute_and_review(
                 head_sha=exec_result.commit_sha,
                 title=f"sentinel: {work_item.title[:72]}",
                 body_md=_build_pr_body(
-                    work_item, action, review, verification,
+                    work_item,
+                    action,
+                    review,
+                    verification,
                 ),
             )
             ship_status = ship.status
             pr_url = ship.pr_url
             if ship.status in ("merged_armed", "created", "existed"):
-                console.print(
-                    f"  [green]→ PR ({ship.status}):[/green] {ship.pr_url}"
-                )
+                console.print(f"  [green]→ PR ({ship.status}):[/green] {ship.pr_url}")
                 if ship.error:
                     console.print(f"    [yellow]{ship.error}[/yellow]")
             else:
-                console.print(
-                    f"  [red]✗ Ship failed:[/red] {ship.error}"
-                )
-        elif (
-            review.verdict == "approved"
-            and verification.overall == "not_verified"
-        ):
+                console.print(f"  [red]✗ Ship failed:[/red] {ship.error}")
+        elif review.verdict == "approved" and verification.overall == "not_verified":
             # Reviewer approved but a configured check actually
             # FAILED — that's a real gate failure (different from
             # no_check_defined which means we just couldn't tell).
@@ -1861,13 +1901,10 @@ async def _execute_and_review(
     # verdict isn't a verdict on the code, it's "reviewer crashed")
     # because persisting those would cost us a real item forever.
     if not getattr(review, "infrastructure_failure", False):
-        verdict_token = (
-            "changes_requested"
-            if review.verdict == "changes-requested"
-            else "rejected"
-        )
+        verdict_token = "changes_requested" if review.verdict == "changes-requested" else "rejected"
         try:
             from sentinel.integrations.rejections import record_rejection
+
             record_rejection(
                 project,
                 cycle_id=cycle_id,
@@ -1879,17 +1916,14 @@ async def _execute_and_review(
                     "files": action.get("files", []),
                 },
                 review_verdict=verdict_token,
-                reviewer_reason=review.summary or (
-                    "; ".join(review.blocking_issues[:3])
-                    if review.blocking_issues else ""
-                ),
+                reviewer_reason=review.summary
+                or ("; ".join(review.blocking_issues[:3]) if review.blocking_issues else ""),
             )
         except Exception as exc:  # noqa: BLE001 — never block on memory
             # Loud but nonblocking; the reviewer verdict already
             # stands, and the rejection log is a best-effort guard.
             console.print(
-                f"  [yellow]Could not record rejection for "
-                f"planner memory: {exc}[/yellow]"
+                f"  [yellow]Could not record rejection for planner memory: {exc}[/yellow]"
             )
 
     if review.verdict == "changes-requested":
@@ -1923,7 +1957,9 @@ async def _run_loop(
     session_spend_start = 0.0
     if config:
         session_spend_start = check_budget(
-            project, config.budget.daily_limit_usd, config.budget.warn_at_usd,
+            project,
+            config.budget.daily_limit_usd,
+            config.budget.warn_at_usd,
         ).today_spent_usd
 
     cycles = 0
@@ -1961,7 +1997,9 @@ async def _run_loop(
 
             if money_budget is not None and config:
                 current = check_budget(
-                    project, config.budget.daily_limit_usd, config.budget.warn_at_usd,
+                    project,
+                    config.budget.daily_limit_usd,
+                    config.budget.warn_at_usd,
                 )
                 session_spent = current.today_spent_usd - session_spend_start
                 if session_spent >= money_budget:
@@ -1972,9 +2010,7 @@ async def _run_loop(
                     )
                     break
 
-            console.print(
-                f"\n[dim]Next cycle in {every}... (Ctrl-C to stop)[/dim]"
-            )
+            console.print(f"\n[dim]Next cycle in {every}... (Ctrl-C to stop)[/dim]")
             try:
                 await asyncio.sleep(interval_sec)
             except asyncio.CancelledError:
@@ -1989,7 +2025,9 @@ async def _run_loop(
     console.print(f"  Duration: {_format_duration(elapsed)}")
     if config:
         final = check_budget(
-            project, config.budget.daily_limit_usd, config.budget.warn_at_usd,
+            project,
+            config.budget.daily_limit_usd,
+            config.budget.warn_at_usd,
         )
         session_spent = final.today_spent_usd - session_spend_start
         console.print(f"  Session spend: ${session_spent:.4f}")

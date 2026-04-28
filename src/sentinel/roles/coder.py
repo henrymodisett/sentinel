@@ -20,6 +20,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from sentinel.integrations.cortex_read import cortex_fence
+
 if TYPE_CHECKING:
     from sentinel.config.schema import CoderConfig
     from sentinel.providers.interface import ChatResponse
@@ -51,6 +53,7 @@ class ExecutionResult:
 def _slug(title: str) -> str:
     """Turn a work item title into a git-safe branch slug."""
     import re
+
     s = title.lower()
     s = re.sub(r"[^a-z0-9]+", "-", s)
     s = s.strip("-")
@@ -131,7 +134,8 @@ class RefinementGroundingError(Exception):
 
 
 def _check_refinement_grounding(
-    work_item: WorkItem, working_directory: str,
+    work_item: WorkItem,
+    working_directory: str,
 ) -> None:
     """Verify each refinement's cited files exist on HEAD.
 
@@ -166,8 +170,10 @@ def _check_refinement_grounding(
     for path in paths_to_check:
         result = subprocess.run(
             ["git", "ls-files", "--error-unmatch", "--", path],
-            capture_output=True, text=True,
-            cwd=working_directory, timeout=10,
+            capture_output=True,
+            text=True,
+            cwd=working_directory,
+            timeout=10,
         )
         # ``--error-unmatch`` exits non-zero when the path is not
         # tracked — that's our "missing on HEAD" signal. ls-files
@@ -178,7 +184,7 @@ def _check_refinement_grounding(
 
     if missing:
         raise RefinementGroundingError(
-            f"Refinement \"{work_item.title}\" cites files not present on "
+            f'Refinement "{work_item.title}" cites files not present on '
             f"HEAD: {missing}. Refinements must improve existing code. If "
             f"the file is intentional new work, mark this as an expansion "
             f"proposal instead.",
@@ -186,11 +192,16 @@ def _check_refinement_grounding(
 
 
 def _run_git(
-    args: list[str], cwd: str,
+    args: list[str],
+    cwd: str,
 ) -> subprocess.CompletedProcess[str]:
     """Run a git command."""
     return subprocess.run(
-        ["git", *args], capture_output=True, text=True, cwd=cwd, timeout=30,
+        ["git", *args],
+        capture_output=True,
+        text=True,
+        cwd=cwd,
+        timeout=30,
     )
 
 
@@ -225,8 +236,7 @@ def _git_status_snapshot(project_path: str) -> set[str]:
     # ship the new file as a copy (the old path's deletion would not
     # be staged).
     result = _run_git(
-        ["status", "--porcelain", "-z",
-         "--untracked-files=all", "--no-renames"],
+        ["status", "--porcelain", "-z", "--untracked-files=all", "--no-renames"],
         project_path,
     )
     if result.returncode != 0:
@@ -237,9 +247,11 @@ def _git_status_snapshot(project_path: str) -> set[str]:
         # is visible in operator output rather than masquerading as
         # "Coder produced no file changes".
         import logging
+
         logging.getLogger(__name__).warning(
             "git status failed in %s (rc=%s): %s",
-            project_path, result.returncode,
+            project_path,
+            result.returncode,
             (result.stderr or result.stdout or "(no output)").strip(),
         )
         return set()
@@ -282,8 +294,7 @@ def _added_paths_in_diff(working_directory: str) -> list[str]:
     Returns paths sorted for deterministic test output.
     """
     result = _run_git(
-        ["status", "--porcelain", "-z",
-         "--untracked-files=all", "--no-renames"],
+        ["status", "--porcelain", "-z", "--untracked-files=all", "--no-renames"],
         working_directory,
     )
     if result.returncode != 0:
@@ -291,9 +302,11 @@ def _added_paths_in_diff(working_directory: str) -> list[str]:
         # caller sees "no added files" rather than a hidden git failure.
         # The post-exec call site decides whether silence is acceptable.
         import logging
+
         logging.getLogger(__name__).warning(
             "git status failed in %s (rc=%s): %s",
-            working_directory, result.returncode,
+            working_directory,
+            result.returncode,
             (result.stderr or result.stdout or "(no output)").strip(),
         )
         return []
@@ -331,8 +344,7 @@ def _commit_files(
     # Stage explicit paths — never `-A`. Guard against sentinel
     # artifacts that may have sneaked past _files_changed filtering.
     safe_files = [
-        f for f in files
-        if not f.startswith(".sentinel/") and not f.startswith(".claude/")
+        f for f in files if not f.startswith(".sentinel/") and not f.startswith(".claude/")
     ]
     if not safe_files:
         return False, "all files were sentinel/claude artifacts"
@@ -350,6 +362,7 @@ def _commit_files(
     # Per-path staging means one bad file logs a warning but the rest
     # still land. The ship is partial, not destroyed.
     import logging
+
     _log = logging.getLogger(__name__)
     staged: list[str] = []
     add_failures: list[tuple[str, str]] = []
@@ -365,14 +378,15 @@ def _commit_files(
         # since they probably share a root cause.
         first_path, first_err = add_failures[0]
         return False, (
-            f"git add failed for all {len(safe_files)} files; "
-            f"first: {first_path!r}: {first_err}"
+            f"git add failed for all {len(safe_files)} files; first: {first_path!r}: {first_err}"
         )
 
     if add_failures:
         _log.warning(
             "git add failed for %d/%d files (proceeding with %d staged): %s",
-            len(add_failures), len(safe_files), len(staged),
+            len(add_failures),
+            len(safe_files),
+            len(staged),
             [f"{p}: {e}" for p, e in add_failures[:3]],
         )
 
@@ -395,6 +409,7 @@ def _commit_files(
     # doesn't abort the commit in repos with no config (same wrapper
     # used by the push path in `sentinel.pr`).
     from sentinel.git_ops import run_git_with_precommit_recovery
+
     commit_result = run_git_with_precommit_recovery(
         ["commit", "-m", commit_msg, "--", *staged],
         project_path,
@@ -454,8 +469,11 @@ def _write_execution_transcript(
             lines += ["", "## Error", "", "```", result.error, "```"]
         if exception is not None:
             import traceback
+
             lines += [
-                "", "## Exception", "",
+                "",
+                "## Exception",
+                "",
                 "```",
                 "".join(traceback.format_exception(exception)).rstrip(),
                 "```",
@@ -472,25 +490,35 @@ def _write_execution_transcript(
             ]
             if response.stderr:
                 lines += [
-                    "", "### stderr", "",
-                    "```", response.stderr.rstrip(), "```",
+                    "",
+                    "### stderr",
+                    "",
+                    "```",
+                    response.stderr.rstrip(),
+                    "```",
                 ]
             if response.raw_stdout and response.raw_stdout != response.content:
                 lines += [
-                    "", "### Raw stdout", "",
+                    "",
+                    "### Raw stdout",
+                    "",
                     "```",
                     response.raw_stdout[:20000].rstrip(),
                     "```",
                 ]
             lines += [
-                "", "## Content (parsed)", "",
+                "",
+                "## Content (parsed)",
+                "",
                 "```",
                 (response.content or "(empty)")[:20000].rstrip(),
                 "```",
             ]
         if result.files_changed:
             lines += [
-                "", "## Files changed", "",
+                "",
+                "## Files changed",
+                "",
                 *(f"- `{f}`" for f in result.files_changed),
             ]
         lines += ["", "## Prompt", "", "```", prompt[:20000].rstrip(), "```", ""]
@@ -505,6 +533,7 @@ def _write_execution_transcript(
         # Persistence failure must not mask the execution result — log
         # to stderr in the calling process but continue normally.
         import logging
+
         logging.getLogger(__name__).exception(
             "Failed to write execution transcript (non-fatal)",
         )
@@ -562,28 +591,60 @@ CLI_SAFE_SUBCOMMANDS: dict[str, frozenset[str]] = {
     # prefixed with `+` (like `+list`, `+read`); the leading verb is a
     # plain noun (`gmail`, `calendar`, `drive`, `auth`). All `gws`
     # operations are pure command verbs, no script execution path.
-    "gws": frozenset({
-        "gmail", "calendar", "drive", "auth", "config", "version",
-        "help", "tasks", "people", "docs", "sheets", "slides", "forms",
-    }),
+    "gws": frozenset(
+        {
+            "gmail",
+            "calendar",
+            "drive",
+            "auth",
+            "config",
+            "version",
+            "help",
+            "tasks",
+            "people",
+            "docs",
+            "sheets",
+            "slides",
+            "forms",
+        }
+    ),
     # swift — `swift build/test/run/package` are all safe; we omit
     # `swift run` because the second positional is the executable
     # name, and `swift run myapp --help` runs `myapp` with `--help`.
     "swift": frozenset({"build", "test", "package", "version"}),
     "swiftc": _NO_SUBCOMMAND_PROBES,  # compiler — first arg is .swift file
-    "xcrun": _NO_SUBCOMMAND_PROBES,   # toolchain dispatcher; runs binaries
+    "xcrun": _NO_SUBCOMMAND_PROBES,  # toolchain dispatcher; runs binaries
     # go — same caveat as swift: `go run` and `go test ./pkg/...` would
     # potentially execute. Stick to read-only build/dependency verbs.
-    "go": frozenset({
-        "build", "fmt", "vet", "version", "env", "mod", "tool",
-        "doc", "list", "help",
-    }),
+    "go": frozenset(
+        {
+            "build",
+            "fmt",
+            "vet",
+            "version",
+            "env",
+            "mod",
+            "tool",
+            "doc",
+            "list",
+            "help",
+        }
+    ),
     # cargo — Rust's package manager. Same hazard as go: `cargo run`
     # builds AND executes. Stick to inspection/build verbs.
-    "cargo": frozenset({
-        "build", "check", "test", "fmt", "version", "metadata",
-        "tree", "search", "help",
-    }),
+    "cargo": frozenset(
+        {
+            "build",
+            "check",
+            "test",
+            "fmt",
+            "version",
+            "metadata",
+            "tree",
+            "search",
+            "help",
+        }
+    ),
     "rustc": _NO_SUBCOMMAND_PROBES,  # compiler — first arg is source file
     # node — first arg is ALWAYS a script path. Top-level only.
     "node": _NO_SUBCOMMAND_PROBES,
@@ -646,11 +707,36 @@ def _detect_cli_invocations(
 
     # English fillers we routinely see between a CLI mention and the
     # next noun in prose ("use gws to fetch …", "run swift and tests").
-    prose_fillers = frozenset({
-        "to", "the", "a", "an", "and", "or", "but", "with", "from",
-        "into", "onto", "for", "of", "in", "on", "at", "by", "is",
-        "are", "be", "as", "via", "then", "when", "if", "so",
-    })
+    prose_fillers = frozenset(
+        {
+            "to",
+            "the",
+            "a",
+            "an",
+            "and",
+            "or",
+            "but",
+            "with",
+            "from",
+            "into",
+            "onto",
+            "for",
+            "of",
+            "in",
+            "on",
+            "at",
+            "by",
+            "is",
+            "are",
+            "be",
+            "as",
+            "via",
+            "then",
+            "when",
+            "if",
+            "so",
+        }
+    )
 
     seen_cli: list[str] = []
     seen_cli_set: set[str] = set()
@@ -701,14 +787,9 @@ def _detect_cli_invocations(
         #     → drop sub2 and only probe `(cli, sub1)` to avoid triggering
         #     a build step before --help is read.
         sub2_is_safe_action_verb = bool(
-            sub2
-            and sub2.startswith("+")
-            and not sub2.startswith("-")
-            and sub2 not in prose_fillers
+            sub2 and sub2.startswith("+") and not sub2.startswith("-") and sub2 not in prose_fillers
         )
-        probe: tuple[str, ...] = (
-            (cli, sub1, sub2) if sub2_is_safe_action_verb else (cli, sub1)
-        )
+        probe: tuple[str, ...] = (cli, sub1, sub2) if sub2_is_safe_action_verb else (cli, sub1)
 
         if probe not in sub_probes_seen:
             sub_probes.append(probe)
@@ -720,7 +801,9 @@ def _detect_cli_invocations(
 
 
 def _capture_cli_help(
-    probe: tuple[str, ...], *, timeout_sec: int,
+    probe: tuple[str, ...],
+    *,
+    timeout_sec: int,
 ) -> str | None:
     """Run `<probe...> --help` and return up to CLI_HELP_MAX_LINES lines.
 
@@ -735,16 +818,21 @@ def _capture_cli_help(
     (subprocess.run does that automatically with list-form args).
     """
     import logging
+
     cmd = [*probe, "--help"]
     try:
         result = subprocess.run(
             cmd,
-            capture_output=True, text=True, timeout=timeout_sec,
+            capture_output=True,
+            text=True,
+            timeout=timeout_sec,
             check=False,
         )
     except (subprocess.TimeoutExpired, OSError, ValueError) as exc:
         logging.getLogger(__name__).debug(
-            "CLI help probe %s failed: %s", " ".join(cmd), exc,
+            "CLI help probe %s failed: %s",
+            " ".join(cmd),
+            exc,
         )
         return None
     # Some tools (e.g. `pytest --help`) write to stdout; others (busybox
@@ -811,7 +899,8 @@ def _build_cli_help_section(
     text = "\n".join(parts)
 
     probes = _detect_cli_invocations(
-        text, allowlist,
+        text,
+        allowlist,
         max_subcommands=coder_config.cli_help_max_subcommands,
     )
     if not probes:
@@ -823,6 +912,7 @@ def _build_cli_help_section(
     installed_probes: list[tuple[str, ...]] = []
     seen_missing: set[str] = set()
     import logging
+
     log = logging.getLogger(__name__)
     for probe in probes:
         cli = probe[0]
@@ -839,7 +929,8 @@ def _build_cli_help_section(
     sections: list[str] = []
     for probe in installed_probes:
         captured = _capture_cli_help(
-            probe, timeout_sec=coder_config.cli_help_timeout_sec,
+            probe,
+            timeout_sec=coder_config.cli_help_timeout_sec,
         )
         if captured is None:
             continue
@@ -962,6 +1053,7 @@ class Coder:
         branch: str,
         review_feedback: ReviewResult | None = None,
         coder_config: CoderConfig | None = None,
+        cortex_context: str | None = None,
     ) -> ExecutionResult:
         """Execute a work item via the coder provider's agentic mode.
 
@@ -976,6 +1068,7 @@ class Coder:
         evidence survives `git worktree remove --force`).
         """
         from sentinel.journal import set_current_role
+
         set_current_role("coder")
         start = time.time()
         result = ExecutionResult(
@@ -997,7 +1090,11 @@ class Coder:
             )
             result.duration_ms = int((time.time() - start) * 1000)
             _write_execution_transcript(
-                ad, work_item, prompt, response, result,
+                ad,
+                work_item,
+                prompt,
+                response,
+                result,
             )
             return result
 
@@ -1018,7 +1115,12 @@ class Coder:
                 result.error = str(exc)
                 result.duration_ms = int((time.time() - start) * 1000)
                 _write_execution_transcript(
-                    ad, work_item, prompt, response, result, exception=exc,
+                    ad,
+                    work_item,
+                    prompt,
+                    response,
+                    result,
+                    exception=exc,
                 )
                 return result
 
@@ -1058,12 +1160,8 @@ class Coder:
             )
             non_blocking_section = ""
             if review_feedback.non_blocking_observations:
-                items = "\n".join(
-                    f"- {o}" for o in review_feedback.non_blocking_observations
-                )
-                non_blocking_section = (
-                    f"### Non-blocking observations (optional)\n\n{items}\n"
-                )
+                items = "\n".join(f"- {o}" for o in review_feedback.non_blocking_observations)
+                non_blocking_section = f"### Non-blocking observations (optional)\n\n{items}\n"
             prompt = REVISE_PROMPT.format(
                 project_name=Path(ad).name,
                 title=work_item.title,
@@ -1086,7 +1184,8 @@ class Coder:
         # threaded `coder_config` (legacy callers).
         try:
             help_section = _build_cli_help_section(
-                work_item, coder_config=coder_config,
+                work_item,
+                coder_config=coder_config,
             )
         except Exception as exc:  # noqa: BLE001 — defense in depth
             # The helper already swallows per-probe errors; a top-level
@@ -1094,12 +1193,17 @@ class Coder:
             # Log loudly but don't block the work — the coder can still
             # do its job without the help section.
             import logging
+
             logging.getLogger(__name__).warning(
-                "CLI help pre-load failed (continuing without): %s", exc,
+                "CLI help pre-load failed (continuing without): %s",
+                exc,
             )
             help_section = ""
         if help_section:
             prompt = help_section + prompt
+        ctx = cortex_fence(cortex_context)
+        if ctx:
+            prompt = ctx + prompt
 
         # Execute via provider's agentic code mode — runs in `wd`,
         # which is the worktree path in worktree-managed mode and
@@ -1110,7 +1214,12 @@ class Coder:
             result.error = f"Coder execution failed: {e}"
             result.duration_ms = int((time.time() - start) * 1000)
             _write_execution_transcript(
-                ad, work_item, prompt, response, result, exception=e,
+                ad,
+                work_item,
+                prompt,
+                response,
+                result,
+                exception=e,
             )
             return result
 
@@ -1128,7 +1237,11 @@ class Coder:
             result.error = detail
             result.duration_ms = int((time.time() - start) * 1000)
             _write_execution_transcript(
-                ad, work_item, prompt, response, result,
+                ad,
+                work_item,
+                prompt,
+                response,
+                result,
             )
             return result
 
@@ -1143,12 +1256,15 @@ class Coder:
         if not changed:
             result.status = "failed"
             result.error = (
-                "Coder produced no file changes. See transcript for the "
-                "full provider response."
+                "Coder produced no file changes. See transcript for the full provider response."
             )
             result.duration_ms = int((time.time() - start) * 1000)
             _write_execution_transcript(
-                ad, work_item, prompt, response, result,
+                ad,
+                work_item,
+                prompt,
+                response,
+                result,
             )
             return result
 
@@ -1164,11 +1280,13 @@ class Coder:
             added = _added_paths_in_diff(wd)
             if added:
                 import logging
+
                 logging.getLogger(__name__).warning(
                     "Refinement %r created new files: %s. Refinements "
                     "should improve existing code; consider re-classifying "
                     "as expansion.",
-                    work_item.title, added,
+                    work_item.title,
+                    added,
                 )
 
         # Run tests to verify. The touchstone-config lives at the project
@@ -1182,8 +1300,11 @@ class Coder:
         if test_cmd:
             try:
                 test_result = subprocess.run(
-                    test_cmd.split(), capture_output=True, text=True,
-                    cwd=wd, timeout=300,
+                    test_cmd.split(),
+                    capture_output=True,
+                    text=True,
+                    cwd=wd,
+                    timeout=300,
                 )
                 result.tests_passing = test_result.returncode == 0
             except (subprocess.TimeoutExpired, FileNotFoundError):
@@ -1198,7 +1319,9 @@ class Coder:
         # "changes-requested" is more useful with real commits to look
         # at than with vaporized work.
         commit_ok, commit_info = _commit_files(
-            wd, result.files_changed, work_item,
+            wd,
+            result.files_changed,
+            work_item,
         )
         if commit_ok:
             result.commit_sha = commit_info
@@ -1211,13 +1334,21 @@ class Coder:
             result.status = "failed"
             result.duration_ms = int((time.time() - start) * 1000)
             _write_execution_transcript(
-                ad, work_item, prompt, response, result,
+                ad,
+                work_item,
+                prompt,
+                response,
+                result,
             )
             return result
 
         result.status = "success" if result.tests_passing else "partial"
         result.duration_ms = int((time.time() - start) * 1000)
         _write_execution_transcript(
-            ad, work_item, prompt, response, result,
+            ad,
+            work_item,
+            prompt,
+            response,
+            result,
         )
         return result
