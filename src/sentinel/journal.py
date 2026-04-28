@@ -30,12 +30,55 @@ import json
 import logging
 import os
 import time
+import uuid as _uuid
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path  # noqa: TC003 — runtime use for fs writes
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Schema constants — single source of truth for consumers (Touchstone et al.)
+# ---------------------------------------------------------------------------
+
+SCHEMA_VERSION = "1.0"
+
+PR_BODY_START = "<!-- pr-body-start -->"
+PR_BODY_END = "<!-- pr-body-end -->"
+DECISIONS_START = "<!-- decisions-start -->"
+DECISIONS_END = "<!-- decisions-end -->"
+TRANSCRIPT_START = "<!-- transcript-start -->"
+TRANSCRIPT_END = "<!-- transcript-end -->"
+
+_VALID_STATUSES = frozenset({"completed", "in-progress", "failed", "blocked-on-human"})
+
+
+def render_frontmatter(
+    run_id: str,
+    cycle_id: str,
+    branch: str,
+    status: str,
+    timestamp: datetime | None = None,
+) -> str:
+    """Return the leading YAML frontmatter block including delimiters.
+
+    Raises ValueError for an unrecognised status so bad values surface
+    at write time rather than silently landing in the file.
+    """
+    if status not in _VALID_STATUSES:
+        raise ValueError(f"invalid status {status!r}; must be one of {sorted(_VALID_STATUSES)}")
+    ts = (timestamp or datetime.now()).strftime("%Y-%m-%dT%H:%M:%S")
+    return (
+        "---\n"
+        f"schema-version: {SCHEMA_VERSION}\n"
+        f"sentinel-run-id: {run_id}\n"
+        f"timestamp: {ts}\n"
+        f"cycle-id: {cycle_id}\n"
+        f"branch: {branch}\n"
+        f"status: {status}\n"
+        "---"
+    )
 
 
 def parse_journal_calls(path: Path) -> list[dict]:
@@ -48,6 +91,7 @@ def parse_journal_calls(path: Path) -> list[dict]:
     and any future per-cycle introspection that wants the call data.
     """
     import re as _re
+
     try:
         text = path.read_text()
     except OSError as e:
@@ -71,7 +115,9 @@ def parse_journal_calls(path: Path) -> list[dict]:
             # silent partial would let cost/routing under-report.
             logger.warning(
                 "could not parse JSONL line %d of %s: %s",
-                ln_no, path, e,
+                ln_no,
+                path,
+                e,
             )
             continue
     return calls
@@ -102,6 +148,7 @@ class PhaseRecord:
 @dataclass
 class ProviderCall:
     """One LLM/HTTP call's metadata. NOT the prompt or response."""
+
     phase: str
     provider: str
     model: str
@@ -152,6 +199,7 @@ class WorkItemRecord:
 @dataclass
 class Journal:
     """Per-cycle run journal. One per `sentinel work` invocation."""
+
     project_path: Path
     project_name: str
     branch: str
@@ -159,6 +207,20 @@ class Journal:
     started_at: float = field(default_factory=time.time)
     ended_at: float | None = None
     exit_reason: str = "in_progress"
+    # Schema v1 identity fields
+    run_id: str = field(default_factory=lambda: str(_uuid.uuid4()))
+    # Slug that identifies this cycle; defaults to the timestamp used in
+    # the filename so the frontmatter and the path agree without extra wiring.
+    cycle_id: str = ""
+    # One of: completed | in-progress | failed | blocked-on-human.
+    # Validated by render_frontmatter at write time.
+    status: str = "in-progress"
+    # Optional pre-assembled content for each body section. When non-empty,
+    # callers supply the full section body; when empty the Journal assembles
+    # it from the accumulated cycle state (phases, work items, provider calls).
+    pr_body: str = ""
+    decisions: str = ""
+    transcript: str = ""
     phases: list[PhaseRecord] = field(default_factory=list)
     provider_calls: list[ProviderCall] = field(default_factory=list)
     work_items: list[WorkItemRecord] = field(default_factory=list)
@@ -191,8 +253,11 @@ class Journal:
                 return
         # No matching open phase — record one so the data isn't lost
         record = PhaseRecord(
-            name=name, started_at=time.time(), ended_at=time.time(),
-            status=status, error=error,
+            name=name,
+            started_at=time.time(),
+            ended_at=time.time(),
+            status=status,
+            error=error,
         )
         self.phases.append(record)
         self._checkpoint()
@@ -285,19 +350,18 @@ class Journal:
             path = runs_dir / f"{ts}-{n}.md"
         return path
 
-    def _render(self) -> str:
+    def _render_pr_body(self) -> str:
+        """Assemble the PR-body section from accumulated cycle state.
+
+        This is the curated summary a human reviewer would want to see:
+        totals, what shipped, what failed. Provider call details belong in
+        the transcript section, not here.
+        """
         total_cost = sum(c.cost_usd for c in self.provider_calls)
         total_duration = (self.ended_at or time.time()) - self.started_at
-        skipped_count = sum(
-            1 for c in self.provider_calls if c.error == "budget_exhausted"
-        )
-        started = datetime.fromtimestamp(self.started_at).strftime(
-            "%Y-%m-%d %H:%M:%S",
-        )
+        skipped_count = sum(1 for c in self.provider_calls if c.error == "budget_exhausted")
 
         lines: list[str] = [
-            f"# Sentinel Run — {started}",
-            "",
             f"**Project:** {self.project_name}  "
             f"**Branch:** {self.branch}  "
             f"**Budget:** {self.budget_str or '(none)'}  "
@@ -307,22 +371,10 @@ class Journal:
             f"**Total cost:** ${total_cost:.4f}  "
             f"**Provider calls:** {len(self.provider_calls)} "
             f"({skipped_count} skipped — budget exhausted)",
-            "",
         ]
 
-        if self.phases:
-            lines += ["## Phases", "", "| Phase | Duration | Status |", "|---|---|---|"]
-            for p in self.phases:
-                duration = (
-                    f"{p.duration_s:.2f}s" if p.duration_s is not None
-                    else "—"
-                )
-                status = p.status if not p.error else f"{p.status} ({p.error})"
-                lines.append(f"| {p.name} | {duration} | {status} |")
-            lines.append("")
-
         if self.work_items:
-            lines += ["## Work items", ""]
+            lines += ["", "## Work items", ""]
             for wi in self.work_items:
                 bullet = f"- **{wi.work_item_id}** {wi.title}"
                 lines.append(bullet)
@@ -333,21 +385,28 @@ class Journal:
                 if wi.reviewer_verdict:
                     lines.append(f"  - Reviewer: {wi.reviewer_verdict}")
                 if wi.verification:
-                    # Visual marker so verified vs not_verified jumps out
-                    # when scanning the journal.
                     icon = {
                         "verified": "✅",
                         "not_verified": "❌",
                         "unverified": "⚠",
                         "no_check_defined": "—",
                     }.get(wi.verification, "?")
-                    lines.append(
-                        f"  - Verifier: {icon} {wi.verification}"
-                    )
+                    lines.append(f"  - Verifier: {icon} {wi.verification}")
                 if wi.pr_url:
-                    lines.append(
-                        f"  - PR: [{wi.ship_status or 'opened'}] {wi.pr_url}"
-                    )
+                    lines.append(f"  - PR: [{wi.ship_status or 'opened'}] {wi.pr_url}")
+
+        return "\n".join(lines)
+
+    def _render_transcript(self) -> str:
+        """Assemble the transcript section: phase timings and verbose provider call log."""
+        lines: list[str] = []
+
+        if self.phases:
+            lines += ["## Phases", "", "| Phase | Duration | Status |", "|---|---|---|"]
+            for p in self.phases:
+                duration = f"{p.duration_s:.2f}s" if p.duration_s is not None else "—"
+                status = p.status if not p.error else f"{p.status} ({p.error})"
+                lines.append(f"| {p.name} | {duration} | {status} |")
             lines.append("")
 
         if self.provider_calls:
@@ -392,14 +451,11 @@ class Journal:
                     in_tok = sum(c.input_tokens for c in calls)
                     out_tok = sum(c.output_tokens for c in calls)
                     lines.append(
-                        f"| {role} | {len(calls)} | ${cost:.4f} | "
-                        f"{in_tok:,}/{out_tok:,} |"
+                        f"| {role} | {len(calls)} | ${cost:.4f} | {in_tok:,}/{out_tok:,} |"
                     )
                 lines.append("")
 
-            errors_with_stderr = [
-                c for c in self.provider_calls if c.error and c.stderr
-            ]
+            errors_with_stderr = [c for c in self.provider_calls if c.error and c.stderr]
             if errors_with_stderr:
                 lines += ["## Provider errors", ""]
                 for c in errors_with_stderr:
@@ -419,32 +475,71 @@ class Journal:
 
         return "\n".join(lines)
 
+    def _render(self) -> str:
+        started = datetime.fromtimestamp(self.started_at)
+        cycle_id = self.cycle_id or started.strftime("%Y-%m-%d-%H%M%S")
+
+        fm = render_frontmatter(
+            run_id=self.run_id,
+            cycle_id=cycle_id,
+            branch=self.branch,
+            status=self.status,
+            timestamp=started,
+        )
+
+        pr_body_content = self.pr_body or self._render_pr_body()
+        transcript_content = self.transcript or self._render_transcript()
+
+        parts = [
+            fm,
+            "",
+            f"# Cycle {cycle_id}",
+            "",
+            PR_BODY_START,
+            pr_body_content,
+            PR_BODY_END,
+            "",
+            DECISIONS_START,
+            self.decisions,
+            DECISIONS_END,
+            "",
+            TRANSCRIPT_START,
+            transcript_content,
+            TRANSCRIPT_END,
+        ]
+
+        return "\n".join(parts)
+
 
 # ContextVar-scoped current journal. None when not in a sentinel work
 # cycle (unit tests, ad-hoc scan, etc.) so calling code can no-op
 # rather than raising.
 _current_journal: ContextVar[Journal | None] = ContextVar(
-    "sentinel_journal", default=None,
+    "sentinel_journal",
+    default=None,
 )
 # ContextVar for the active phase name. Providers read this when
 # recording calls so each provider call carries the phase context
 # without the provider needing the journal API itself.
 _current_phase: ContextVar[str] = ContextVar(
-    "sentinel_phase", default="(unknown)",
+    "sentinel_phase",
+    default="(unknown)",
 )
 # ContextVar for the active role (monitor/researcher/planner/coder/reviewer).
 # Roles set this on entry to their work; providers read it when recording
 # calls. Defaults to empty so test harness and ad-hoc usage produce
 # blank role rather than a misleading default.
 _current_role: ContextVar[str] = ContextVar(
-    "sentinel_role", default="",
+    "sentinel_role",
+    default="",
 )
 # ContextVar set by the Router when it overrides a configured model via
 # a routing rule. The next provider call consumes and clears it (one-shot)
 # so the override is recorded against the call it produced — not against
 # subsequent calls that may have used a different rule (or no rule).
 _pending_routing_reason: ContextVar[str] = ContextVar(
-    "sentinel_pending_routing_reason", default="",
+    "sentinel_pending_routing_reason",
+    default="",
 )
 
 
@@ -529,16 +624,18 @@ def record_provider_call(
     journal = current_journal()
     if journal is None:
         return
-    journal.record_provider_call(ProviderCall(
-        phase=phase if phase is not None else current_phase(),
-        provider=provider,
-        model=model,
-        latency_ms=latency_ms,
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        cost_usd=cost_usd,
-        error=error,
-        role=role if role is not None else current_role(),
-        routed_via=consume_pending_routing_reason(),
-        stderr=stderr,
-    ))
+    journal.record_provider_call(
+        ProviderCall(
+            phase=phase if phase is not None else current_phase(),
+            provider=provider,
+            model=model,
+            latency_ms=latency_ms,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=cost_usd,
+            error=error,
+            role=role if role is not None else current_role(),
+            routed_via=consume_pending_routing_reason(),
+            stderr=stderr,
+        )
+    )
