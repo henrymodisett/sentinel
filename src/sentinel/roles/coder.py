@@ -952,6 +952,8 @@ Report what you changed in response to the findings and whether tests pass.
 class Coder:
     def __init__(self, router: Router) -> None:
         self.router = router
+        from sentinel.runtime.file_state import FileStateTracker
+        self._file_state_tracker = FileStateTracker()
 
     async def execute(
         self,
@@ -1101,6 +1103,18 @@ class Coder:
         if help_section:
             prompt = help_section + prompt
 
+        # File-state isolation: snapshot candidate reads before the
+        # subagent runs so we can detect if a sibling task mutated
+        # those files while this task was in flight.
+        from sentinel.runtime.file_state import generate_task_id
+        _task_id = generate_task_id()
+        _candidate_reads = [
+            Path(wd) / p
+            for entry in work_item.files
+            if (p := _file_path(entry)) is not None
+        ]
+        self._file_state_tracker.snapshot_reads(_task_id, _candidate_reads)
+
         # Execute via provider's agentic code mode — runs in `wd`,
         # which is the worktree path in worktree-managed mode and
         # the project path in legacy mode.
@@ -1139,6 +1153,16 @@ class Coder:
         post_snapshot = _git_status_snapshot(wd)
         changed = sorted(post_snapshot - pre_snapshot)
         result.files_changed = changed
+
+        # Record the files this task wrote, then surface any conflicts
+        # where a sibling task had previously written to files we read.
+        # Fire-and-forget: a conflict-write failure must not block the cycle.
+        self._file_state_tracker.record_writes(
+            _task_id, [Path(wd) / f for f in changed],
+        )
+        _conflicts = self._file_state_tracker.detect_conflicts(_task_id)
+        if _conflicts:
+            self._handle_conflicts(_conflicts, artifacts_directory=ad)
 
         if not changed:
             result.status = "failed"
@@ -1221,3 +1245,29 @@ class Coder:
             ad, work_item, prompt, response, result,
         )
         return result
+
+    def _handle_conflicts(
+        self,
+        conflicts: list,  # list[Conflict] — avoid runtime import at class level
+        *,
+        artifacts_directory: str,
+    ) -> None:
+        """Write a structured incident entry for each file-state conflict.
+
+        Writes to `<artifacts_directory>/.sentinel/conflicts/`.  Failure
+        is logged as a warning and does not propagate — conflict logging
+        must not abort the coder cycle (Phase 1: visibility only).
+        """
+        import logging as _logging
+
+        from sentinel.runtime.file_state import write_conflict_entry
+        _log = _logging.getLogger(__name__)
+        dest_dir = Path(artifacts_directory) / ".sentinel" / "conflicts"
+        for conflict in conflicts:
+            _log.warning(
+                "file-state conflict: %s read by %s but written by %s",
+                conflict.path, conflict.reader_task_id, conflict.writer_task_id,
+            )
+            written = write_conflict_entry(conflict, dest_dir)
+            if written:
+                _log.info("file-state conflict entry written: %s", written)
