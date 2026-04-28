@@ -3,7 +3,7 @@
 <!-- touchstone:shared-principles:start -->
 ## Shared Engineering Principles (apply these first)
 
-These principles are touchstone-owned and shared across every project. Apply them as the **primary review criteria** before any project-specific rule below — a reviewer that lets a band-aid or a silent failure through has missed the point of this gate.
+These principles are touchstone-owned and shared across every project. Apply them as the **primary coding and review criteria** before any project-specific rule below — an agent that lets a band-aid or a silent failure through has missed the point of this gate.
 
 - **No band-aids** — fix the root cause; if patching a symptom, say so explicitly and name the root cause.
 - **Keep interfaces narrow** — expose the smallest stable contract; don't leak storage shape, vendor SDKs, or workflow sequencing.
@@ -26,7 +26,7 @@ Full rationale, worked examples, and the *why* behind each rule:
 - `principles/documentation-ownership.md`
 - `principles/git-workflow.md`
 
-This block is managed by `touchstone` and refreshes on `touchstone update` / `touchstone init`. Edit content **outside** the markers to add project-specific reviewer guidance — touchstone will not touch it.
+This block is managed by `touchstone` and refreshes on `touchstone update` / `touchstone init`. Edit content **outside** the markers to add project-specific agent guidance — touchstone will not touch it.
 <!-- touchstone:shared-principles:end -->
 
 

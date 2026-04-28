@@ -78,9 +78,147 @@
 #
 set -euo pipefail
 
+# extract_review_sentinel — find exactly one standalone CODEX_REVIEW_*
+# sentinel line in the reviewer's output. The wrapper used to inspect
+# only the final physical line via `tail -1 | tr -d '\r '` and case on
+# that exact value; any footer after the sentinel — a stray markdown
+# rule, a closing fence, an LLM's habitual "Hope this helps." — pushed
+# the real sentinel off the last position and the wrapper reported
+# malformed despite a clean review. Reading "the unique standalone
+# sentinel line, anywhere in the output" is robust to that footer
+# class while still rejecting ambiguous cases (zero or multiple
+# sentinels) where the contract was actually broken.
+extract_review_sentinel() {
+  awk '
+    /^[[:space:]]*CODEX_REVIEW_(CLEAN|FIXED|BLOCKED)[[:space:]]*$/ {
+      line = $0
+      gsub(/\r/, "", line)
+      sub(/^[[:space:]]+/, "", line)
+      sub(/[[:space:]]+$/, "", line)
+      sentinel = line
+      count++
+    }
+    END {
+      if (count == 1) {
+        print sentinel
+      }
+    }
+  '
+}
+
+# Test entry-point — when CODEX_REVIEW_TEST_SENTINEL=1, read stdin,
+# pipe it through the helper, and exit. Lets shell tests verify the
+# extraction logic in isolation without spinning up the full review
+# pipeline.
+if [ "${CODEX_REVIEW_TEST_SENTINEL:-0}" = "1" ]; then
+  extract_review_sentinel
+  exit 0
+fi
+
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 CONFIG_FILE="$REPO_ROOT/.codex-review.toml"
 cd "$REPO_ROOT"
+
+# --------------------------------------------------------------------------
+# Skip-event audit log
+# --------------------------------------------------------------------------
+#
+# Every skip path and every successful review run writes a single TSV line
+# to ~/.touchstone-review-log (overridable via TOUCHSTONE_REVIEW_LOG) so the
+# user can audit how often the AI review safety net falls open silently.
+# The "No silent failures" engineering principle applies: a Conductor
+# outage during a critical week shouldn't be invisible.
+#
+# Format (6 tab-separated fields):
+#   <ISO8601 timestamp>\t<project_path>\t<branch>\t<short_sha>\t<reason>\t<detail>
+#
+# Reason codes (kebab-case):
+#   ran                      review actually executed (the denominator)
+#   conductor-missing        Conductor CLI not installed / no provider authed
+#   conductor-error          reviewer crashed, timed out, malformed sentinel
+#   network-error            (reserved — Conductor reports this via exit code)
+#   config-parse-error       (reserved — TOML parser is permissive today)
+#   config-disabled          [review].enabled=false in .codex-review.toml
+#   review-disabled-by-user  CODEX_REVIEW_ENABLED=false at the env layer
+#   force-skip               (reserved — no env var skips today; future use)
+#   dry-run                  (reserved — bin/touchstone review --dry-run path)
+#   other                    catch-all; detail field names the specific case
+
+# `${VAR-default}` (single dash) substitutes the default ONLY when VAR is
+# unset, NOT when it is an empty string. This preserves the documented
+# behavior that TOUCHSTONE_REVIEW_LOG="" disables logging entirely (the
+# `[ -z "$log_file" ] && return 0` guard below relies on the empty
+# string surviving expansion).
+TOUCHSTONE_REVIEW_LOG="${TOUCHSTONE_REVIEW_LOG-$HOME/.touchstone-review-log}"
+TOUCHSTONE_REVIEW_LOG_MAX_LINES=1000
+
+log_skip_event() {
+  # log_skip_event <reason_code> [<detail>]
+  #
+  # Fail-safe: never let a logging error break the hook. The hook is
+  # already a fail-open safety net — the audit log must not become a new
+  # blocking surface.
+  local reason="$1"
+  local detail="${2:-}"
+  local log_file="$TOUCHSTONE_REVIEW_LOG"
+  local timestamp branch sha tmp_dir tmp_file line_count keep_lines
+
+  # Disable logging entirely by setting TOUCHSTONE_REVIEW_LOG=/dev/null or
+  # to the empty string. Useful for callers (tests, scripted runs) that
+  # don't want a log entry.
+  [ -z "$log_file" ] && return 0
+  [ "$log_file" = "/dev/null" ] && return 0
+
+  # Portable ISO8601 with timezone offset (BSD `date` and GNU `date` both
+  # accept `+%Y-%m-%dT%H:%M:%S%z`). The %z form ("-0700") is unambiguous.
+  timestamp="$(date '+%Y-%m-%dT%H:%M:%S%z' 2>/dev/null || echo unknown)"
+
+  # `git rev-parse --abbrev-ref HEAD` returns "HEAD" in detached state —
+  # acceptable; the audit just needs a stable label.
+  branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+  sha="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+
+  # Strip embedded tabs/newlines from any field — they would break the
+  # TSV invariant and make the log un-greppable.
+  reason="$(printf '%s' "$reason" | tr '\t\n' '  ')"
+  detail="$(printf '%s' "$detail" | tr '\t\n' '  ')"
+  branch="$(printf '%s' "$branch" | tr '\t\n' '  ')"
+
+  tmp_dir="${TMPDIR:-/tmp}"
+  tmp_dir="${tmp_dir%/}"
+  tmp_file="$tmp_dir/touchstone-review-log.$$.tmp"
+
+  # Ensure the parent directory exists. If creation fails, give up
+  # silently — logging is best-effort.
+  mkdir -p "$(dirname "$log_file")" 2>/dev/null || return 0
+
+  # Cap the log at $TOUCHSTONE_REVIEW_LOG_MAX_LINES entries by tailing
+  # the existing file before appending the new line, then atomically
+  # replacing. `wc -l` and `tail -n N` are POSIX-portable (no GNU-only
+  # flags) so this works on BSD/macOS without coreutils.
+  if [ -f "$log_file" ]; then
+    # Guard against `set -euo pipefail` propagating a failed pipeline up
+    # to the hook's exit code — log_skip_event must never block a push,
+    # even on an unreadable log file or a TOCTOU race against rotation.
+    line_count="$(wc -l < "$log_file" 2>/dev/null | tr -d ' ')" || line_count=0
+    line_count="${line_count:-0}"
+    if [ "$line_count" -ge "$TOUCHSTONE_REVIEW_LOG_MAX_LINES" ]; then
+      keep_lines=$((TOUCHSTONE_REVIEW_LOG_MAX_LINES - 1))
+      tail -n "$keep_lines" "$log_file" > "$tmp_file" 2>/dev/null || : > "$tmp_file"
+    else
+      cat "$log_file" > "$tmp_file" 2>/dev/null || : > "$tmp_file"
+    fi
+  else
+    : > "$tmp_file"
+  fi
+
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$timestamp" "$REPO_ROOT" "$branch" "$sha" "$reason" "$detail" \
+    >> "$tmp_file" 2>/dev/null || { rm -f "$tmp_file" 2>/dev/null; return 0; }
+
+  mv "$tmp_file" "$log_file" 2>/dev/null || rm -f "$tmp_file" 2>/dev/null
+  return 0
+}
 
 # --------------------------------------------------------------------------
 # Configuration loading
@@ -1045,7 +1183,7 @@ resolve_assist_reviewer() {
   ASSIST_REVIEWER=""
   ASSIST_REVIEWER_STATUS=""
 
-  for helper in "${ASSIST_HELPERS[@]}"; do
+  for helper in ${ASSIST_HELPERS[@]+"${ASSIST_HELPERS[@]}"}; do
     if [ "$helper" = "$ACTIVE_REVIEWER" ]; then
       ASSIST_REVIEWER_STATUS="${ASSIST_REVIEWER_STATUS}    ${helper}: skipped primary reviewer\n"
       continue
@@ -1214,10 +1352,15 @@ handle_error() {
 
   if [ "$ON_ERROR" = "fail-closed" ]; then
     echo "==> ERROR ($reason) — blocking push (on_error=fail-closed)." >&2
+    # Logged as a skip even though the push is blocked, because the
+    # review still failed to produce a verdict — the audit cares about
+    # "did the safety net actually run?" not "did the push proceed?".
+    log_skip_event conductor-error "fail-closed:${reason}"
     exit 1
   else
     echo "==> ERROR ($reason) — not blocking push (on_error=fail-open)."
     echo "    Set on_error = \"fail-closed\" in .codex-review.toml to block on errors."
+    log_skip_event conductor-error "fail-open:${reason}"
     exit 0
   fi
 }
@@ -1230,10 +1373,12 @@ handle_error() {
 # to the default branch still run the review.
 if is_truthy "${CODEX_REVIEW_IN_PROGRESS:-false}"; then
   echo "==> Review already in progress — skipping nested review."
+  log_skip_event other nested-review-in-progress
   exit 0
 fi
 
 if should_skip_pre_push_review; then
+  log_skip_event other "feature-branch-push:${PRE_COMMIT_REMOTE_BRANCH:-unknown}"
   exit 0
 fi
 
@@ -1250,6 +1395,7 @@ if is_pre_push_hook && ! is_truthy "${CODEX_REVIEW_FORCE:-false}"; then
     if _firstpush_commit_count="$(git rev-list --count HEAD 2>/dev/null)" \
       && [ "$_firstpush_commit_count" = "1" ]; then
       echo "==> Codex review skipped — first push on a fresh scaffold (HEAD is the initial commit)."
+      log_skip_event other fresh-scaffold-first-push
       exit 0
     fi
   fi
@@ -1257,6 +1403,14 @@ fi
 
 if ! is_truthy "$REVIEW_ENABLED"; then
   echo "==> AI review disabled by .codex-review.toml — skipping review."
+  # Distinguish "user set CODEX_REVIEW_ENABLED=false in their env" from
+  # "the project's .codex-review.toml has enabled=false" — the env var
+  # always wins, so its presence is the signal.
+  if [ -n "${CODEX_REVIEW_ENABLED:-}" ] && ! is_truthy "${CODEX_REVIEW_ENABLED}"; then
+    log_skip_event review-disabled-by-user "CODEX_REVIEW_ENABLED=${CODEX_REVIEW_ENABLED}"
+  else
+    log_skip_event config-disabled "review.enabled=false"
+  fi
   exit 0
 fi
 
@@ -1269,12 +1423,14 @@ fi
 # Find merge base so we review only this branch's commits.
 if ! MERGE_BASE="$(git merge-base "$BASE" HEAD 2>/dev/null)"; then
   echo "==> Couldn't find merge base with $BASE — skipping review."
+  log_skip_event other "merge-base-missing:${BASE}"
   exit 0
 fi
 
 # Skip if no changes vs base.
 if git diff --quiet "$MERGE_BASE"..HEAD; then
   echo "==> No changes vs $BASE — skipping review."
+  log_skip_event other "no-changes-vs:${BASE}"
   exit 0
 fi
 
@@ -1299,6 +1455,7 @@ if ! resolve_reviewer; then
   printf '%b' "$REVIEWER_STATUS"
   echo "    Touchstone 2.0 routes every review through the \`conductor\` CLI."
   echo "    Fix above, then re-run \`git push\` to trigger review again."
+  log_skip_event conductor-missing "no-reviewer-available"
   exit 0
 fi
 REVIEWER_LABEL="$(reviewer_label)"
@@ -1316,8 +1473,9 @@ AUTOFIX_POLICY="$(build_autofix_policy)"
 read -r -d '' REVIEW_PROMPT <<PROMPT_EOF || true
 You are reviewing AND optionally auto-fixing a pull request before it reaches the default branch.
 
-Read AGENTS.md at the repo root for the full review rubric (if it exists).
-Read CLAUDE.md at the repo root for project context (if it exists).
+Read AGENTS.md at the repo root for project context and the review rubric (if it exists).
+If AGENTS.md has both authoring guidance and a review guide, use the review guide for findings.
+Read CLAUDE.md at the repo root for additional Claude-specific project context (if it exists).
 
 Do NOT flag: formatting, style, naming, missing docstrings, speculative refactors, "you could consider" observations without a concrete bug.
 
@@ -1555,8 +1713,9 @@ You are a peer reviewer giving a focused second opinion before a push.
 Do not edit files. Do not stage, commit, or modify anything. You are advisory only.
 Answer the primary reviewer concisely and directly. Do not emit CODEX_REVIEW_CLEAN, CODEX_REVIEW_FIXED, or CODEX_REVIEW_BLOCKED.
 
-Read AGENTS.md at the repo root for the review rubric if it exists.
-Read CLAUDE.md at the repo root for project context if it exists.
+Read AGENTS.md at the repo root for project context and the review rubric if it exists.
+If AGENTS.md has both authoring guidance and a review guide, use the review guide for findings.
+Read CLAUDE.md at the repo root for additional Claude-specific project context if it exists.
 
 ## Primary reviewer
 
@@ -1961,6 +2120,7 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
   if [ "$DIFF_LINE_COUNT" -gt "$MAX_DIFF_LINES" ]; then
     echo "==> Diff is $DIFF_LINE_COUNT lines (> $MAX_DIFF_LINES cap) — skipping review."
     echo "    Override with: CODEX_REVIEW_MAX_DIFF_LINES=100000 git push"
+    log_skip_event other "diff-too-large:${DIFF_LINE_COUNT}>${MAX_DIFF_LINES}"
     exit 0
   fi
 
@@ -1971,6 +2131,7 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
     if [ -n "$REVIEW_CACHE_KEY" ] && [ -f "$(clean_review_cache_file "$REVIEW_CACHE_KEY")" ]; then
       echo "==> Review previously passed for this exact diff — skipping repeat review."
       echo "    Force a fresh review with: CODEX_REVIEW_DISABLE_CACHE=1 git push"
+      log_skip_event other "cache-hit:${REVIEW_CACHE_KEY}"
       exit 0
     fi
   fi
@@ -2070,8 +2231,8 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
     fi
   fi
 
-  LAST_LINE="$(printf '%s\n' "$OUTPUT" | tail -1 | tr -d '\r ')"
-  case "$LAST_LINE" in
+  LAST_SENTINEL="$(printf '%s\n' "$OUTPUT" | extract_review_sentinel)"
+  case "$LAST_SENTINEL" in
     CODEX_REVIEW_CLEAN)
       phase "done — clean"
       clean_subtitle="${REVIEWER_LABEL} · ${DIFF_LINE_COUNT} lines · push approved"
@@ -2082,6 +2243,9 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
       REVIEW_EXIT_REASON="clean"
       print_summary
       write_clean_review_cache "$REVIEW_CACHE_KEY" "$DIFF_LINE_COUNT"
+      # The "ran" denominator: a successful review actually executed.
+      # skip-rate = log_skip_count / (log_skip_count + log_ran_count).
+      log_skip_event ran "clean:iter=${iter}:lines=${DIFF_LINE_COUNT}:fix-commits=${FIX_COMMITS}"
       exit 0
       ;;
 
@@ -2097,6 +2261,7 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
       if [ -z "$AUTOFIX_CHANGED_PATHS" ]; then
         echo "==> $REVIEWER_LABEL emitted FIXED but no working-tree changes detected."
         echo "    Treating as ambiguous — not blocking push."
+        log_skip_event other "ambiguous-fixed-no-changes:iter=${iter}"
         exit 0
       fi
 
@@ -2144,12 +2309,21 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
       echo "    Address findings and try again. Emergency override: git push --no-verify"
       REVIEW_EXIT_REASON="blocked"
       print_summary
+      # The reviewer actually ran and produced a verdict — counts as "ran"
+      # for the skip-rate denominator even though the push is blocked.
+      log_skip_event ran "blocked:iter=${iter}:findings=${REVIEW_FINDINGS_COUNT}"
       exit 1
       ;;
 
     *)
+      LAST_LINE="$(printf '%s\n' "$OUTPUT" | awk 'NF { line = $0 } END { print line }' | tr -d '\r')"
       echo "==> $REVIEWER_LABEL output did not match the expected sentinel contract."
-      echo "    Last line was: '$LAST_LINE'"
+      if [ -n "$LAST_SENTINEL" ]; then
+        echo "    Last matching sentinel line was: '$LAST_SENTINEL'"
+      else
+        echo "    No unique standalone sentinel line was found."
+      fi
+      echo "    Last non-blank line was: '$LAST_LINE'"
       echo "    Raw output (first 20 lines):"
       printf '%s\n' "$OUTPUT" | head -20 | sed 's/^/    /'
       REVIEW_EXIT_REASON="malformed-sentinel"
@@ -2170,4 +2344,7 @@ echo "    To undo all auto-fix commits: git reset --hard HEAD~$FIX_COMMITS"
 echo "    Emergency override: git push --no-verify"
 REVIEW_EXIT_REASON="max-iterations"
 print_summary
+# The reviewer ran (multiple times) but didn't converge — counts as "ran"
+# for the denominator since the safety net wasn't bypassed.
+log_skip_event ran "max-iterations:fix-commits=${FIX_COMMITS}"
 exit 1

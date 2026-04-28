@@ -28,9 +28,9 @@ set -euo pipefail
 input="$(cat)"
 
 # Fast path — bail on non-git-commit calls without the jq/git overhead.
-# Matches "git commit" with optional whitespace; explicitly NOT matching
-# "git commit-tree" or other unrelated subcommands.
-if ! printf '%s' "$input" | grep -qE '"command"[[:space:]]*:[[:space:]]*"[^"]*\bgit[[:space:]]+commit\b'; then
+# Matches `git commit` with optional `-c key=value` / `-C <path>` flags
+# ahead of the subcommand; explicitly NOT matching `commit-tree`.
+if ! printf '%s' "$input" | grep -qE '"command"[[:space:]]*:[[:space:]]*"[^"]*\bgit([[:space:]]+-c[[:space:]]+[^[:space:]]+|[[:space:]]+-C[[:space:]]+[^[:space:]]+)*[[:space:]]+commit([[:space:]]|$)'; then
   exit 0
 fi
 
@@ -49,8 +49,23 @@ cwd="$(printf '%s' "$input" | jq -r '.cwd // ""')"
 # class is explicit — `\b` would match `commit-tree` because `-` is a
 # non-word char; we want `commit` followed by whitespace or end-of-string
 # only, so plumbing subcommands like `git commit-tree` pass through.
-if ! printf '%s' "$command" | grep -qE '\bgit[[:space:]]+commit([[:space:]]|$)'; then
+if ! printf '%s' "$command" | grep -qE '\bgit([[:space:]]+-c[[:space:]]+[^[:space:]]+|[[:space:]]+-C[[:space:]]+[^[:space:]]+)*[[:space:]]+commit([[:space:]]|$)'; then
   exit 0
+fi
+
+# Worktree-aware: when commit targets a different repo via `-C <path>`,
+# check that branch instead. The previous version saw `main` as the
+# current branch even when the commit was being directed at a feature
+# worktree via `git -C <worktree> commit`, blocking legitimate work.
+# Lowercase `-c` (the config-override flag) does not change directory
+# and so does NOT trigger this override.
+target_cwd="$(printf '%s' "$command" | grep -oE '\-C[[:space:]]+[^[:space:]]+' | sed -E 's/^-C[[:space:]]+//' | tail -1 || true)"
+if [ -n "$target_cwd" ]; then
+  if [ -n "$cwd" ] && [ -d "$cwd/$target_cwd" ]; then
+    cwd="$cwd/$target_cwd"
+  elif [ -d "$target_cwd" ]; then
+    cwd="$target_cwd"
+  fi
 fi
 
 # Determine current branch in the project Claude is operating in.
