@@ -349,14 +349,14 @@ class Journal:
     def _resolve_unique_path(self) -> Path:
         runs_dir = self.project_path / ".sentinel" / "runs"
         runs_dir.mkdir(parents=True, exist_ok=True)
-        ts = datetime.fromtimestamp(self.started_at).strftime(
+        cycle_id = self.cycle_id or datetime.fromtimestamp(self.started_at).strftime(
             "%Y-%m-%d-%H%M%S",
         )
-        path = runs_dir / f"{ts}.md"
+        path = runs_dir / f"{cycle_id}.md"
         n = 1
         while path.exists():
             n += 1
-            path = runs_dir / f"{ts}-{n}.md"
+            path = runs_dir / f"{cycle_id}-{n}.md"
         return path
 
     def _render_pr_body(self) -> str:

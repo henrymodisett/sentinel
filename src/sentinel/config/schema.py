@@ -102,12 +102,18 @@ class BudgetConfig(BaseModel):
     )
 
 
+class ScheduleConfig(BaseModel):
+    max_runs_per_day: int = Field(default=0, ge=0)
+    delivery_webhook: str = ""
+
+
 class LocalConfig(BaseModel):
     ollama_endpoint: str = "http://localhost:11434"
 
 
 class ScanConfig(BaseModel):
     """Configuration for the scan pipeline."""
+
     max_lenses: int = 10  # max lenses to generate per scan
     evaluate_per_lens: bool = True  # if False, skip individual evaluation step
     # per-LLM-call timeout (raise for large projects / slow networks)
@@ -115,13 +121,27 @@ class ScanConfig(BaseModel):
 
 
 DEFAULT_CLI_HELP_ALLOWLIST: list[str] = [
-    "gws", "swift", "swiftc", "xcrun", "go", "cargo", "rustc",
-    "node", "npm", "pnpm", "uv", "pip", "pytest", "ruff", "mypy",
+    "gws",
+    "swift",
+    "swiftc",
+    "xcrun",
+    "go",
+    "cargo",
+    "rustc",
+    "node",
+    "npm",
+    "pnpm",
+    "uv",
+    "pip",
+    "pytest",
+    "ruff",
+    "mypy",
 ]
 
 
 class CoderConfig(BaseModel):
     """Configuration for the Coder role's agentic execution."""
+
     # Max tool-use turns Claude Code / Codex can take per work item.
     # 20 was enough for trivial fixes but chokes on security hardening
     # or multi-file refactors — Claude uses ~4 turns just reading files
@@ -152,7 +172,9 @@ class CoderConfig(BaseModel):
     # outweighs any plausible "the coder will get there eventually"
     # signal. Floor at 1 = no revision (initial pass only).
     max_iterations: int = Field(
-        default=3, ge=1, le=10,
+        default=3,
+        ge=1,
+        le=10,
         description="Max coder iterations per work item (1-10).",
     )
 
@@ -174,7 +196,9 @@ class CoderConfig(BaseModel):
     # probes are bounded so a long acceptance-criteria block can't
     # explode into dozens of subprocess invocations.
     cli_help_max_subcommands: int = Field(
-        default=3, ge=0, le=20,
+        default=3,
+        ge=0,
+        le=20,
         description=(
             "Max `<cli> <subcommand> --help` probes per work item, "
             "in addition to the top-level `<cli> --help`."
@@ -183,7 +207,9 @@ class CoderConfig(BaseModel):
     # Per-help-call subprocess timeout. Fail-soft: a slow tool just
     # gets dropped from the prompt — never blocks the cycle.
     cli_help_timeout_sec: int = Field(
-        default=5, ge=1, le=60,
+        default=5,
+        ge=1,
+        le=60,
         description="Timeout for each `<cli> --help` subprocess call.",
     )
 
@@ -213,6 +239,7 @@ class CoderConfig(BaseModel):
         # binary literally named "rm -rf /", failing noisily later. Reject
         # at config load time so the failure is in the right place.
         import re
+
         pattern = re.compile(r"^[A-Za-z0-9._+-]+$")
         cleaned: list[str] = []
         for entry in v:
@@ -244,6 +271,7 @@ class RetentionConfig(BaseModel):
     Default of 30 days fits a `--every 10m` cadence (~4300 cycles/month)
     without bloating the project. Set to 0 to disable pruning entirely.
     """
+
     runs_days: int = 30
 
 
@@ -290,6 +318,7 @@ class SentinelConfig(BaseModel):
     project: ProjectConfig
     roles: RolesConfig
     budget: BudgetConfig = Field(default_factory=BudgetConfig)
+    schedule: ScheduleConfig = Field(default_factory=ScheduleConfig)
     local: LocalConfig = Field(default_factory=LocalConfig)
     scan: ScanConfig = Field(default_factory=ScanConfig)
     coder: CoderConfig = Field(default_factory=CoderConfig)
