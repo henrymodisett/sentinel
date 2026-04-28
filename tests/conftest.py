@@ -72,12 +72,49 @@ case "$1" in
 esac
 """
 
+# Dynamic conductor stub: reports each provider as configured only when
+# its CLI binary is actually present on PATH. This lets fake_cli_env work
+# without callers having to explicitly list conductor — the right providers
+# show as ready based solely on which stubs are installed.
+_CONDUCTOR_STUB = r"""#!/usr/bin/env bash
+case "$1" in
+  --version) echo "conductor 0.1.0"; exit 0 ;;
+  list)
+    if [ "$2" = "--json" ]; then
+      out='['
+      sep=''
+      for entry in \
+          "claude:claude:claude-sonnet-4-6" \
+          "codex:codex:gpt-5.4" \
+          "gemini:gemini:gemini-2.5-pro" \
+          "ollama:ollama:qwen2.5-coder:14b"
+      do
+        prov="${entry%%:*}"
+        rest="${entry#*:}"
+        cli="${rest%%:*}"
+        model="${rest#*:}"
+        if command -v "$cli" >/dev/null 2>&1; then
+          cfg=true
+        else
+          cfg=false
+        fi
+        out="${out}${sep}{\"provider\":\"${prov}\",\"configured\":${cfg},\"default_model\":\"${model}\"}"
+        sep=','
+      done
+      echo "${out}]"
+    fi
+    ;;
+  *) exit 0 ;;
+esac
+"""
+
 
 STUBS = {
     "claude": _CLAUDE_STUB,
     "codex": _CODEX_STUB,
     "gemini": _GEMINI_STUB,
     "ollama": _OLLAMA_STUB,
+    "conductor": _CONDUCTOR_STUB,
 }
 
 
@@ -99,7 +136,9 @@ def fake_cli_env(monkeypatch):
         tmpdirs.append(tmp)
         bin_dir = Path(tmp.name)
 
-        for name, available in flags.items():
+        requested = {"conductor": True, **flags}
+
+        for name, available in requested.items():
             if not available:
                 continue
             if name not in STUBS:
@@ -143,6 +182,7 @@ def _reset_budget_state():
     """
     from sentinel.budget_ctx import set_cycle_deadline, set_cycle_money_cap
     from sentinel.journal import set_current_role, set_pending_routing_reason
+
     set_cycle_deadline(None)
     set_cycle_money_cap(None)
     set_current_role("")

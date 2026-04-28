@@ -174,6 +174,17 @@ def status() -> None:
     default=None,
     help="Run an initial scan after init. Default off.",
 )
+@click.option(
+    "--no-seed-defaults",
+    "no_seed_defaults",
+    is_flag=True,
+    default=False,
+    help=(
+        "Skip seeding the Sentinel baseline Doctrine pack into "
+        ".cortex/doctrine/. Use when you want the .cortex/ scaffold "
+        "but not Sentinel's engineering opinions."
+    ),
+)
 def init(
     yes: bool,
     preset: str | None,
@@ -182,6 +193,7 @@ def init(
     reviewer: str | None,
     budget: float | None,
     run_scan: bool | None,
+    no_seed_defaults: bool,
 ) -> None:
     """Initialize Sentinel in the current project (first-run entry point).
 
@@ -191,6 +203,9 @@ def init(
     Flags override individual prompts; --yes skips the whole wizard with
     defaults. The wizard prints its equivalent flag-form at the end so
     the same config can be reproduced in CI.
+
+    After writing config, seeds the Sentinel baseline Doctrine pack into
+    .cortex/doctrine/ via cortex v0.5.0+ (--no-seed-defaults to opt out).
 
     Presets (skip all prompts):
       recommended  — smart defaults per role (the default)
@@ -206,6 +221,7 @@ def init(
         auto_yes=yes, preset=preset,
         providers=providers, coder=coder, reviewer=reviewer,
         budget=budget, run_scan=run_scan,
+        seed_defaults=not no_seed_defaults,
     )
 
 

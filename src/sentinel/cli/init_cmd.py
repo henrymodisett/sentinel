@@ -563,6 +563,29 @@ def _print_equivalent_flag_form(
 # ---------- Main flow ----------
 
 
+def _seed_doctrine_defaults(project: Path) -> None:
+    """Seed the Sentinel baseline Doctrine pack into project's .cortex/.
+
+    Gracefully skips when cortex is missing or the defaults pack is not
+    found — init's value is not gated on Doctrine seeding. Logs a
+    one-line result so the user sees what happened without noise.
+    """
+    from sentinel.integrations.cortex import seed_default_doctrine
+
+    result = seed_default_doctrine(project, merge="skip-existing")
+    if result is None:
+        console.print(
+            "  [dim]→ Doctrine seeding skipped "
+            "(cortex not installed or defaults pack not found)[/dim]",
+        )
+    else:
+        console.print(
+            f"  [green]✓[/green] Seeded {result.seeded} default "
+            "Doctrine entries into .cortex/doctrine/ "
+            "(--no-seed-defaults to skip)",
+        )
+
+
 def run_init(
     project_path: str | None = None,
     auto_yes: bool = False,
@@ -574,6 +597,7 @@ def run_init(
     budget: float | None = None,
     run_scan: bool | None = None,
     implicit: bool = False,
+    seed_defaults: bool = True,
 ) -> None:
     """Run the setup wizard — interactive if TTY, else use defaults.
 
@@ -585,6 +609,9 @@ def run_init(
     missing), `implicit=True` suppresses the "reconfigure?" prompt
     (there's nothing to reconfigure) and the wizard's trailing
     equivalent-flag-form (the user didn't ask for a wizard).
+
+    ``seed_defaults=False`` skips seeding the Sentinel baseline Doctrine
+    pack into ``.cortex/doctrine/`` (``--no-seed-defaults`` flag).
     """
     project = Path(project_path or os.getcwd()).resolve()
     console.print(f"\n[bold]Sentinel Setup[/bold] — {project.name}\n")
@@ -610,6 +637,8 @@ def run_init(
             _write_sentinel_gitignore(project)
             _install_claude_templates(project)
             _ensure_gitignore_entries(project)
+            if seed_defaults:
+                _seed_doctrine_defaults(project)
             return
         if not click.confirm(
             "Config already exists — reconfigure?", default=False,
@@ -621,6 +650,8 @@ def run_init(
             _write_sentinel_gitignore(project)
             _install_claude_templates(project)
             _ensure_gitignore_entries(project)
+            if seed_defaults:
+                _seed_doctrine_defaults(project)
             return
         # User confirmed reconfigure — wipe the old config so the
         # downstream write path doesn't skip it.
@@ -709,6 +740,8 @@ def run_init(
     _write_sentinel_gitignore(project)
     _install_claude_templates(project)
     _ensure_gitignore_entries(project)
+    if seed_defaults:
+        _seed_doctrine_defaults(project)
 
     # Doctrine 0002 §5 — print the equivalent flag-form at the end of a
     # successful wizard so scripters learn flags by using the tool.
