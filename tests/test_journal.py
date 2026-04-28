@@ -50,7 +50,7 @@ class TestJournalShape:
         assert "vesper" in content
         assert "feat/foo" in content
         assert "10m" in content
-        assert "# Sentinel Run" in content
+        assert "# Cycle" in content
 
     def test_phase_timings_in_table(self, tmp_path: Path) -> None:
         j = _journal(tmp_path)
