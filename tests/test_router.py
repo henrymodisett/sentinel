@@ -3,12 +3,16 @@
 from types import SimpleNamespace
 
 import pytest
-from conductor.router import NoConfiguredProvider
 
 import sentinel.providers.router as router_module
 from sentinel.config.schema import RoleName, SentinelConfig
 from sentinel.providers.conductor_adapter import ConductorAdapter
-from sentinel.providers.router import DEFAULT_RULES, Router, RoutingRule
+from sentinel.providers.router import DEFAULT_RULES, NoConfiguredProvider, Router, RoutingRule
+
+
+@pytest.fixture(autouse=True)
+def fake_conductor_binary(monkeypatch) -> None:
+    monkeypatch.setattr("shutil.which", lambda command: "/usr/bin/conductor")
 
 
 @pytest.fixture
@@ -69,8 +73,14 @@ class _FakeConductorProvider:
 
 
 class TestIntentRouting:
+    @pytest.fixture(autouse=True)
+    def enable_conductor_intent_routing(self, monkeypatch) -> None:
+        monkeypatch.setenv("SENTINEL_USE_CONDUCTOR", "1")
+
     def test_quick_intent_prefers_local_offline_constraints(
-        self, monkeypatch, config: SentinelConfig,
+        self,
+        monkeypatch,
+        config: SentinelConfig,
     ) -> None:
         calls = []
         fake = _FakeConductorProvider("ollama", "qwen3.6:35b-a3b")
@@ -101,7 +111,9 @@ class TestIntentRouting:
         assert exclude == frozenset()
 
     def test_research_intent_requires_web_search_tags(
-        self, monkeypatch, config: SentinelConfig,
+        self,
+        monkeypatch,
+        config: SentinelConfig,
     ) -> None:
         calls = []
         fake = _FakeConductorProvider("gemini", "gemini-2.5-pro")
@@ -124,7 +136,9 @@ class TestIntentRouting:
         assert calls[0].prefer == "balanced"
 
     def test_code_intent_requests_agentic_tools_and_workspace_write(
-        self, monkeypatch, config: SentinelConfig,
+        self,
+        monkeypatch,
+        config: SentinelConfig,
     ) -> None:
         calls = []
         fake = _FakeConductorProvider("claude", "claude-sonnet-4-6")
@@ -148,7 +162,9 @@ class TestIntentRouting:
         assert calls[0].tools == frozenset({"Read", "Grep", "Glob", "Edit", "Write", "Bash"})
 
     def test_review_intent_retries_without_exclude_when_no_alternative(
-        self, monkeypatch, config: SentinelConfig,
+        self,
+        monkeypatch,
+        config: SentinelConfig,
     ) -> None:
         calls = []
         fake = _FakeConductorProvider("claude", "claude-sonnet-4-6")
@@ -240,6 +256,7 @@ class TestCoderTimeout:
 
     def test_coder_timeout_below_min_rejected(self) -> None:
         from pydantic import ValidationError
+
         with pytest.raises(ValidationError):
             SentinelConfig(
                 project={"name": "test", "path": "/tmp/test"},
@@ -255,6 +272,7 @@ class TestCoderTimeout:
 
     def test_coder_timeout_above_max_rejected(self) -> None:
         from pydantic import ValidationError
+
         with pytest.raises(ValidationError):
             SentinelConfig(
                 project={"name": "test", "path": "/tmp/test"},
@@ -300,7 +318,8 @@ class TestTaskAwareRouting:
     backwards compatible with every existing caller."""
 
     def test_no_hints_returns_configured_provider(
-        self, gemini_config: SentinelConfig,
+        self,
+        gemini_config: SentinelConfig,
     ) -> None:
         router = Router(gemini_config)
         provider = router.get_provider(RoleName.MONITOR)
@@ -309,7 +328,8 @@ class TestTaskAwareRouting:
         assert provider.model == "gemini-2.5-flash"  # the configured default
 
     def test_synthesize_overrides_flash_to_pro(
-        self, gemini_config: SentinelConfig,
+        self,
+        gemini_config: SentinelConfig,
     ) -> None:
         """The synthesize rule pushes gemini calls up to pro because
         flash times out on the cross-lens summary prompt."""
@@ -320,25 +340,31 @@ class TestTaskAwareRouting:
         assert provider.model == "gemini-2.5-pro"
 
     def test_huge_eval_overrides_below_threshold_no_change(
-        self, gemini_config: SentinelConfig,
+        self,
+        gemini_config: SentinelConfig,
     ) -> None:
         """The huge-eval rule only fires above the 60k token threshold —
         a small evaluate_lens call uses the configured model."""
         router = Router(gemini_config)
         provider = router.get_provider(
-            RoleName.MONITOR, task="evaluate_lens", prompt_size=1000,
+            RoleName.MONITOR,
+            task="evaluate_lens",
+            prompt_size=1000,
         )
         assert provider.model == "gemini-2.5-flash"
 
     def test_huge_eval_overrides_above_threshold_keeps_flash(
-        self, gemini_config: SentinelConfig,
+        self,
+        gemini_config: SentinelConfig,
     ) -> None:
         """Above 60k tokens, the huge-eval rule pushes to flash. Since
         the configured model is already flash, the model is unchanged
         but the rule still semantically applies (no-op override)."""
         router = Router(gemini_config)
         provider = router.get_provider(
-            RoleName.MONITOR, task="evaluate_lens", prompt_size=120_000,
+            RoleName.MONITOR,
+            task="evaluate_lens",
+            prompt_size=120_000,
         )
         assert provider.model == "gemini-2.5-flash"
 
@@ -358,12 +384,15 @@ class TestTaskAwareRouting:
         )
         router = Router(cfg)
         provider = router.get_provider(
-            RoleName.MONITOR, task="evaluate_lens", prompt_size=120_000,
+            RoleName.MONITOR,
+            task="evaluate_lens",
+            prompt_size=120_000,
         )
         assert provider.model == "gemini-2.5-flash"
 
     def test_unknown_task_falls_through_to_configured(
-        self, gemini_config: SentinelConfig,
+        self,
+        gemini_config: SentinelConfig,
     ) -> None:
         router = Router(gemini_config)
         provider = router.get_provider(RoleName.MONITOR, task="something-novel")
@@ -390,7 +419,8 @@ class TestTaskAwareRouting:
         assert provider.model == "claude-sonnet-4-6"
 
     def test_overridden_provider_is_cached(
-        self, gemini_config: SentinelConfig,
+        self,
+        gemini_config: SentinelConfig,
     ) -> None:
         """Two synthesize calls in the same cycle should reuse the same
         materialized provider instance — both for memory and for sharing
@@ -414,7 +444,8 @@ class TestCustomRules:
     for tests of policy without forking DEFAULT_RULES."""
 
     def test_custom_rule_overrides_for_specific_task(
-        self, gemini_config: SentinelConfig,
+        self,
+        gemini_config: SentinelConfig,
     ) -> None:
         rules = (
             RoutingRule(
@@ -432,7 +463,8 @@ class TestCustomRules:
         assert provider.model == "gemini-2.5-flash-lite"
 
     def test_empty_rules_means_no_overrides(
-        self, gemini_config: SentinelConfig,
+        self,
+        gemini_config: SentinelConfig,
     ) -> None:
         router = Router(gemini_config, rules=())
         provider = router.get_provider(RoleName.MONITOR, task="synthesize")
@@ -440,7 +472,8 @@ class TestCustomRules:
         assert provider.model == "gemini-2.5-flash"
 
     def test_override_sets_pending_routing_reason(
-        self, gemini_config: SentinelConfig,
+        self,
+        gemini_config: SentinelConfig,
     ) -> None:
         """When a rule fires, the next provider call should pick up the
         rule name via the pending-reason ContextVar — that's how the
@@ -461,7 +494,8 @@ class TestCustomRules:
         assert second == "", "consume must clear the pending reason"
 
     def test_no_override_leaves_pending_reason_blank(
-        self, gemini_config: SentinelConfig,
+        self,
+        gemini_config: SentinelConfig,
     ) -> None:
         """A call that doesn't trigger any rule must NOT leave a stale
         reason in the ContextVar — otherwise the next call would
@@ -477,7 +511,8 @@ class TestCustomRules:
         assert consume_pending_routing_reason() == ""
 
     def test_get_provider_accepts_bare_string_role(
-        self, gemini_config: SentinelConfig,
+        self,
+        gemini_config: SentinelConfig,
     ) -> None:
         """Regression: dogfood 2026-04-16 crashed with
         `AttributeError: 'str' object has no attribute 'value'` because
@@ -500,14 +535,16 @@ class TestMissingLocalModels:
     provider call die with an obscure error."""
 
     def test_no_local_roles_returns_empty(
-        self, gemini_config: SentinelConfig,
+        self,
+        gemini_config: SentinelConfig,
     ) -> None:
         """Configs that don't use ollama at all skip the check entirely."""
         router = Router(gemini_config)
         assert router.missing_local_models() == []
 
     def test_local_role_with_missing_model_reported(
-        self, monkeypatch,
+        self,
+        monkeypatch,
     ) -> None:
         """Monitor configured for local/qwen2.5-coder:14b but only
         llama3.2:3b is pulled — the missing pair is reported with the
@@ -528,7 +565,9 @@ class TestMissingLocalModels:
 
         def fake_detect(self):  # noqa: ANN001, ANN202
             return ProviderStatus(
-                installed=True, authenticated=True, models=["llama3.2:3b"],
+                installed=True,
+                authenticated=True,
+                models=["llama3.2:3b"],
             )
 
         monkeypatch.setattr(ConductorAdapter, "detect", fake_detect)
@@ -538,7 +577,8 @@ class TestMissingLocalModels:
         assert missing == [("monitor", "qwen2.5-coder:14b")]
 
     def test_local_role_with_pulled_model_passes(
-        self, monkeypatch,
+        self,
+        monkeypatch,
     ) -> None:
         from sentinel.providers.conductor_adapter import ConductorAdapter
         from sentinel.providers.interface import ProviderStatus
@@ -556,7 +596,8 @@ class TestMissingLocalModels:
 
         def fake_detect(self):  # noqa: ANN001, ANN202
             return ProviderStatus(
-                installed=True, authenticated=True,
+                installed=True,
+                authenticated=True,
                 models=["qwen2.5-coder:14b", "llama3.2:3b"],
             )
 
@@ -565,7 +606,8 @@ class TestMissingLocalModels:
         assert router.missing_local_models() == []
 
     def test_ollama_not_installed_reports_all_local_models(
-        self, monkeypatch,
+        self,
+        monkeypatch,
     ) -> None:
         """If ollama itself isn't installed, every required model is
         effectively missing — the message tells the user to install
