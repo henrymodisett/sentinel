@@ -51,7 +51,15 @@ DECISIONS_END = "<!-- decisions-end -->"
 TRANSCRIPT_START = "<!-- transcript-start -->"
 TRANSCRIPT_END = "<!-- transcript-end -->"
 
-_VALID_STATUSES = frozenset({"completed", "in-progress", "failed", "blocked-on-human"})
+_VALID_STATUSES = frozenset({
+    "completed",
+    "in-progress",
+    "failed",
+    "blocked-on-human",
+    "blocked-on-budget",
+    "blocked-on-loop",
+    "blocked-on-human-approval",
+})
 
 
 def render_frontmatter(
@@ -194,6 +202,7 @@ class WorkItemRecord:
     # URL might still be in a non-merged state.
     pr_url: str = ""
     ship_status: str = ""  # merged_armed | created | existed | failed | ""
+    ship_reason: str = ""
 
 
 @dataclass
@@ -212,7 +221,7 @@ class Journal:
     # Slug that identifies this cycle; defaults to the timestamp used in
     # the filename so the frontmatter and the path agree without extra wiring.
     cycle_id: str = ""
-    # One of: completed | in-progress | failed | blocked-on-human.
+    # One of the statuses in _VALID_STATUSES.
     # Validated by render_frontmatter at write time.
     status: str = "in-progress"
     # Optional pre-assembled content for each body section. When non-empty,
@@ -365,6 +374,7 @@ class Journal:
             f"**Project:** {self.project_name}  "
             f"**Branch:** {self.branch}  "
             f"**Budget:** {self.budget_str or '(none)'}  "
+            f"**Status:** {self.status}  "
             f"**Exit:** {self.exit_reason}",
             "",
             f"**Total time:** {total_duration:.1f}s  "
@@ -394,6 +404,11 @@ class Journal:
                     lines.append(f"  - Verifier: {icon} {wi.verification}")
                 if wi.pr_url:
                     lines.append(f"  - PR: [{wi.ship_status or 'opened'}] {wi.pr_url}")
+                elif wi.ship_status:
+                    lines.append(f"  - Ship: {wi.ship_status}")
+                if wi.ship_reason:
+                    lines.append(f"  - Ship reason: {wi.ship_reason}")
+            lines.append("")
 
         return "\n".join(lines)
 

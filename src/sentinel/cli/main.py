@@ -89,6 +89,28 @@ def main() -> None:
         "revision passes (autumn-mail Cortex C5)."
     ),
 )
+@click.option(
+    "--plan-only",
+    "plan_only",
+    is_flag=True,
+    default=False,
+    help=(
+        "Run through scan and plan phases only — show what Sentinel would "
+        "do without executing, modifying files, or opening PRs. The run "
+        "journal is still written so you can inspect the plan. Resume with "
+        "`sentinel work` once you're satisfied."
+    ),
+)
+@click.option(
+    "--resume",
+    "resume_cycle_id",
+    default=None,
+    metavar="CYCLE_ID",
+    help=(
+        "Resume from a previous plan-only cycle. The current backlog is "
+        "executed without rerunning the preview-only stop."
+    ),
+)
 def work(
     budget: str | None,
     every: str | None,
@@ -96,11 +118,14 @@ def work(
     auto: bool,
     cortex_journal: bool | None,
     coder_timeout: int | None,
+    plan_only: bool,
+    resume_cycle_id: str | None,
 ) -> None:
     """Work on this project. One cycle, or loop with --every.
 
     Examples:
       sentinel work                          one cycle and exit
+      sentinel work --plan-only              scan + plan only, no execution
       sentinel work --every 10m              loop, 10 min between cycles
       sentinel work --every 1h -b $20        loop with $20 session cap
       sentinel work --coder-timeout 1200     give Coder 20 minutes per call
@@ -112,6 +137,8 @@ def work(
             budget_str=budget, dry_run=dry_run, auto=auto, every=every,
             cortex_journal=cortex_journal,
             coder_timeout=coder_timeout,
+            plan_only=plan_only,
+            resume_cycle_id=resume_cycle_id,
         ),
     )
 

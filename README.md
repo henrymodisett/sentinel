@@ -128,6 +128,8 @@ model = "gemini-2.5-pro"
 
 [budget]
 daily_limit_usd = 15.00
+per_day = 50.00    # optional rolling 24h cap
+per_week = 200.00  # optional rolling 7d cap
 ```
 
 Optional sections — see `src/sentinel/config/schema.py` for the full list:
@@ -136,6 +138,11 @@ Optional sections — see `src/sentinel/config/schema.py` for the full list:
 - `[coder]` — `max_turns`, `timeout_seconds` (Coder Claude CLI timeout, 60-7200, default 600; override with `--coder-timeout` or `SENTINEL_CODER_TIMEOUT`), `max_iterations` (coder↔reviewer cap per work item, 1-10, default 3), `cli_help_allowlist` / `cli_help_max_subcommands` / `cli_help_timeout_sec` (pre-load `<tool> --help` text into the coder's prompt when the work item references an allowlisted CLI — defaults cover `gws`, `swift`, `go`, `cargo`, `pytest`, etc.; empty list disables the feature for that project)
 - `[local]` — `ollama_endpoint` for non-default Ollama hosts
 - `[retention]` — `runs_days` for how long cycle logs stick around
+
+`sentinel work --plan-only` runs scan and plan, writes the run journal with
+`Status: in-progress`, and stops before Coder/Reviewer execution, source edits,
+or PR pushes. Rolling budget caps halt before starting another provider call and
+record `Status: blocked-on-budget` in the run journal.
 
 When the coder↔reviewer loop hits `max_iterations` without an approved verdict (or when two rounds produce identical findings), sentinel prints a post-mortem and writes a Markdown copy to `.sentinel/exhaustions/<timestamp>-<slug>.md` so you don't have to dig through reviewer transcripts. The block names the branch, the last verdict, the unaddressed findings, and concrete next steps:
 

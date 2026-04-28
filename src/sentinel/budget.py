@@ -97,3 +97,56 @@ def get_history(project_path: Path, days: int = 7) -> dict:
     """Get spend history for the last N days. Returns {date: total_usd}."""
     data = _load_spend(project_path)
     return {k: v["total_usd"] for k, v in sorted(data.items(), reverse=True)[:days]}
+
+
+def rolling_spend_usd(project_path: Path, hours: float) -> float:
+    """Sum all spend entries within the last `hours` hours.
+
+    Uses the per-entry `timestamp` field for precision — rolling windows
+    don't align to calendar-day boundaries so date-keyed totals are not
+    sufficient. Falls back to 0.0 for entries missing a timestamp (old
+    format) rather than crashing so old spend logs don't block new cycles.
+    """
+    cutoff = datetime.now().timestamp() - hours * 3600
+    data = _load_spend(project_path)
+    total = 0.0
+    for day_bucket in data.values():
+        for entry in day_bucket.get("entries", []):
+            ts_str = entry.get("timestamp")
+            if ts_str is None:
+                continue
+            try:
+                ts = datetime.fromisoformat(ts_str).timestamp()
+            except (ValueError, TypeError):
+                continue
+            if ts >= cutoff:
+                total += entry.get("amount_usd", 0.0)
+    return total
+
+
+def check_rolling_budgets(
+    project_path: Path,
+    per_day_usd: float | None,
+    per_week_usd: float | None,
+) -> tuple[bool, str]:
+    """Check rolling 24h and 7d spend caps.
+
+    Returns (ok, reason) — ok=False with a non-empty reason when a cap
+    is exceeded. Checks day before week so the more-granular limit is
+    surfaced first when both are hit simultaneously.
+    """
+    if per_day_usd is not None:
+        spent_24h = rolling_spend_usd(project_path, hours=24)
+        if spent_24h >= per_day_usd:
+            return False, (
+                f"per-day budget reached "
+                f"(${spent_24h:.2f} in last 24h / ${per_day_usd:.2f} cap)"
+            )
+    if per_week_usd is not None:
+        spent_7d = rolling_spend_usd(project_path, hours=24 * 7)
+        if spent_7d >= per_week_usd:
+            return False, (
+                f"per-week budget reached "
+                f"(${spent_7d:.2f} in last 7d / ${per_week_usd:.2f} cap)"
+            )
+    return True, ""
