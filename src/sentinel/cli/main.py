@@ -37,8 +37,8 @@ def main() -> None:
     """
 
 
-# --- PRIMARY COMMAND ---
 
+# --- PRIMARY COMMAND ---
 @main.command()
 @click.option(
     "--budget", "-b",
@@ -55,6 +55,23 @@ def main() -> None:
     "--every", "-e",
     default=None,
     help="Loop mode — run continuously, sleep between cycles (e.g. 10m, 1h).",
+)
+@click.option(
+    "--schedule",
+    "schedule_interval",
+    default="",
+    help='Schedule interval: "every 4h", "every 30m", "0 */4 * * *"',
+)
+@click.option(
+    "--max-runs-per-day",
+    default=0,
+    help="Cap daily cycle runs (0 = unlimited)",
+)
+@click.option(
+    "--webhook",
+    "delivery_webhook",
+    default="",
+    help="URL to POST cycle result JSON after each tick",
 )
 @click.option(
     "--dry-run", is_flag=True,
@@ -114,6 +131,9 @@ def main() -> None:
 def work(
     budget: str | None,
     every: str | None,
+    schedule_interval: str,
+    max_runs_per_day: int,
+    delivery_webhook: str,
     dry_run: bool,
     auto: bool,
     cortex_journal: bool | None,
@@ -128,13 +148,23 @@ def work(
       sentinel work --plan-only              scan + plan only, no execution
       sentinel work --every 10m              loop, 10 min between cycles
       sentinel work --every 1h -b $20        loop with $20 session cap
+      sentinel work --schedule "every 4h"    scheduled loop mode
       sentinel work --coder-timeout 1200     give Coder 20 minutes per call
     """
+    if every is not None and schedule_interval:
+        raise click.UsageError("--schedule and --every are mutually exclusive")
+
     from sentinel.cli.work_cmd import run_work
 
     asyncio.run(
         run_work(
-            budget_str=budget, dry_run=dry_run, auto=auto, every=every,
+            budget_str=budget,
+            dry_run=dry_run,
+            auto=auto,
+            every=every,
+            schedule_interval=schedule_interval,
+            max_runs_per_day=max_runs_per_day,
+            delivery_webhook=delivery_webhook,
             cortex_journal=cortex_journal,
             coder_timeout=coder_timeout,
             plan_only=plan_only,

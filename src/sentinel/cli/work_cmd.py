@@ -45,6 +45,7 @@ from sentinel.integrations.cortex import (
     resolve_enabled,
     write_cortex_journal_entry,
 )
+from sentinel.journal import PR_BODY_END, PR_BODY_START
 from sentinel.providers.router import Router
 from sentinel.roles.coder import Coder
 from sentinel.roles.monitor import Monitor
@@ -346,6 +347,9 @@ async def run_work(
     dry_run: bool = False,
     auto: bool = False,
     every: str | None = None,
+    schedule_interval: str = "",
+    max_runs_per_day: int = 0,
+    delivery_webhook: str = "",
     cortex_journal: bool | None = None,
     coder_timeout: int | None = None,
     plan_only: bool = False,
@@ -368,7 +372,10 @@ async def run_work(
     ``plan_only`` maps to ``--plan-only``: run scan + plan but stop before
     execution. No files modified, no PRs opened. Journal is still written.
     """
-    if every is None:
+    if every is not None and schedule_interval:
+        raise click.UsageError("--schedule and --every are mutually exclusive")
+
+    if every is None and not schedule_interval:
         # Single cycle — just run it and return
         await _run_single_cycle(
             project_path,
@@ -389,6 +396,9 @@ async def run_work(
         dry_run,
         auto,
         every,
+        schedule_interval=schedule_interval,
+        max_runs_per_day=max_runs_per_day,
+        delivery_webhook=delivery_webhook,
         cortex_journal=cortex_journal,
         coder_timeout=coder_timeout,
     )
@@ -489,11 +499,12 @@ async def _run_single_cycle(
     dry_run: bool = False,
     auto: bool = False,
     *,
+    cycle_id: str | None = None,
     cortex_journal: bool | None = None,
     coder_timeout: int | None = None,
     plan_only: bool = False,
     resume_cycle_id: str | None = None,
-) -> None:
+) -> dict | None:
     """Run exactly one cycle of work and return."""
     project = Path(project_path or os.getcwd()).resolve()
     money_budget, time_budget_sec = _parse_budget(budget_str)
@@ -649,6 +660,7 @@ async def _run_single_cycle(
         project_name=project.name,
         branch=_current_branch(str(project)),
         budget_str=budget_str,
+        cycle_id=cycle_id or "",
     )
     set_current_journal(journal)
 
@@ -1070,6 +1082,46 @@ async def _run_single_cycle(
             )
         )
     console.print()
+    return _cycle_webhook_payload(journal)
+
+
+def _cycle_webhook_payload(journal) -> dict:  # noqa: ANN001
+    work_item = journal.work_items[-1] if journal.work_items else None
+    pr_url = getattr(work_item, "pr_url", "") if work_item else ""
+    pr_body = journal.pr_body or journal._render_pr_body()  # noqa: SLF001
+
+    return {
+        "cycle_id": journal.cycle_id
+        or datetime.fromtimestamp(journal.started_at).strftime("%Y-%m-%d-%H%M%S"),
+        "status": _cycle_status(journal),
+        "branch": journal.branch,
+        "pr_url": pr_url,
+        "summary": _extract_pr_body_summary(pr_body),
+    }
+
+
+def _extract_pr_body_summary(markdown: str) -> str:
+    start = markdown.find(PR_BODY_START)
+    if start != -1:
+        start += len(PR_BODY_START)
+        end = markdown.find(PR_BODY_END, start)
+        markdown = markdown[start : end if end != -1 else None]
+    return markdown.strip()[:500]
+
+
+def _cycle_status(journal) -> str:  # noqa: ANN001
+    exit_reason = journal.exit_reason or ""
+    if exit_reason.startswith("budget:"):
+        return "blocked-on-budget"
+    if exit_reason in {"user_declined", "dry_run", "interrupted"}:
+        return "blocked-on-human-approval"
+    if exit_reason.startswith(("error:", "scan_failed")):
+        return "failed"
+    failed_phase = any(getattr(phase, "status", "") == "failed" for phase in journal.phases)
+    failed_item = any(getattr(item, "coder_status", "") == "failed" for item in journal.work_items)
+    if failed_phase or failed_item:
+        return "failed"
+    return "completed"
 
 
 def _build_failure_summary(journal) -> str:  # noqa: ANN001
@@ -2031,8 +2083,11 @@ async def _run_loop(
     budget_str: str | None,
     dry_run: bool,
     auto: bool,
-    every: str,
+    every: str | None,
     *,
+    schedule_interval: str = "",
+    max_runs_per_day: int = 0,
+    delivery_webhook: str = "",
     cortex_journal: bool | None = None,
     coder_timeout: int | None = None,
 ) -> None:
@@ -2040,13 +2095,32 @@ async def _run_loop(
     import asyncio
 
     project = Path(project_path or os.getcwd()).resolve()
-    interval_sec = _parse_interval(every)
+    from sentinel.scheduler import (
+        DailyRunCounter,
+        SchedulerLock,
+        new_cycle_id,
+        parse_interval,
+        post_cycle_result,
+    )
+
+    if schedule_interval:
+        initial_interval = parse_interval(schedule_interval)
+        interval_sec = initial_interval.total_seconds()
+    elif every is not None:
+        interval_sec = _parse_interval(every)
+    else:
+        raise click.UsageError("Loop mode requires --every or --schedule")
     money_budget, time_budget_sec = _parse_budget(budget_str)
 
     # Pre-flight: need config to check session spend
     config = _load_config(project)
     if not config and (project / ".sentinel" / "config.toml").exists():
         return
+    if config:
+        if max_runs_per_day == 0:
+            max_runs_per_day = config.schedule.max_runs_per_day
+        if not delivery_webhook:
+            delivery_webhook = config.schedule.delivery_webhook
 
     session_start = time.time()
     session_spend_start = 0.0
@@ -2058,60 +2132,80 @@ async def _run_loop(
         ).today_spent_usd
 
     cycles = 0
-    console.print("\n[bold]Sentinel Work[/bold] — loop mode")
-    console.print(f"  Cadence: every {every}")
+    run_counter = DailyRunCounter(max_runs_per_day)
+    mode = "scheduled mode" if schedule_interval else "loop mode"
+    console.print(f"\n[bold]Sentinel Work[/bold] — {mode}")
+    console.print(f"  Cadence: {schedule_interval or f'every {every}'}")
+    if max_runs_per_day > 0:
+        console.print(f"  Daily cap: {max_runs_per_day} runs")
     if budget_str:
         console.print(f"  Session budget: {budget_str}")
     console.print("  [dim]Ctrl-C to stop[/dim]")
 
+    lock_path = project / ".sentinel" / "state" / "scheduler.lock"
     try:
-        while True:
-            cycles += 1
-            console.print(
-                f"\n[bold cyan]─── Cycle {cycles} "
-                f"({datetime.now().strftime('%H:%M:%S')}) ───[/bold cyan]"
-            )
-
-            await _run_single_cycle(
-                project_path=str(project),
-                budget_str=None,  # session budget is tracked outside
-                dry_run=dry_run,
-                auto=True,  # loop mode bypasses confirmation
-                cortex_journal=cortex_journal,
-                coder_timeout=coder_timeout,
-            )
-
-            # Session bounds check
-            elapsed = time.time() - session_start
-            if time_budget_sec is not None and elapsed >= time_budget_sec:
-                console.print(
-                    f"\n[yellow]Stopping: session time budget "
-                    f"{_format_duration(elapsed)} reached[/yellow]"
-                )
-                break
-
-            if money_budget is not None and config:
-                current = check_budget(
-                    project,
-                    config.budget.daily_limit_usd,
-                    config.budget.warn_at_usd,
-                )
-                session_spent = current.today_spent_usd - session_spend_start
-                if session_spent >= money_budget:
+        with SchedulerLock(lock_path):
+            while True:
+                if not run_counter.check_and_increment():
                     console.print(
-                        f"\n[yellow]Stopping: session spend "
-                        f"${session_spent:.2f} hit cap "
-                        f"${money_budget:.2f}[/yellow]"
+                        f"\n[yellow]Daily run cap reached "
+                        f"({max_runs_per_day}); skipping this tick.[/yellow]"
                     )
-                    break
+                else:
+                    cycles += 1
+                    console.print(
+                        f"\n[bold cyan]─── Cycle {cycles} "
+                        f"({datetime.now().strftime('%H:%M:%S')}) ───[/bold cyan]"
+                    )
 
-            console.print(f"\n[dim]Next cycle in {every}... (Ctrl-C to stop)[/dim]")
-            try:
-                await asyncio.sleep(interval_sec)
-            except asyncio.CancelledError:
-                raise
+                    payload = await _run_single_cycle(
+                        project_path=str(project),
+                        budget_str=None,  # session budget is tracked outside
+                        dry_run=dry_run,
+                        auto=True,  # loop mode bypasses confirmation
+                        cycle_id=new_cycle_id(),
+                        cortex_journal=cortex_journal,
+                        coder_timeout=coder_timeout,
+                    )
+                    if payload is not None:
+                        post_cycle_result(delivery_webhook, payload)
+
+                    # Session bounds check
+                    elapsed = time.time() - session_start
+                    if time_budget_sec is not None and elapsed >= time_budget_sec:
+                        console.print(
+                            f"\n[yellow]Stopping: session time budget "
+                            f"{_format_duration(elapsed)} reached[/yellow]"
+                        )
+                        break
+
+                    if money_budget is not None and config:
+                        current = check_budget(
+                            project,
+                            config.budget.daily_limit_usd,
+                            config.budget.warn_at_usd,
+                        )
+                        session_spent = current.today_spent_usd - session_spend_start
+                        if session_spent >= money_budget:
+                            console.print(
+                                f"\n[yellow]Stopping: session spend "
+                                f"${session_spent:.2f} hit cap "
+                                f"${money_budget:.2f}[/yellow]"
+                            )
+                            break
+
+                if schedule_interval:
+                    interval_sec = parse_interval(schedule_interval).total_seconds()
+                cadence_label = schedule_interval or every
+                console.print(f"\n[dim]Next cycle in {cadence_label}... (Ctrl-C to stop)[/dim]")
+                try:
+                    await asyncio.sleep(interval_sec)
+                except asyncio.CancelledError:
+                    raise
     except KeyboardInterrupt:
         console.print("\n\n[yellow]Stopped by user.[/yellow]")
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
 
     elapsed = time.time() - session_start
     console.print()

@@ -426,24 +426,34 @@ class Router:
 
     @staticmethod
     def detect_all() -> dict[str, ProviderStatus]:
-        """Detect provider readiness via the Conductor-backed adapter."""
+        """Detect provider readiness via the Conductor-backed adapter.
+
+        Returns a not-installed status for every provider when the
+        Conductor CLI itself is missing, rather than propagating the
+        RuntimeError from ConductorAdapter.__init__.
+        """
+        _not_found = ProviderStatus(
+            installed=False,
+            authenticated=False,
+            install_hint="brew install autumngarage/conductor/conductor",
+            auth_hint="Conductor CLI not found on PATH",
+        )
+
+        def _detect(provider_name: str, model: str, **kw: object) -> ProviderStatus:
+            try:
+                return ConductorAdapter(
+                    provider_name=provider_name,  # type: ignore[arg-type]
+                    model=model,
+                    **kw,  # type: ignore[arg-type]
+                ).detect()
+            except RuntimeError:
+                return _not_found
+
         return {
-            "claude": ConductorAdapter(
-                provider_name="claude",
-                model="claude-sonnet-4-6",
-            ).detect(),
-            "codex": ConductorAdapter(
-                provider_name="openai",
-                model="gpt-5.4",
-            ).detect(),
-            "gemini": ConductorAdapter(
-                provider_name="gemini",
-                model="gemini-2.5-pro",
-            ).detect(),
-            "ollama": ConductorAdapter(
-                provider_name="local",
-                model="qwen2.5-coder:14b",
-            ).detect(),
+            "claude": _detect("claude", "claude-sonnet-4-6"),
+            "codex": _detect("openai", "gpt-5.4"),
+            "gemini": _detect("gemini", "gemini-2.5-pro"),
+            "ollama": _detect("local", "qwen2.5-coder:14b"),
         }
 
     def missing_local_models(self) -> list[tuple[str, str]]:
