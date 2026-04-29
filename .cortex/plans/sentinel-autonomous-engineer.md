@@ -269,12 +269,13 @@ Drop-in PR scope here:
 
 - **Rejection memory: Cortex-only source of truth.** Migrate `.sentinel/state/rejections.jsonl` to `.cortex/journal/` rejection entries. Rebuild ephemeral fast-index from journal at cycle start. Single source of truth.
 - **Cortex manifest read policy.** Define manifest budget defaults, conflict handling for contradictory journal entries, recency window, doctrine immutable-with-supersede traversal. Block on parse failure when `.cortex/` exists; `--no-memory` is the only escape hatch (silent amnesia = differentiator violation).
-- **Reviewer-side journal awareness.** Reviewer gets manifest including prior rejections + relevant journal entries. Independence rule asserted: reviewer provider differs from coder provider when alternative exists.
+- **`cortex retrieve` consumption (semantic memory at scale).** Cortex ships `cortex retrieve` — opt-in semantic search over `.cortex/` (see `autumngarage/cortex/.cortex/plans/cortex-retrieve.md`). Sentinel consumes via `cortex retrieve --json --top-k N --filter Type=...` mid-cycle, replacing manifest-stuffing for Planner / Reviewer roles. **Sentinel does not own the index.** No `src/sentinel/index/` module — the index lives in Cortex (`.cortex/.index/`, gitignored, derived). Sentinel calls `cortex retrieve` and receives top-K excerpts. Consumed only when Cortex's retrieve is actually shipped (gates on Cortex's S2 or later); fall-through is grep semantics, no behavior change.
+- **Reviewer-side journal awareness.** Reviewer gets manifest including prior rejections + semantically-relevant journal entries via `cortex retrieve`. Independence rule asserted: reviewer provider differs from coder provider when alternative exists.
 - **Per-task file-state isolation.** Define task-ID-scoped namespace for generated files; collision behavior; cleanup path. Reference `runtime/file_state.py`.
-- **Memory-usefulness gate.** Seeded prior rejection demonstrably alters planner output on the second cycle. This is the proof point for the differentiator.
+- **Memory-usefulness gate.** Seeded prior rejection demonstrably alters planner output on the second cycle. This is the proof point for the differentiator. With `cortex retrieve` shipped, the gate also tests that semantically-similar (not just keyword-matched) prior rejections are surfaced.
 - **Default Doctrine lifecycle.** `sentinel audit --doctrine` cross-checks shipped baseline against local entries; surfaces drift; never auto-rewrites.
 
-**Acceptance:** memory-usefulness gate passes on a synthetic test repo; rejection memory has one source of truth.
+**Acceptance:** memory-usefulness gate passes on a synthetic test repo; rejection memory has one source of truth; if Cortex `retrieve` shipped by Wave 2 entry, Planner/Reviewer use it; otherwise grep fallback verified.
 
 ### Wave 3 — Service mode + Railway deployment (NEW)
 
@@ -335,7 +336,7 @@ Drop-in PR scope here:
 This plan does not track per-tool task lists. Issue families filed against each repo:
 
 - **`autumngarage/sentinel`** — all Wave 0–5 work. Companion plans: `sentinel-trust-controls.md` (threat model + W1 controls), `sentinel-conductor-migration.md` (validation gates only at this point), `sentinel-cortex-t16-integration.md` (shipped follow-ups).
-- **`autumngarage/cortex`** — Phase D `cortex journal append` CLI (so Sentinel can stop embedding the cycle template literal). `cortex grep --frontmatter` filter coverage audit. Default-Doctrine seeding flow (`cortex init --seed-from`).
+- **`autumngarage/cortex`** — Phase D `cortex journal append` CLI (so Sentinel can stop embedding the cycle template literal). `cortex grep --frontmatter` filter coverage audit. Default-Doctrine seeding flow (`cortex init --seed-from`). **`cortex retrieve` semantic-memory layer** per `cortex/.cortex/plans/cortex-retrieve.md` (council-reviewed design); supersedes Cortex Doctrine 0005 #1's "not a vector store" framing — Sentinel consumes once shipped.
 - **`autumngarage/conductor`** — `consumers.md` doc; contract-test fixture for `conductor call --json` output schema; capability-axis stability (Sentinel depends on `--effort`, `--tools`, `--sandbox`, `--exec`, `--max-turns`, `--timeout-sec`).
 - **`autumngarage/touchstone`** — `open-pr.sh` reads `.sentinel/runs/<latest>.md` PR-body anchors when on a sentinel-authored branch; reviewer cascade includes the cycle journal entry as context when reviewing sentinel-authored diffs.
 
