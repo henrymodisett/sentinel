@@ -1,7 +1,9 @@
 # Sentinel — Production-Ready Plan
 
+> **2026-04-29 — MERGED INTO MASTER.** The release gates and acceptance-criteria language from this plan have been folded into `.cortex/plans/sentinel-autonomous-engineer.md` (the master product plan). Workstream details (WS-1 routing & budget, WS-2 pipeline completion, WS-3 UX & safety, WS-4 observability, WS-5 distribution) are partly shipped and partly reframed by the new Wave 0–5 sequencing — read the master plan for the live roadmap, this file for the original scoping context.
+
 **Author:** drafted from the 2026-04-16 dogfood session
-**Status:** proposed
+**Status:** merged into `.cortex/plans/sentinel-autonomous-engineer.md` (2026-04-29)
 **Owner:** Henry
 
 ## What "production-ready" means here

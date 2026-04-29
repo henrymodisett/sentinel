@@ -1,14 +1,17 @@
 ---
-Status: active
+Status: shipped
 Written: 2026-04-18
 Author: human
 Goal-hash: e754c76b
 Updated-by:
   - 2026-04-18T17:00 human (created; scoping T1.6 after R4 small items shipped)
+  - 2026-04-29 claude-code (status flipped to `shipped`; verified: write path in `src/sentinel/integrations/cortex.py:572-689`, hook in `src/sentinel/cli/work_cmd.py:407-479`, config in `src/sentinel/config/schema.py:294-314`, init prompt in `src/sentinel/cli/init_cmd.py:488-508`. Follow-ups recorded below remain open: shared template contract + migration to `cortex journal append` once Cortex Phase D ships.)
 Cites: doctrine/0001-why-autumn-garage-exists, plans/autumn-mail-dogfood, https://github.com/autumngarage/cortex/blob/main/.cortex/protocol.md, https://github.com/autumngarage/cortex/blob/main/.cortex/templates/journal/sentinel-cycle.md, https://github.com/autumngarage/sentinel/pull/73
 ---
 
 # Sentinel writes Cortex journal entries at cycle end (Protocol T1.6)
+
+> **2026-04-29 status — SHIPPED.** Verified against HEAD; code pointers in the frontmatter Updated-by entry. The original "why this plan is in autumn-garage" meta section at the bottom is now obsolete (the plan moved here 2026-04-28); leaving as historical context. Open follow-ups remain in § Follow-ups (deferred): migrate to `cortex journal append` when Cortex Phase D ships, and adopt shared-template-location contract.
 
 > When `sentinel work` finishes a cycle and writes `.sentinel/runs/<timestamp>.md`, it also appends a corresponding `journal/<date>-sentinel-cycle-<id>.md` entry to the project's `.cortex/journal/` — iff `.cortex/` is present. First real exercise of the Cortex Protocol's Tier-1 write-triggers in practice. Cortex Phase E kickoff.
 
