@@ -28,6 +28,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from sentinel.banner import SUBTITLE_INIT, print_banner, sentinel_version
 from sentinel.config.schema import (
     ProviderName,
     RoleName,
@@ -613,6 +614,11 @@ def run_init(
     ``seed_defaults=False`` skips seeding the Sentinel baseline Doctrine
     pack into ``.cortex/doctrine/`` (``--no-seed-defaults`` flag).
     """
+    # Splash on entry except when called as an implicit auto-init from
+    # `sentinel work` (which already printed its own banner).
+    if not implicit:
+        print_banner(SUBTITLE_INIT, sentinel_version())
+
     project = Path(project_path or os.getcwd()).resolve()
     console.print(f"\n[bold]Sentinel Setup[/bold] — {project.name}\n")
 
