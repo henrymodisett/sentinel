@@ -28,6 +28,7 @@ import click
 from rich.console import Console
 from rich.panel import Panel
 
+from sentinel.banner import SUBTITLE_WORK, print_banner, sentinel_version
 from sentinel.budget import check_budget, check_rolling_budgets, record_spend
 from sentinel.cli.cycle_cmd import _action_to_work_item, _current_branch
 from sentinel.cli.init_cmd import run_init
@@ -374,6 +375,9 @@ async def run_work(
     """
     if every is not None and schedule_interval:
         raise click.UsageError("--schedule and --every are mutually exclusive")
+
+    # Splash on cycle start (Autumn Garage Doctrine 0007 branding).
+    print_banner(SUBTITLE_WORK, sentinel_version())
 
     if every is None and not schedule_interval:
         # Single cycle — just run it and return

@@ -1,3 +1,15 @@
+```text
+ ____             _   _            _
+/ ___|  ___ _ __ | |_(_)_ __   ___| |
+\___ \ / _ \ '_ \| __| | '_ \ / _ \ |
+ ___) |  __/ | | | |_| | | | |  __/ |
+|____/ \___|_| |_|\__|_|_| |_|\___|_|
+```
+
+> *Autonomous meta-agent for software projects — assess, plan, delegate, review.*
+>
+> by **[Autumn Garage](https://github.com/autumngarage/autumn-garage)** · alongside [Touchstone](https://github.com/autumngarage/touchstone) · [Cortex](https://github.com/autumngarage/cortex) · [Conductor](https://github.com/autumngarage/conductor)
+
 # Sentinel
 
 **Autonomous meta-agent for software projects.** One command — `sentinel work` — and it figures out what to do next: scans the codebase, generates project-specific analytical lenses, plans work, dispatches coding agents, reviews the output.
