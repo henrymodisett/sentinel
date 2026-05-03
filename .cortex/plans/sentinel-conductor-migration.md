@@ -1,11 +1,12 @@
 ---
-Status: active
+Status: shipped — validation gates remain
 Written: 2026-04-24
 Author: claude-code (Henry Modisett, @henry@perplexity.ai)
 Goal-hash: sen2cdr01
 Updated-by:
   - 2026-04-24T01:30 claude-code (initial plan — Slice A brew hygiene shipped, Slices B-E scoped, seam=Python-import)
   - 2026-04-28 claude-code (moved here from autumn-garage per house rule; Slice B + Key design decisions revised: seam = subprocess, not import)
+  - 2026-04-29 claude-code (status flipped to `shipped — validation gates remain`; Slices B-E confirmed shipped against HEAD: no native providers, no git-ref pin, subprocess adapter complete; remaining work is contract-test fixture per `sentinel-autonomous-engineer.md` Wave 1)
 Cites:
   - autumn-garage/.cortex/plans/sentinel-autonomous-engineer.md (cross-cutting decision 4 — subprocess seam)
   - autumn-garage/.cortex/plans/touchstone-conductor-integration
@@ -19,6 +20,8 @@ Cites:
 # Sentinel → Conductor migration
 
 > Collapse sentinel's own `src/sentinel/providers/` onto conductor. Sentinel keeps its role loops and high-level contracts; every LLM call underneath becomes a `conductor call` subprocess invocation. Completes the trio→quartet→collapse arc started with touchstone v2.0.
+
+> **2026-04-29 status — SHIPPED, validation gates remain.** Verified against HEAD: `src/sentinel/providers/` contains only `__init__.py`, `conductor_adapter.py`, `interface.py`, `router.py` (no `claude.py` / `openai.py` / `gemini.py` / `local.py`). `pyproject.toml` has no `conductor @ git+...` dependency. Subprocess adapter delegates all LLM calls. Slices A through E are landed in code. **What remains:** the contract-test fixture asserting `conductor call --json` output schema (so Sentinel fails predictably on Conductor drift) — tracked in `sentinel-autonomous-engineer.md` Wave 1 + sentinel-trust-controls T3 gap. The original slice plan and risk register below are retained for historical context and as the validation checklist.
 
 > **2026-04-28 update.** Plan moved from `autumn-garage/.cortex/plans/` to this repo (per "tool-specific plans live in tool repos" house rule). The seam decision flipped from Python import → per-call subprocess; rationale captured in autumn-garage's `sentinel-autonomous-engineer.md` § Cross-cutting decision 4 (research-backed: ~2% overhead at cycle frequency; daemon patterns like LSP/MCP apply at keystroke frequency, not ours). Slice B's adapter shape is unchanged; its *implementation* shifts to `subprocess.run(['conductor', 'call', ...])` from `importlib.import_module`. The git-ref pin in `pyproject.toml:13` is dropped as part of Slice B. Slices C/D/E unchanged in spirit. Tracking issue: autumngarage/sentinel#89.
 

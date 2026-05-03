@@ -1,9 +1,11 @@
 # Sentinel — Conductor Migration Plan
 
+> **2026-04-29 — SUPERSEDED.** This plan's import-based seam design was overruled before implementation; the subprocess-seam decision lives in `.cortex/plans/sentinel-conductor-migration.md` (the in-repo successor). This file is retained for historical context only — read it for the "Why now" framing and the original three drivers, but do not act on its design or status claims. The cross-tool coordination decisions referenced as "upstream" no longer live in autumn-garage either; they're inlined into `.cortex/plans/sentinel-autonomous-engineer.md`.
+
 **Author:** drafted 2026-04-24 during garage-wide post-v0.3.3 audit
-**Status:** complete in Sentinel (Slices A-E shipped 2026-04-24)
+**Status:** superseded by `.cortex/plans/sentinel-conductor-migration.md` (2026-04-29)
 **Owner:** Henry
-**Upstream plan of record:** [`autumn-garage/.cortex/plans/sentinel-conductor-migration.md`](https://github.com/autumngarage/autumn-garage/blob/main/.cortex/plans/sentinel-conductor-migration.md) — cross-tool coordination decisions live there; this file is the sentinel-local actionable view.
+**Upstream plan of record:** [`.cortex/plans/sentinel-conductor-migration.md`](../.cortex/plans/sentinel-conductor-migration.md) — current in-repo successor.
 
 ## What this does
 
